@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /invoice_scanner_service/app
 
 RUN pip install --upgrade pip
 COPY invoice_scanner_service/requirements.txt .
@@ -20,4 +20,4 @@ RUN mkdir -p /app/data/uploads /app/data/exports
 
 EXPOSE 8000
 
-CMD ["python", "-m", "app.main"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
