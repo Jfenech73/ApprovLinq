@@ -39,6 +39,8 @@ def upload_pdf(batch_id: UUID, file: UploadFile = File(...), db: Session = Depen
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
     dest = settings.upload_path / f"{batch_id}.pdf"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
     with dest.open("wb") as f:
         f.write(file.file.read())
 
@@ -70,24 +72,24 @@ def process_batch(batch_id: UUID, db: Session = Depends(get_db)):
     for r in results:
         row = InvoiceRow(
             batch_id=batch_id,
-            page_no=r.page_no,
-            supplier_name=r.supplier_name,
-            invoice_number=r.invoice_number,
-            invoice_date=r.invoice_date,
-            description=r.description,
-            line_items_raw=r.line_items_raw,
-            net_amount=r.net_amount,
-            vat_amount=r.vat_amount,
-            total_amount=r.total_amount,
-            currency=r.currency,
-            tax_code=r.tax_code,
-            method_used=r.method_used,
-            confidence_score=r.confidence_score,
-            validation_status=r.validation_status,
-            review_required=r.review_required,
-            header_raw=r.header_raw,
-            totals_raw=r.totals_raw,
-            page_text_raw=r.page_text_raw,
+            page_no=r.get("page_no"),
+            supplier_name=r.get("supplier_name"),
+            invoice_number=r.get("invoice_number"),
+            invoice_date=r.get("invoice_date"),
+            description=r.get("description"),
+            line_items_raw=r.get("line_items_raw"),
+            net_amount=r.get("net_amount"),
+            vat_amount=r.get("vat_amount"),
+            total_amount=r.get("total_amount"),
+            currency=r.get("currency"),
+            tax_code=r.get("tax_code"),
+            method_used=r.get("method_used"),
+            confidence_score=r.get("confidence_score"),
+            validation_status=r.get("validation_status"),
+            review_required=r.get("review_required", False),
+            header_raw=r.get("header_raw"),
+            totals_raw=r.get("totals_raw"),
+            page_text_raw=r.get("page_text_raw"),
         )
         db.add(row)
 
@@ -148,5 +150,5 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db)):
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'}
     )

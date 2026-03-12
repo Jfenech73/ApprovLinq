@@ -328,3 +328,6 @@ def extract_rows_from_pdf(pdf_path: str, openai_api_key: str | None = None) -> l
         rows.append(row)
 
     return rows
+
+def process_pdf(pdf_path, openai_api_key: str | None = None) -> list[dict[str, Any]]:
+    return extract_rows_from_pdf(str(pdf_path), openai_api_key=openai_api_key)
