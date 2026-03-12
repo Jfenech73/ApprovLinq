@@ -17,6 +17,6 @@ openai==1.107.2
 
 # PaddleOCR support
 paddleocr==2.8.1
-paddlepaddle==2.6.1
+paddlepaddle==2.6.2
 numpy==1.26.4
 opencv-python-headless==4.10.0.84
