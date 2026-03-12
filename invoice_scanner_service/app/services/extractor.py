@@ -13,29 +13,35 @@ from app.config import settings
 from app.services.ocr import OCRSpaceBackend, PaddleOCRBackend
 
 
-MIN_NATIVE_TEXT_LEN = 80
-MIN_MEANINGFUL_TEXT_LEN = 40
-
-
 def clean_text(text: str) -> str:
     text = text.replace("\x00", " ")
+    text = text.replace("|", " ")
+    text = text.replace("€", " EUR ")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
+def count_meaningful_chars(text: str) -> int:
+    return len(re.findall(r"[A-Za-z0-9]", text or ""))
+
+
+def looks_meaningful(text: str, threshold: int = 40) -> bool:
+    return count_meaningful_chars(text) >= threshold
+
+
 def extract_native_pdf_pages(pdf_path: str | Path) -> list[str]:
     doc = fitz.open(str(pdf_path))
-    pages: list[str] = []
     try:
+        pages: list[str] = []
         for page in doc:
             blocks = page.get_text("blocks")
             blocks = sorted(blocks, key=lambda b: (round(b[1], 1), round(b[0], 1)))
             text = "\n".join(b[4].strip() for b in blocks if len(b) > 4 and b[4].strip())
             pages.append(clean_text(text))
+        return pages
     finally:
         doc.close()
-    return pages
 
 
 def get_ocr_backend():
@@ -44,11 +50,65 @@ def get_ocr_backend():
     if provider == "none":
         return None
     if provider == "ocr_space":
-        return OCRSpaceBackend()
+        try:
+            return OCRSpaceBackend()
+        except Exception:
+            return None
     if provider == "paddleocr":
-        return PaddleOCRBackend()
+        try:
+            return PaddleOCRBackend()
+        except Exception:
+            return None
 
-    raise RuntimeError(f"Unsupported OCR provider: {provider}")
+    return None
+
+
+def choose_best_text(native_text: str, ocr_text: str) -> tuple[str, str]:
+    native_score = count_meaningful_chars(native_text)
+    ocr_score = count_meaningful_chars(ocr_text)
+
+    if ocr_score > native_score:
+        return ocr_text, "ocr"
+    return native_text, "native_text"
+
+
+def extract_pdf_pages(pdf_path: str | Path) -> list[dict[str, Any]]:
+    pdf_path = Path(pdf_path)
+    native_pages = extract_native_pdf_pages(pdf_path)
+    ocr_backend = get_ocr_backend()
+
+    output: list[dict[str, Any]] = []
+
+    for idx, native_text in enumerate(native_pages):
+        final_text = native_text
+        method = "native_text"
+        ocr_error = None
+
+        should_try_ocr = not looks_meaningful(native_text)
+
+        if should_try_ocr and ocr_backend is not None:
+            try:
+                ocr_text = clean_text(
+                    ocr_backend.extract_text_from_pdf_page(pdf_path, idx, scale=3.5)
+                )
+
+                if ocr_text:
+                    chosen, source = choose_best_text(native_text, ocr_text)
+                    final_text = chosen
+                    method = f"ocr_{ocr_backend.name}" if source == "ocr" else "native_text"
+            except Exception as e:
+                ocr_error = str(e)
+
+        output.append(
+            {
+                "page_no": idx + 1,
+                "text": final_text,
+                "text_source": method,
+                "ocr_error": ocr_error,
+            }
+        )
+
+    return output
 
 
 def parse_amount(value: str | None) -> float | None:
@@ -57,17 +117,15 @@ def parse_amount(value: str | None) -> float | None:
 
     raw = value.strip().replace("€", "").replace("EUR", "").replace(" ", "")
 
-    # Handle European decimal format like 1.234,56 and standard 1,234.56
-    if "," in raw and "." in raw:
-        if raw.rfind(",") > raw.rfind("."):
-            raw = raw.replace(".", "").replace(",", ".")
-        else:
-            raw = raw.replace(",", "")
-    elif "," in raw:
-        if raw.count(",") == 1 and len(raw.split(",")[-1]) in (2, 3):
-            raw = raw.replace(",", ".")
-        else:
-            raw = raw.replace(",", "")
+    # Handle common EU formatting:
+    # 1.234,56 -> 1234.56
+    if re.match(r"^\d{1,3}(\.\d{3})+,\d{2}$", raw):
+        raw = raw.replace(".", "").replace(",", ".")
+    # 1234,56 -> 1234.56
+    elif re.match(r"^\d+,\d{2}$", raw):
+        raw = raw.replace(",", ".")
+    else:
+        raw = raw.replace(",", "")
 
     try:
         return float(Decimal(raw))
@@ -86,7 +144,6 @@ def parse_date(value: str | None):
         "%d.%m.%Y",
         "%d/%m/%y",
         "%d-%m-%y",
-        "%d.%m.%y",
     ]
     for fmt in patterns:
         try:
@@ -108,6 +165,7 @@ def find_supplier_name(text: str) -> str | None:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if not lines:
         return None
+
     for line in lines[:8]:
         if len(line) > 2 and not re.search(r"invoice|tax|vat|date|page", line, re.I):
             return line[:200]
@@ -277,9 +335,9 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
     )
     invoice_date = parse_date(invoice_date_raw)
 
-    net_raw = first_match([r"(?:subtotal|net amount|net)\s*[:\-]?\s*€?\s*([0-9.,]+)"], text)
-    vat_raw = first_match([r"(?:vat|tax)\s*[:\-]?\s*€?\s*([0-9.,]+)"], text)
-    total_raw = first_match([r"(?:amount due|grand total|total due|total)\s*[:\-]?\s*€?\s*([0-9.,]+)"], text)
+    net_raw = first_match([r"(?:subtotal|net amount|net)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"], text)
+    vat_raw = first_match([r"(?:vat|tax)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"], text)
+    total_raw = first_match([r"(?:amount due|grand total|total due|total)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"], text)
 
     net_amount = parse_amount(net_raw)
     vat_amount = parse_amount(vat_raw)
@@ -338,95 +396,31 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
     }
 
 
-def is_meaningful_row(row: dict[str, Any]) -> bool:
-    return any(
-        [
-            row.get("supplier_name"),
-            row.get("invoice_number"),
-            row.get("invoice_date"),
-            row.get("line_items_raw"),
-            row.get("total_amount") is not None,
-            len((row.get("page_text_raw") or "").strip()) >= MIN_MEANINGFUL_TEXT_LEN,
-        ]
-    )
-
-
-def score_row_quality(row: dict[str, Any]) -> int:
-    score = 0
-    if row.get("supplier_name"):
-        score += 2
-    if row.get("invoice_number"):
-        score += 3
-    if row.get("invoice_date"):
-        score += 2
-    if row.get("line_items_raw"):
-        score += 2
-    if row.get("total_amount") is not None:
-        score += 3
-    score += min(len((row.get("page_text_raw") or "").strip()) // 80, 3)
-    return score
+def row_has_meaningful_data(row: dict[str, Any]) -> bool:
+    return any([
+        row.get("supplier_name"),
+        row.get("invoice_number"),
+        row.get("invoice_date"),
+        row.get("line_items_raw"),
+        row.get("net_amount") is not None,
+        row.get("vat_amount") is not None,
+        row.get("total_amount") is not None,
+        looks_meaningful(row.get("page_text_raw") or "", threshold=60),
+    ])
 
 
 def extract_rows_from_pdf(pdf_path: str | Path, openai_api_key: str | None = None) -> list[dict[str, Any]]:
-    pdf_path = Path(pdf_path)
-    pages = extract_native_pdf_pages(pdf_path)
-
-    try:
-        ocr_backend = get_ocr_backend()
-    except Exception as exc:
-        ocr_backend = None
-        backend_init_error = str(exc)
-    else:
-        backend_init_error = None
-
     rows: list[dict[str, Any]] = []
+    pages = extract_pdf_pages(pdf_path)
 
-    for idx, native_text in enumerate(pages):
-        native_row = regex_extract(native_text, openai_api_key=openai_api_key)
-        native_row["page_no"] = idx + 1
-        native_row["method_used"] = "native_text"
-        native_row["ocr_error"] = None
-        native_row["ocr_attempted"] = False
+    for page in pages:
+        row = regex_extract(page["text"], openai_api_key=openai_api_key)
+        row["page_no"] = page["page_no"]
+        row["method_used"] = page["text_source"]
+        row["ocr_error"] = page.get("ocr_error")
 
-        best_row = native_row
-        ocr_error = backend_init_error
-
-        should_try_ocr = (
-            ocr_backend is not None
-            and (
-                len((native_text or "").strip()) < MIN_NATIVE_TEXT_LEN
-                or not is_meaningful_row(native_row)
-            )
-        )
-
-        if should_try_ocr:
-            try:
-                ocr_text = clean_text(
-                    ocr_backend.extract_text_from_pdf_page(pdf_path, idx, scale=2.5)
-                )
-                ocr_row = regex_extract(ocr_text, openai_api_key=openai_api_key)
-                ocr_row["page_no"] = idx + 1
-                ocr_row["method_used"] = f"ocr_{ocr_backend.name}"
-                ocr_row["ocr_error"] = None
-                ocr_row["ocr_attempted"] = True
-
-                if score_row_quality(ocr_row) >= score_row_quality(native_row):
-                    best_row = ocr_row
-                else:
-                    native_row["ocr_attempted"] = True
-                    best_row = native_row
-            except Exception as exc:
-                ocr_error = str(exc)
-                native_row["ocr_attempted"] = True
-                native_row["ocr_error"] = ocr_error
-                best_row = native_row
-        elif backend_init_error:
-            native_row["ocr_error"] = backend_init_error
-
-        if ocr_error and best_row.get("method_used") == "native_text":
-            best_row["ocr_error"] = ocr_error
-
-        rows.append(best_row)
+        if row_has_meaningful_data(row):
+            rows.append(row)
 
     return rows
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
+
 from io import BytesIO
 from pathlib import Path
-import json
 
 import pypdfium2 as pdfium
 import requests
@@ -12,19 +12,23 @@ from app.config import settings
 class OCRBackend:
     name = "base"
 
-    def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 2.5) -> str:
+    def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 3.5) -> str:
         raise NotImplementedError
 
     @staticmethod
-    def render_pdf_page_to_png_bytes(pdf_path: Path, page_index: int, scale: float = 2.5) -> bytes:
+    def render_pdf_page_to_png_bytes(pdf_path: Path, page_index: int, scale: float = 3.5) -> bytes:
         pdf = pdfium.PdfDocument(str(pdf_path))
-        page = pdf.get_page(page_index)
-        image = page.render(scale=scale).to_pil()
-        page.close()
-        pdf.close()
-        buf = BytesIO()
-        image.convert("RGB").save(buf, format="PNG")
-        return buf.getvalue()
+        try:
+            page = pdf.get_page(page_index)
+            try:
+                image = page.render(scale=scale).to_pil()
+                buf = BytesIO()
+                image.convert("RGB").save(buf, format="PNG")
+                return buf.getvalue()
+            finally:
+                page.close()
+        finally:
+            pdf.close()
 
 
 class OCRSpaceBackend(OCRBackend):
@@ -34,11 +38,14 @@ class OCRSpaceBackend(OCRBackend):
         if not settings.ocr_space_api_key:
             raise RuntimeError("OCR.space API key is missing. Set OCR_SPACE_API_KEY.")
 
-    def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 2.5) -> str:
+    def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 3.5) -> str:
         image_bytes = self.render_pdf_page_to_png_bytes(pdf_path, page_index, scale=scale)
+
         files = {
             "file": (f"page_{page_index + 1}.png", image_bytes, "image/png")
         }
+
+        # OCR.space works best here with engine 2 and auto language detection
         data = {
             "apikey": settings.ocr_space_api_key,
             "language": settings.ocr_space_language,
@@ -46,6 +53,7 @@ class OCRSpaceBackend(OCRBackend):
             "scale": str(settings.ocr_space_scale).lower(),
             "OCREngine": str(settings.ocr_space_ocr_engine),
         }
+
         resp = requests.post(
             settings.ocr_space_endpoint,
             files=files,
@@ -66,6 +74,7 @@ class OCRSpaceBackend(OCRBackend):
             text = (item or {}).get("ParsedText")
             if text:
                 lines.append(text)
+
         return "\n".join(lines).strip()
 
 
@@ -77,16 +86,27 @@ class PaddleOCRBackend(OCRBackend):
             from paddleocr import PaddleOCR  # type: ignore
         except Exception as e:
             raise RuntimeError("PaddleOCR is not installed. Install it and rebuild the image.") from e
-        self.ocr = PaddleOCR(use_angle_cls=True, lang="en")
 
-    def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 2.5) -> str:
-        image_bytes = self.render_pdf_page_to_png_bytes(pdf_path, page_index, scale=scale)
+        self.ocr = PaddleOCR(
+            use_angle_cls=True,
+            lang="en",
+            show_log=False,
+        )
+
+    def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 3.5) -> str:
         from PIL import Image
-        image = Image.open(BytesIO(image_bytes))
+
+        image_bytes = self.render_pdf_page_to_png_bytes(pdf_path, page_index, scale=scale)
+        image = Image.open(BytesIO(image_bytes)).convert("RGB")
+
         result = self.ocr.ocr(image)
-        lines = []
+
+        lines: list[str] = []
         for block in result or []:
             for line in block or []:
                 if len(line) > 1 and line[1]:
-                    lines.append(str(line[1][0]))
-        return "\n".join(lines)
+                    text = str(line[1][0]).strip()
+                    if text:
+                        lines.append(text)
+
+        return "\n".join(lines).strip()
