@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -53,14 +54,12 @@ def get_ocr_backend():
         return OCRSpaceBackend()
     if provider == "paddleocr":
         return PaddleOCRBackend()
-
     return None
 
 
 def choose_best_text(native_text: str, ocr_text: str) -> tuple[str, str]:
     native_score = count_meaningful_chars(native_text)
     ocr_score = count_meaningful_chars(ocr_text)
-
     if ocr_score > native_score:
         return ocr_text, "ocr"
     return native_text, "native_text"
@@ -85,7 +84,6 @@ def extract_pdf_pages(pdf_path: str | Path) -> list[dict[str, Any]]:
                 ocr_text = clean_text(
                     ocr_backend.extract_text_from_pdf_page(pdf_path, idx, scale=3.5)
                 )
-
                 if ocr_text:
                     chosen, source = choose_best_text(native_text, ocr_text)
                     final_text = chosen
@@ -157,17 +155,20 @@ def find_supplier_name(text: str) -> str | None:
     if not lines:
         return None
 
-    for line in lines[:8]:
-        if len(line) > 2 and not re.search(r"invoice|tax|vat|date|page", line, re.I):
+    for line in lines[:10]:
+        if len(line) > 2 and not re.search(r"invoice|tax|vat|date|page|customer", line, re.I):
             return line[:200]
     return None
 
 
 def extract_totals_region(text: str) -> str:
     lines = text.splitlines()
-    total_markers = ("subtotal", "vat", "tax", "total", "gross", "net amount", "amount due")
+    total_markers = (
+        "subtotal", "sub total", "vat", "tax", "total", "gross", "net amount",
+        "amount due", "balance due", "grand total", "total due"
+    )
     selected = [ln for ln in lines if any(m in ln.lower() for m in total_markers)]
-    return "\n".join(selected[:20]).strip()
+    return "\n".join(selected[:25]).strip()
 
 
 def extract_candidate_line_items(text: str) -> str:
@@ -182,6 +183,7 @@ def extract_candidate_line_items(text: str) -> str:
         r"\btotal\b",
         r"\bsubtotal\b",
         r"\bamount due\b",
+        r"\bbalance due\b",
         r"\biban\b",
         r"\bbic\b",
         r"\bpage\b",
@@ -215,7 +217,7 @@ def extract_candidate_line_items(text: str) -> str:
             kept.append(line)
 
     kept = list(dict.fromkeys(kept))
-    return "\n".join(kept[:20]).strip()
+    return "\n".join(kept[:25]).strip()
 
 
 def limit_to_20_words(text: str) -> str:
@@ -308,6 +310,73 @@ def summarise_line_items_with_openai(
     return None
 
 
+def llm_extract_invoice_fields(text: str, api_key: str, model: str = "gpt-4.1-mini") -> dict[str, Any] | None:
+    if not api_key or not text.strip():
+        return None
+
+    prompt = (
+        "Extract invoice data from the text below.\n"
+        "Return JSON only with these keys:\n"
+        "supplier_name, invoice_number, invoice_date, description, "
+        "net_amount, vat_amount, total_amount, currency\n"
+        "Rules:\n"
+        "- invoice_date must be DD/MM/YYYY or null\n"
+        "- amounts must be numbers or null\n"
+        "- currency should be a 3-letter code if clear, otherwise EUR if euro is implied, else null\n"
+        "- description should be short business English max 20 words\n"
+        "- do not invent values\n\n"
+        f"Invoice text:\n{text[:12000]}"
+    )
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "input": prompt,
+                "max_output_tokens": 300,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        text_parts = []
+        for item in data.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") in ("output_text", "text"):
+                    txt = content.get("text", "")
+                    if txt:
+                        text_parts.append(txt)
+
+        raw = " ".join(text_parts).strip()
+        if not raw:
+            return None
+
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        if not match:
+            return None
+
+        payload = json.loads(match.group(0))
+
+        return {
+            "supplier_name": payload.get("supplier_name"),
+            "invoice_number": payload.get("invoice_number"),
+            "invoice_date": parse_date(payload.get("invoice_date")) if payload.get("invoice_date") else None,
+            "description": limit_to_20_words(payload.get("description") or "Invoice goods or services"),
+            "net_amount": parse_amount(str(payload.get("net_amount"))) if payload.get("net_amount") is not None else None,
+            "vat_amount": parse_amount(str(payload.get("vat_amount"))) if payload.get("vat_amount") is not None else None,
+            "total_amount": parse_amount(str(payload.get("total_amount"))) if payload.get("total_amount") is not None else None,
+            "currency": payload.get("currency") or "EUR",
+        }
+    except Exception:
+        return None
+
+
 def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any]:
     invoice_number = first_match(
         [
@@ -326,9 +395,9 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
     )
     invoice_date = parse_date(invoice_date_raw)
 
-    net_raw = first_match([r"(?:subtotal|net amount|net)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"], text)
+    net_raw = first_match([r"(?:subtotal|sub total|net amount|net)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"], text)
     vat_raw = first_match([r"(?:vat|tax)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"], text)
-    total_raw = first_match([r"(?:amount due|grand total|total due|total)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"], text)
+    total_raw = first_match([r"(?:amount due|balance due|grand total|total due|total)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"], text)
 
     net_amount = parse_amount(net_raw)
     vat_amount = parse_amount(vat_raw)
@@ -344,6 +413,27 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
         ai_desc = summarise_line_items_with_openai(line_items_raw, openai_api_key) if openai_api_key else None
         if ai_desc:
             description = ai_desc
+
+    # LLM fallback for invoices where OCR text exists but regex misses the fields
+    weak_regex = not any([
+        supplier_name,
+        invoice_number,
+        invoice_date,
+        net_amount is not None,
+        vat_amount is not None,
+        total_amount is not None,
+    ])
+
+    if weak_regex and openai_api_key and looks_meaningful(text, threshold=25):
+        llm = llm_extract_invoice_fields(text, openai_api_key, model=settings.openai_model)
+        if llm:
+            supplier_name = supplier_name or llm.get("supplier_name")
+            invoice_number = invoice_number or llm.get("invoice_number")
+            invoice_date = invoice_date or llm.get("invoice_date")
+            description = description or llm.get("description")
+            net_amount = net_amount if net_amount is not None else llm.get("net_amount")
+            vat_amount = vat_amount if vat_amount is not None else llm.get("vat_amount")
+            total_amount = total_amount if total_amount is not None else llm.get("total_amount")
 
     if not description:
         description = "Invoice goods or services"
@@ -388,7 +478,7 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
 
 
 def row_has_meaningful_data(row: dict[str, Any]) -> bool:
-    return any([
+    if any([
         row.get("supplier_name"),
         row.get("invoice_number"),
         row.get("invoice_date"),
@@ -396,8 +486,11 @@ def row_has_meaningful_data(row: dict[str, Any]) -> bool:
         row.get("net_amount") is not None,
         row.get("vat_amount") is not None,
         row.get("total_amount") is not None,
-        looks_meaningful(row.get("page_text_raw") or "", threshold=60),
-    ])
+    ]):
+        return True
+
+    text = row.get("page_text_raw") or ""
+    return count_meaningful_chars(text) > 15
 
 
 def extract_rows_from_pdf(pdf_path: str | Path, openai_api_key: str | None = None) -> list[dict[str, Any]]:
