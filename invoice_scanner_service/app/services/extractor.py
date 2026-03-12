@@ -3,10 +3,14 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 
 import fitz  # PyMuPDF
 import requests
+
+from app.config import settings
+from app.services.ocr import OCRSpaceBackend, PaddleOCRBackend
 
 
 def clean_text(text: str) -> str:
@@ -16,15 +20,70 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-def extract_pdf_pages(pdf_path: str) -> list[str]:
-    doc = fitz.open(pdf_path)
-    pages = []
+def extract_native_pdf_pages(pdf_path: str | Path) -> list[str]:
+    doc = fitz.open(str(pdf_path))
+    pages: list[str] = []
     for page in doc:
         blocks = page.get_text("blocks")
         blocks = sorted(blocks, key=lambda b: (round(b[1], 1), round(b[0], 1)))
         text = "\n".join(b[4].strip() for b in blocks if len(b) > 4 and b[4].strip())
         pages.append(clean_text(text))
+    doc.close()
     return pages
+
+
+def get_ocr_backend():
+    provider = (settings.ocr_provider or "none").strip().lower()
+
+    if provider == "none":
+        return None
+    if provider == "ocr_space":
+        try:
+            return OCRSpaceBackend()
+        except Exception:
+            return None
+    if provider == "paddleocr":
+        try:
+            return PaddleOCRBackend()
+        except Exception:
+            return None
+
+    return None
+
+
+def extract_pdf_pages(pdf_path: str | Path) -> list[dict[str, Any]]:
+    pdf_path = Path(pdf_path)
+    native_pages = extract_native_pdf_pages(pdf_path)
+    ocr_backend = get_ocr_backend()
+
+    output: list[dict[str, Any]] = []
+
+    for idx, native_text in enumerate(native_pages):
+        text = native_text
+        method = "native_text"
+
+        # Fallback to OCR if native text looks empty / too short
+        if len((native_text or "").strip()) < 30 and ocr_backend is not None:
+            try:
+                ocr_text = clean_text(
+                    ocr_backend.extract_text_from_pdf_page(pdf_path, idx, scale=2.5)
+                )
+                if ocr_text:
+                    text = ocr_text
+                    method = f"ocr_{ocr_backend.name}"
+            except Exception:
+                # keep native text if OCR fails
+                pass
+
+        output.append(
+            {
+                "page_no": idx + 1,
+                "text": text,
+                "text_source": method,
+            }
+        )
+
+    return output
 
 
 def parse_amount(value: str | None) -> float | None:
@@ -131,6 +190,11 @@ def extract_candidate_line_items(text: str) -> str:
     return "\n".join(kept[:20]).strip()
 
 
+def limit_to_20_words(text: str) -> str:
+    words = re.findall(r"\S+", text.strip())
+    return " ".join(words[:20]).strip()
+
+
 def summarise_line_items_rule_based(line_items_text: str) -> str:
     text = line_items_text.lower()
 
@@ -158,11 +222,6 @@ def summarise_line_items_rule_based(line_items_text: str) -> str:
         return limit_to_20_words(joined)
 
     return "Invoice goods or services"
-
-
-def limit_to_20_words(text: str) -> str:
-    words = re.findall(r"\S+", text.strip())
-    return " ".join(words[:20]).strip()
 
 
 def summarise_line_items_with_openai(
@@ -239,24 +298,9 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
     )
     invoice_date = parse_date(invoice_date_raw)
 
-    net_raw = first_match(
-        [
-            r"(?:subtotal|net amount|net)\s*[:\-]?\s*€?\s*([0-9.,]+)",
-        ],
-        text,
-    )
-    vat_raw = first_match(
-        [
-            r"(?:vat|tax)\s*[:\-]?\s*€?\s*([0-9.,]+)",
-        ],
-        text,
-    )
-    total_raw = first_match(
-        [
-            r"(?:amount due|grand total|total due|total)\s*[:\-]?\s*€?\s*([0-9.,]+)",
-        ],
-        text,
-    )
+    net_raw = first_match([r"(?:subtotal|net amount|net)\s*[:\-]?\s*€?\s*([0-9.,]+)"], text)
+    vat_raw = first_match([r"(?:vat|tax)\s*[:\-]?\s*€?\s*([0-9.,]+)"], text)
+    total_raw = first_match([r"(?:amount due|grand total|total due|total)\s*[:\-]?\s*€?\s*([0-9.,]+)"], text)
 
     net_amount = parse_amount(net_raw)
     vat_amount = parse_amount(vat_raw)
@@ -276,9 +320,7 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
     if not description:
         description = "Invoice goods or services"
 
-    method_used = "native_text_regex"
     confidence = 0.0
-
     if supplier_name:
         confidence += 0.15
     if invoice_number:
@@ -308,7 +350,6 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
         "total_amount": total_amount,
         "currency": "EUR",
         "tax_code": None,
-        "method_used": method_used,
         "confidence_score": confidence,
         "validation_status": validation_status,
         "review_required": review_required,
@@ -318,16 +359,18 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
     }
 
 
-def extract_rows_from_pdf(pdf_path: str, openai_api_key: str | None = None) -> list[dict[str, Any]]:
+def extract_rows_from_pdf(pdf_path: str | Path, openai_api_key: str | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     pages = extract_pdf_pages(pdf_path)
 
-    for idx, text in enumerate(pages, start=1):
-        row = regex_extract(text, openai_api_key=openai_api_key)
-        row["page_no"] = idx
+    for page in pages:
+        row = regex_extract(page["text"], openai_api_key=openai_api_key)
+        row["page_no"] = page["page_no"]
+        row["method_used"] = page["text_source"]
         rows.append(row)
 
     return rows
 
-def process_pdf(pdf_path, openai_api_key: str | None = None) -> list[dict[str, Any]]:
-    return extract_rows_from_pdf(str(pdf_path), openai_api_key=openai_api_key)
+
+def process_pdf(pdf_path: str | Path, openai_api_key: str | None = None) -> list[dict[str, Any]]:
+    return extract_rows_from_pdf(pdf_path, openai_api_key=openai_api_key)
