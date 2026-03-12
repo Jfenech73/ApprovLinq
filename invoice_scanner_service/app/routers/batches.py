@@ -198,13 +198,18 @@ def process_batch(batch_id: UUID, db: Session = Depends(get_db)):
             total_pages += len(results)
             total_rows += inserted_rows
 
-            if inserted_rows == 0:
+            if len(results) == 0:
                 invoice_file.status = "failed"
-                invoice_file.error_message = "No meaningful invoice data could be extracted from this file."
+                invoice_file.error_message = "This file appears blank or OCR returned no readable text."
                 failed_files += 1
+            elif inserted_rows == 0:
+                invoice_file.status = "partial"
+                invoice_file.error_message = "Pages were read, but structured invoice fields were weak. Review extracted text."
+                partial_files += 1
+                processed_files += 1
             elif inserted_rows < max(1, len(results)):
                 invoice_file.status = "partial"
-                invoice_file.error_message = f"Only {inserted_rows} meaningful page(s) extracted."
+                invoice_file.error_message = f"Only {inserted_rows} page(s) were stored."
                 partial_files += 1
                 processed_files += 1
             else:

@@ -414,7 +414,6 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
         if ai_desc:
             description = ai_desc
 
-    # LLM fallback for invoices where OCR text exists but regex misses the fields
     weak_regex = not any([
         supplier_name,
         invoice_number,
@@ -477,20 +476,39 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
     }
 
 
-def row_has_meaningful_data(row: dict[str, Any]) -> bool:
-    if any([
-        row.get("supplier_name"),
-        row.get("invoice_number"),
-        row.get("invoice_date"),
-        row.get("line_items_raw"),
-        row.get("net_amount") is not None,
-        row.get("vat_amount") is not None,
-        row.get("total_amount") is not None,
-    ]):
-        return True
+def make_fallback_row(text: str, openai_api_key: str | None = None) -> dict[str, Any]:
+    text = clean_text(text)
+    supplier_name = find_supplier_name(text)
+    line_items_raw = extract_candidate_line_items(text)
+    description = None
 
-    text = row.get("page_text_raw") or ""
-    return count_meaningful_chars(text) > 15
+    if line_items_raw:
+        description = summarise_line_items_rule_based(line_items_raw)
+        ai_desc = summarise_line_items_with_openai(line_items_raw, openai_api_key) if openai_api_key else None
+        if ai_desc:
+            description = ai_desc
+
+    if not description:
+        description = limit_to_20_words(text) if text else "Unreadable invoice page"
+
+    return {
+        "supplier_name": supplier_name,
+        "invoice_number": None,
+        "invoice_date": None,
+        "description": description,
+        "line_items_raw": line_items_raw,
+        "net_amount": None,
+        "vat_amount": None,
+        "total_amount": None,
+        "currency": "EUR",
+        "tax_code": None,
+        "confidence_score": 0.10 if text else 0.0,
+        "validation_status": "review",
+        "review_required": True,
+        "header_raw": "\n".join(text.splitlines()[:12]),
+        "totals_raw": extract_totals_region(text),
+        "page_text_raw": text,
+    }
 
 
 def extract_rows_from_pdf(pdf_path: str | Path, openai_api_key: str | None = None) -> list[dict[str, Any]]:
@@ -498,12 +516,28 @@ def extract_rows_from_pdf(pdf_path: str | Path, openai_api_key: str | None = Non
     pages = extract_pdf_pages(pdf_path)
 
     for page in pages:
-        row = regex_extract(page["text"], openai_api_key=openai_api_key)
+        text = page["text"] or ""
+        row = regex_extract(text, openai_api_key=openai_api_key)
+
+        # Restore the earlier working behaviour:
+        # if there is OCR/native text but regex is weak, still create a review row.
+        if count_meaningful_chars(text) > 5 and not any([
+            row.get("supplier_name"),
+            row.get("invoice_number"),
+            row.get("invoice_date"),
+            row.get("line_items_raw"),
+            row.get("net_amount") is not None,
+            row.get("vat_amount") is not None,
+            row.get("total_amount") is not None,
+        ]):
+            row = make_fallback_row(text, openai_api_key=openai_api_key)
+
         row["page_no"] = page["page_no"]
         row["method_used"] = page["text_source"]
         row["ocr_error"] = page.get("ocr_error")
 
-        if row_has_meaningful_data(row):
+        # Only skip pages that are truly blank
+        if count_meaningful_chars(row.get("page_text_raw") or "") > 0:
             rows.append(row)
 
     return rows
