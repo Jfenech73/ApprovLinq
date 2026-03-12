@@ -2,8 +2,10 @@ from datetime import date, datetime
 from pydantic import BaseModel, Field
 from uuid import UUID
 
+
 class BatchCreate(BaseModel):
     batch_name: str = Field(min_length=1, max_length=255)
+
 
 class BatchOut(BaseModel):
     id: UUID
@@ -17,6 +19,7 @@ class BatchOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+
 class InvoiceRowOut(BaseModel):
     id: int
     batch_id: UUID
@@ -25,6 +28,7 @@ class InvoiceRowOut(BaseModel):
     invoice_number: str | None = None
     invoice_date: date | None = None
     description: str | None = None
+    line_items_raw: str | None = None
     net_amount: float | None = None
     vat_amount: float | None = None
     total_amount: float | None = None

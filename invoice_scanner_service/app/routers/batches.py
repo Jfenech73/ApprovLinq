@@ -1,6 +1,5 @@
 from __future__ import annotations
 from datetime import datetime
-from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -16,6 +15,7 @@ from app.services.exporter import workbook_from_rows
 
 router = APIRouter(prefix="/batches", tags=["batches"])
 
+
 @router.post("", response_model=BatchOut)
 def create_batch(payload: BatchCreate, db: Session = Depends(get_db)):
     batch = InvoiceBatch(batch_name=payload.batch_name)
@@ -24,9 +24,11 @@ def create_batch(payload: BatchCreate, db: Session = Depends(get_db)):
     db.refresh(batch)
     return batch
 
+
 @router.get("", response_model=list[BatchOut])
 def list_batches(db: Session = Depends(get_db)):
     return db.query(InvoiceBatch).order_by(InvoiceBatch.created_at.desc()).all()
+
 
 @router.post("/{batch_id}/upload", response_model=BatchOut)
 def upload_pdf(batch_id: UUID, file: UploadFile = File(...), db: Session = Depends(get_db)):
@@ -45,6 +47,7 @@ def upload_pdf(batch_id: UUID, file: UploadFile = File(...), db: Session = Depen
     db.commit()
     db.refresh(batch)
     return batch
+
 
 @router.post("/{batch_id}/process", response_model=BatchOut)
 def process_batch(batch_id: UUID, db: Session = Depends(get_db)):
@@ -72,6 +75,7 @@ def process_batch(batch_id: UUID, db: Session = Depends(get_db)):
             invoice_number=r.invoice_number,
             invoice_date=r.invoice_date,
             description=r.description,
+            line_items_raw=r.line_items_raw,
             net_amount=r.net_amount,
             vat_amount=r.vat_amount,
             total_amount=r.total_amount,
@@ -91,12 +95,19 @@ def process_batch(batch_id: UUID, db: Session = Depends(get_db)):
     db.refresh(batch)
     return batch
 
+
 @router.get("/{batch_id}/rows", response_model=list[InvoiceRowOut])
 def get_rows(batch_id: UUID, db: Session = Depends(get_db)):
     batch = db.get(InvoiceBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
-    return db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch_id).order_by(InvoiceRow.page_no.asc()).all()
+    return (
+        db.query(InvoiceRow)
+        .filter(InvoiceRow.batch_id == batch_id)
+        .order_by(InvoiceRow.page_no.asc())
+        .all()
+    )
+
 
 @router.get("/{batch_id}/export.xlsx")
 def export_batch(batch_id: UUID, db: Session = Depends(get_db)):
@@ -104,13 +115,20 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db)):
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
 
-    rows = db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch_id).order_by(InvoiceRow.page_no.asc()).all()
+    rows = (
+        db.query(InvoiceRow)
+        .filter(InvoiceRow.batch_id == batch_id)
+        .order_by(InvoiceRow.page_no.asc())
+        .all()
+    )
+
     payload = [{
         "page_no": r.page_no,
         "supplier_name": r.supplier_name,
         "invoice_number": r.invoice_number,
         "invoice_date": r.invoice_date.isoformat() if r.invoice_date else None,
         "description": r.description,
+        "line_items_raw": r.line_items_raw,
         "net_amount": float(r.net_amount) if r.net_amount is not None else None,
         "vat_amount": float(r.vat_amount) if r.vat_amount is not None else None,
         "total_amount": float(r.total_amount) if r.total_amount is not None else None,

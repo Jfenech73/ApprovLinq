@@ -53,6 +53,7 @@ class InvoiceRow(Base):
     invoice_number: Mapped[str | None] = mapped_column(Text, nullable=True)
     invoice_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    line_items_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
     net_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     vat_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     total_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
