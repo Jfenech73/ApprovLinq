@@ -14,10 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --upgrade pip
 
-COPY requirements.txt /app/requirements.txt
+COPY invoice_scanner_service/requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
 
-COPY . /app
+COPY invoice_scanner_service /app
 
 EXPOSE 8000
 
