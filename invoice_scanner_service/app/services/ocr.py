@@ -45,7 +45,6 @@ class OCRSpaceBackend(OCRBackend):
             "file": (f"page_{page_index + 1}.png", image_bytes, "image/png")
         }
 
-        # OCR.space works best here with engine 2 and auto language detection
         data = {
             "apikey": settings.ocr_space_api_key,
             "language": settings.ocr_space_language,

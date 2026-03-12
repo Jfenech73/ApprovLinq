@@ -50,15 +50,9 @@ def get_ocr_backend():
     if provider == "none":
         return None
     if provider == "ocr_space":
-        try:
-            return OCRSpaceBackend()
-        except Exception:
-            return None
+        return OCRSpaceBackend()
     if provider == "paddleocr":
-        try:
-            return PaddleOCRBackend()
-        except Exception:
-            return None
+        return PaddleOCRBackend()
 
     return None
 
@@ -117,11 +111,8 @@ def parse_amount(value: str | None) -> float | None:
 
     raw = value.strip().replace("€", "").replace("EUR", "").replace(" ", "")
 
-    # Handle common EU formatting:
-    # 1.234,56 -> 1234.56
     if re.match(r"^\d{1,3}(\.\d{3})+,\d{2}$", raw):
         raw = raw.replace(".", "").replace(",", ".")
-    # 1234,56 -> 1234.56
     elif re.match(r"^\d+,\d{2}$", raw):
         raw = raw.replace(",", ".")
     else:
