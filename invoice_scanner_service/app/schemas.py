@@ -40,7 +40,7 @@ class BatchDetailOut(BatchOut):
     processed_files: int = 0
     failed_files: int = 0
     rows_count: int = 0
-    files: list[BatchFileOut] = []
+    files: list[BatchFileOut] = Field(default_factory=list)
 
 
 class InvoiceRowOut(BaseModel):

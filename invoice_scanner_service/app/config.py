@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     tesseract_cmd: str | None = None  # backward compatibility only; no longer used by default
     ocr_space_api_key: str | None = None
     ocr_space_endpoint: str = "https://api.ocr.space/parse/image"
-    ocr_space_language: str = "eng"
+    ocr_space_language: str = "auto"
     ocr_space_overlay_required: bool = False
     ocr_space_scale: bool = True
     ocr_space_ocr_engine: int = 2
