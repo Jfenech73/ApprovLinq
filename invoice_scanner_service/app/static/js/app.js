@@ -39,6 +39,15 @@ async function api(url, options = {}) {
   return response;
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 async function loadBatches() {
   const data = await api("/batches");
   state.batches = data;
@@ -71,6 +80,7 @@ async function loadBatches() {
 async function selectBatch(batchId) {
   state.selectedBatchId = batchId;
   const batch = await api(`/batches/${batchId}`);
+
   $("selectedBatchEmpty").classList.add("hidden");
   $("selectedBatchPanel").classList.remove("hidden");
   $("selectedBatchId").textContent = batch.id;
@@ -136,19 +146,11 @@ async function loadRows() {
   }
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
 $("createBatchForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const input = $("batchName");
   const message = $("createBatchMessage");
+
   setMessage(message, "Creating batch...");
   try {
     const batch = await api("/batches", {
@@ -156,6 +158,7 @@ $("createBatchForm").addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ batch_name: input.value.trim() }),
     });
+
     input.value = "";
     setMessage(message, `Batch created: ${batch.id}`, "success");
     await loadBatches();
@@ -168,10 +171,12 @@ $("createBatchForm").addEventListener("submit", async (event) => {
 $("uploadBtn").addEventListener("click", async () => {
   const message = $("actionMessage");
   const fileInput = $("pdfFiles");
+
   if (!state.selectedBatchId) {
     setMessage(message, "Select a batch first.", "warn");
     return;
   }
+
   if (!fileInput.files.length) {
     setMessage(message, "Choose at least one PDF file first.", "warn");
     return;
@@ -188,6 +193,7 @@ $("uploadBtn").addEventListener("click", async () => {
       method: "POST",
       body: formData,
     });
+
     fileInput.value = "";
     setMessage(message, "Upload completed.", "success");
     await loadBatches();
@@ -199,6 +205,7 @@ $("uploadBtn").addEventListener("click", async () => {
 
 $("processBtn").addEventListener("click", async () => {
   const message = $("actionMessage");
+
   if (!state.selectedBatchId) {
     setMessage(message, "Select a batch first.", "warn");
     return;
@@ -206,7 +213,10 @@ $("processBtn").addEventListener("click", async () => {
 
   setMessage(message, "Processing batch...");
   try {
-    await api(`/batches/${state.selectedBatchId}/process`, { method: "POST" });
+    await api(`/batches/${state.selectedBatchId}/process`, {
+      method: "POST",
+    });
+
     setMessage(message, "Batch processing finished.", "success");
     await loadBatches();
     await selectBatch(state.selectedBatchId);
@@ -217,21 +227,33 @@ $("processBtn").addEventListener("click", async () => {
 
 $("exportBtn").addEventListener("click", () => {
   const message = $("actionMessage");
+
   if (!state.selectedBatchId) {
     setMessage(message, "Select a batch first.", "warn");
     return;
   }
-  window.location.href = `/batches/${state.selectedBatchId}/export`;
+
+  window.location.href = `/batches/${state.selectedBatchId}/export.xlsx`;
 });
 
 $("refreshBatchesBtn").addEventListener("click", async () => {
-  await loadBatches();
-  if (state.selectedBatchId) {
-    await selectBatch(state.selectedBatchId);
+  try {
+    await loadBatches();
+    if (state.selectedBatchId) {
+      await selectBatch(state.selectedBatchId);
+    }
+  } catch (error) {
+    setMessage($("createBatchMessage"), error.message, "error");
   }
 });
 
-$("refreshRowsBtn").addEventListener("click", loadRows);
+$("refreshRowsBtn").addEventListener("click", async () => {
+  try {
+    await loadRows();
+  } catch (error) {
+    setMessage($("actionMessage"), error.message, "error");
+  }
+});
 
 loadBatches().catch((error) => {
   setMessage($("createBatchMessage"), error.message, "error");

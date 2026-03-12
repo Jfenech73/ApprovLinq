@@ -1,24 +1,36 @@
 from __future__ import annotations
+
 from datetime import datetime
-from uuid import UUID
+from pathlib import Path
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.db.models import InvoiceBatch, InvoiceFile, InvoiceRow
 from app.db.session import get_db
-from app.db.models import InvoiceBatch, InvoiceRow
-from app.schemas import BatchCreate, BatchOut, InvoiceRowOut
-from app.services.extractor import process_pdf
+from app.schemas import BatchCreate, BatchDetailOut, BatchFileOut, BatchOut, InvoiceRowOut
 from app.services.exporter import workbook_from_rows
+from app.services.extractor import process_pdf
 
 router = APIRouter(prefix="/batches", tags=["batches"])
 
 
+def _batch_folder(batch_id: UUID) -> Path:
+    folder = settings.upload_path / str(batch_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
 @router.post("", response_model=BatchOut)
 def create_batch(payload: BatchCreate, db: Session = Depends(get_db)):
-    batch = InvoiceBatch(batch_name=payload.batch_name)
+    batch = InvoiceBatch(
+        batch_name=payload.batch_name.strip(),
+        status="created",
+        notes="Batch created",
+    )
     db.add(batch)
     db.commit()
     db.refresh(batch)
@@ -30,90 +42,185 @@ def list_batches(db: Session = Depends(get_db)):
     return db.query(InvoiceBatch).order_by(InvoiceBatch.created_at.desc()).all()
 
 
-@router.post("/{batch_id}/upload", response_model=BatchOut)
-def upload_pdf(batch_id: UUID, file: UploadFile = File(...), db: Session = Depends(get_db)):
+@router.get("/{batch_id}", response_model=BatchDetailOut)
+def get_batch(batch_id: UUID, db: Session = Depends(get_db)):
     batch = db.get(InvoiceBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
-    dest = settings.upload_path / f"{batch_id}.pdf"
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    files = (
+        db.query(InvoiceFile)
+        .filter(InvoiceFile.batch_id == batch_id)
+        .order_by(InvoiceFile.uploaded_at.asc(), InvoiceFile.id.asc())
+        .all()
+    )
 
-    with dest.open("wb") as f:
-        f.write(file.file.read())
+    rows_count = (
+        db.query(InvoiceRow)
+        .filter(InvoiceRow.batch_id == batch_id)
+        .count()
+    )
 
-    batch.source_filename = file.filename
+    uploaded_files = sum(1 for f in files if f.status in ("uploaded", "processing", "processed"))
+    processed_files = sum(1 for f in files if f.status == "processed")
+    failed_files = sum(1 for f in files if f.status == "failed")
+
+    return BatchDetailOut(
+        id=batch.id,
+        batch_name=batch.batch_name,
+        source_filename=batch.source_filename,
+        status=batch.status,
+        page_count=batch.page_count,
+        notes=batch.notes,
+        created_at=batch.created_at,
+        processed_at=batch.processed_at,
+        uploaded_files=uploaded_files,
+        processed_files=processed_files,
+        failed_files=failed_files,
+        rows_count=rows_count,
+        files=[BatchFileOut.model_validate(f) for f in files],
+    )
+
+
+@router.post("/{batch_id}/upload", response_model=BatchDetailOut)
+def upload_pdfs(
+    batch_id: UUID,
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    batch = db.get(InvoiceBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+
+    folder = _batch_folder(batch_id)
+    uploaded_names: list[str] = []
+
+    for file in files:
+        filename = file.filename or "uploaded.pdf"
+        if not filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail=f"Only PDF files are supported: {filename}")
+
+        stored_filename = f"{uuid4().hex}_{filename}"
+        dest = folder / stored_filename
+
+        with dest.open("wb") as f:
+            f.write(file.file.read())
+
+        invoice_file = InvoiceFile(
+            batch_id=batch_id,
+            original_filename=filename,
+            stored_filename=stored_filename,
+            file_path=str(dest),
+            mime_type=file.content_type,
+            status="uploaded",
+        )
+        db.add(invoice_file)
+        uploaded_names.append(filename)
+
     batch.status = "uploaded"
-    batch.notes = "PDF uploaded successfully"
+    batch.source_filename = uploaded_names[0] if len(uploaded_names) == 1 else f"{len(uploaded_names)} files"
+    batch.notes = f"Uploaded {len(uploaded_names)} file(s)"
     db.commit()
-    db.refresh(batch)
-    return batch
+
+    return get_batch(batch_id, db)
 
 
-@router.post("/{batch_id}/process", response_model=BatchOut)
+@router.post("/{batch_id}/process", response_model=BatchDetailOut)
 def process_batch(batch_id: UUID, db: Session = Depends(get_db)):
     batch = db.get(InvoiceBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
 
-    pdf_path = settings.upload_path / f"{batch_id}.pdf"
-    if not pdf_path.exists():
-        raise HTTPException(status_code=400, detail="No PDF uploaded for this batch")
+    files = (
+        db.query(InvoiceFile)
+        .filter(InvoiceFile.batch_id == batch_id)
+        .order_by(InvoiceFile.uploaded_at.asc(), InvoiceFile.id.asc())
+        .all()
+    )
+    if not files:
+        raise HTTPException(status_code=400, detail="No uploaded files found for this batch")
 
     db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch_id).delete()
+    db.commit()
 
-    results = process_pdf(
-        pdf_path,
-        openai_api_key=settings.openai_api_key if settings.use_openai else None,
-    )
+    batch.status = "processing"
+    batch.notes = f"Processing {len(files)} file(s)"
+    db.commit()
 
-    batch.page_count = len(results)
-    batch.status = "processed"
+    total_pages = 0
+    processed_files = 0
+    failed_files = 0
+
+    for invoice_file in files:
+        try:
+            invoice_file.status = "processing"
+            invoice_file.error_message = None
+            db.commit()
+
+            results = process_pdf(
+                invoice_file.file_path,
+                openai_api_key=settings.openai_api_key if settings.use_openai else None,
+            )
+
+            invoice_file.page_count = len(results)
+            invoice_file.status = "processed"
+            invoice_file.processed_at = datetime.utcnow()
+            total_pages += len(results)
+            processed_files += 1
+
+            for r in results:
+                row = InvoiceRow(
+                    batch_id=batch_id,
+                    source_file_id=invoice_file.id,
+                    source_filename=invoice_file.original_filename,
+                    page_no=r.get("page_no"),
+                    supplier_name=r.get("supplier_name"),
+                    invoice_number=r.get("invoice_number"),
+                    invoice_date=r.get("invoice_date"),
+                    description=r.get("description"),
+                    line_items_raw=r.get("line_items_raw"),
+                    net_amount=r.get("net_amount"),
+                    vat_amount=r.get("vat_amount"),
+                    total_amount=r.get("total_amount"),
+                    currency=r.get("currency"),
+                    tax_code=r.get("tax_code"),
+                    method_used=r.get("method_used"),
+                    confidence_score=r.get("confidence_score"),
+                    validation_status=r.get("validation_status"),
+                    review_required=r.get("review_required", False),
+                    header_raw=r.get("header_raw"),
+                    totals_raw=r.get("totals_raw"),
+                    page_text_raw=r.get("page_text_raw"),
+                )
+                db.add(row)
+
+            db.commit()
+
+        except Exception as e:
+            invoice_file.status = "failed"
+            invoice_file.error_message = str(e)
+            invoice_file.processed_at = datetime.utcnow()
+            db.commit()
+            failed_files += 1
+
+    batch.page_count = total_pages
     batch.processed_at = datetime.utcnow()
 
-    populated_rows = 0
+    if processed_files and not failed_files:
+        batch.status = "processed"
+        batch.notes = f"Processed {processed_files} file(s), {total_pages} page(s)"
+    elif processed_files and failed_files:
+        batch.status = "partial"
+        batch.notes = f"Processed {processed_files} file(s), failed {failed_files}"
+    else:
+        batch.status = "failed"
+        batch.notes = "Processing failed for all files"
 
-    for r in results:
-        meaningful = any([
-            r.get("supplier_name"),
-            r.get("invoice_number"),
-            r.get("invoice_date"),
-            r.get("line_items_raw"),
-            r.get("total_amount") is not None,
-            (r.get("page_text_raw") or "").strip(),
-        ])
-        if meaningful:
-            populated_rows += 1
-
-        row = InvoiceRow(
-            batch_id=batch_id,
-            page_no=r.get("page_no"),
-            supplier_name=r.get("supplier_name"),
-            invoice_number=r.get("invoice_number"),
-            invoice_date=r.get("invoice_date"),
-            description=r.get("description"),
-            line_items_raw=r.get("line_items_raw"),
-            net_amount=r.get("net_amount"),
-            vat_amount=r.get("vat_amount"),
-            total_amount=r.get("total_amount"),
-            currency=r.get("currency"),
-            tax_code=r.get("tax_code"),
-            method_used=r.get("method_used"),
-            confidence_score=r.get("confidence_score"),
-            validation_status=r.get("validation_status"),
-            review_required=r.get("review_required", False),
-            header_raw=r.get("header_raw"),
-            totals_raw=r.get("totals_raw"),
-            page_text_raw=r.get("page_text_raw"),
-        )
-        db.add(row)
-
-    batch.notes = f"Processed {len(results)} pages, populated {populated_rows} rows"
     db.commit()
-    db.refresh(batch)
-    return batch
+    return get_batch(batch_id, db)
 
 
 @router.get("/{batch_id}/rows", response_model=list[InvoiceRowOut])
@@ -121,10 +228,11 @@ def get_rows(batch_id: UUID, db: Session = Depends(get_db)):
     batch = db.get(InvoiceBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
+
     return (
         db.query(InvoiceRow)
         .filter(InvoiceRow.batch_id == batch_id)
-        .order_by(InvoiceRow.page_no.asc())
+        .order_by(InvoiceRow.source_file_id.asc().nullsfirst(), InvoiceRow.page_no.asc())
         .all()
     )
 
@@ -138,35 +246,39 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db)):
     rows = (
         db.query(InvoiceRow)
         .filter(InvoiceRow.batch_id == batch_id)
-        .order_by(InvoiceRow.page_no.asc())
+        .order_by(InvoiceRow.source_file_id.asc().nullsfirst(), InvoiceRow.page_no.asc())
         .all()
     )
 
-    payload = [{
-        "page_no": r.page_no,
-        "supplier_name": r.supplier_name,
-        "invoice_number": r.invoice_number,
-        "invoice_date": r.invoice_date.isoformat() if r.invoice_date else None,
-        "description": r.description,
-        "line_items_raw": r.line_items_raw,
-        "net_amount": float(r.net_amount) if r.net_amount is not None else None,
-        "vat_amount": float(r.vat_amount) if r.vat_amount is not None else None,
-        "total_amount": float(r.total_amount) if r.total_amount is not None else None,
-        "currency": r.currency,
-        "tax_code": r.tax_code,
-        "method_used": r.method_used,
-        "confidence_score": float(r.confidence_score) if r.confidence_score is not None else None,
-        "validation_status": r.validation_status,
-        "review_required": r.review_required,
-        "header_raw": r.header_raw,
-        "totals_raw": r.totals_raw,
-        "page_text_raw": r.page_text_raw,
-    } for r in rows]
+    payload = [
+        {
+            "source_filename": r.source_filename,
+            "page_no": r.page_no,
+            "supplier_name": r.supplier_name,
+            "invoice_number": r.invoice_number,
+            "invoice_date": r.invoice_date.isoformat() if r.invoice_date else None,
+            "description": r.description,
+            "line_items_raw": r.line_items_raw,
+            "net_amount": float(r.net_amount) if r.net_amount is not None else None,
+            "vat_amount": float(r.vat_amount) if r.vat_amount is not None else None,
+            "total_amount": float(r.total_amount) if r.total_amount is not None else None,
+            "currency": r.currency,
+            "tax_code": r.tax_code,
+            "method_used": r.method_used,
+            "confidence_score": float(r.confidence_score) if r.confidence_score is not None else None,
+            "validation_status": r.validation_status,
+            "review_required": r.review_required,
+            "header_raw": r.header_raw,
+            "totals_raw": r.totals_raw,
+            "page_text_raw": r.page_text_raw,
+        }
+        for r in rows
+    ]
 
     stream = workbook_from_rows(payload)
     filename = f"{batch.batch_name or batch_id}.xlsx"
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'}
+        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
     )
