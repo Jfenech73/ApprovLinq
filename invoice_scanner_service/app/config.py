@@ -13,9 +13,11 @@ class Settings(BaseSettings):
     upload_dir: str = "./data/uploads"
     export_dir: str = "./data/exports"
 
-    ocr_provider: str = "none"
+    # OCR
+    ocr_provider: str = "none"   # none | ocr_space | paddleocr
     enable_paddle_ocr: bool = False
 
+    # OCR.space
     ocr_space_api_key: str | None = None
     ocr_space_endpoint: str = "https://api.ocr.space/parse/image"
     ocr_space_language: str = "auto"
@@ -24,6 +26,7 @@ class Settings(BaseSettings):
     ocr_space_scale: bool = True
     ocr_space_timeout_seconds: int = 90
 
+    # OpenAI
     use_openai: bool = False
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"

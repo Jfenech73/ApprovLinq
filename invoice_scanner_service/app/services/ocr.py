@@ -41,6 +41,9 @@ class OCRSpaceBackend(OCRBackend):
     def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 3.5) -> str:
         image_bytes = self.render_pdf_page_to_png_bytes(pdf_path, page_index, scale=scale)
 
+        if not image_bytes:
+            return ""
+
         files = {
             "file": (f"page_{page_index + 1}.png", image_bytes, "image/png")
         }
@@ -81,6 +84,8 @@ class PaddleOCRBackend(OCRBackend):
     name = "paddleocr"
 
     def __init__(self) -> None:
+        if not settings.enable_paddle_ocr:
+            raise RuntimeError("PaddleOCR is disabled. Set ENABLE_PADDLE_OCR=true.")
         try:
             from paddleocr import PaddleOCR  # type: ignore
         except Exception as e:
@@ -96,8 +101,10 @@ class PaddleOCRBackend(OCRBackend):
         from PIL import Image
 
         image_bytes = self.render_pdf_page_to_png_bytes(pdf_path, page_index, scale=scale)
-        image = Image.open(BytesIO(image_bytes)).convert("RGB")
+        if not image_bytes:
+            return ""
 
+        image = Image.open(BytesIO(image_bytes)).convert("RGB")
         result = self.ocr.ocr(image)
 
         lines: list[str] = []

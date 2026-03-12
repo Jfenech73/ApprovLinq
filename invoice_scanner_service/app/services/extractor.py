@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -77,7 +76,8 @@ def extract_pdf_pages(pdf_path: str | Path) -> list[dict[str, Any]]:
         method = "native_text"
         ocr_error = None
 
-        should_try_ocr = not looks_meaningful(native_text)
+        # Force OCR whenever native text is weak / junk-like
+        should_try_ocr = count_meaningful_chars(native_text) < 60
 
         if should_try_ocr and ocr_backend is not None:
             try:
@@ -155,65 +155,93 @@ def find_supplier_name(text: str) -> str | None:
     if not lines:
         return None
 
-    for line in lines[:10]:
-        if len(line) > 2 and not re.search(r"invoice|tax|vat|date|page|customer", line, re.I):
-            return line[:200]
+    header = lines[:15]
+    skip = r"invoice|tax|vat|date|page|customer|bill to|ship to|total"
+
+    candidates = []
+    for line in header:
+        if len(line) < 3:
+            continue
+        if re.search(skip, line, re.I):
+            continue
+        if re.search(r"\d{3,}", line):
+            continue
+        if len(line) > 80:
+            continue
+        candidates.append(line)
+
+    if candidates:
+        return candidates[0][:200]
+
     return None
 
 
 def extract_totals_region(text: str) -> str:
     lines = text.splitlines()
-    total_markers = (
-        "subtotal", "sub total", "vat", "tax", "total", "gross", "net amount",
-        "amount due", "balance due", "grand total", "total due"
+    if not lines:
+        return ""
+
+    start = int(len(lines) * 0.65)
+    bottom = lines[start:]
+
+    markers = (
+        "subtotal",
+        "sub total",
+        "vat",
+        "tax",
+        "total",
+        "gross",
+        "net amount",
+        "amount due",
+        "balance due",
+        "grand total",
+        "total due",
     )
-    selected = [ln for ln in lines if any(m in ln.lower() for m in total_markers)]
-    return "\n".join(selected[:25]).strip()
+
+    selected = []
+    for line in bottom:
+        if any(m in line.lower() for m in markers):
+            selected.append(line)
+
+    return "\n".join(selected[:20]).strip()
 
 
 def extract_candidate_line_items(text: str) -> str:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     kept: list[str] = []
 
-    skip_patterns = [
-        r"invoice\s*(no|number)",
-        r"\bdate\b",
-        r"\bvat\b",
-        r"\btax\b",
-        r"\btotal\b",
-        r"\bsubtotal\b",
-        r"\bamount due\b",
-        r"\bbalance due\b",
-        r"\biban\b",
-        r"\bbic\b",
-        r"\bpage\b",
-        r"\bcustomer\b",
-        r"\bsupplier\b",
-        r"\baddress\b",
-        r"\bemail\b",
-        r"\bphone\b",
-        r"\bqty\b",
-        r"\bquantity\b",
-        r"\bunit price\b",
-        r"\bdiscount\b",
+    header_skip = [
+        r"invoice",
+        r"date",
+        r"vat",
+        r"tax",
+        r"total",
+        r"subtotal",
+        r"amount due",
+        r"balance due",
+        r"iban",
+        r"bic",
+        r"page",
+        r"customer",
+        r"supplier",
+        r"address",
+        r"email",
+        r"phone",
     ]
 
     for line in lines:
+        if len(line) < 6:
+            continue
+
         lower = line.lower()
 
-        if len(line) < 4:
-            continue
-        if any(re.search(p, lower, re.I) for p in skip_patterns):
-            continue
-        if re.fullmatch(r"[\d\W]+", line):
+        if any(re.search(p, lower) for p in header_skip):
             continue
 
-        money_like = len(re.findall(r"\d+[.,]\d{2}", line))
-        words_like = len(re.findall(r"[A-Za-z]{3,}", line))
+        words = len(re.findall(r"[A-Za-z]{3,}", line))
+        money = len(re.findall(r"\d+[.,]\d{2}", line))
 
-        if words_like >= 2:
-            if money_like >= 3:
-                line = re.sub(r"\s+\d+[.,]\d{2}\s+\d+[.,]\d{2}\s+\d+[.,]\d{2,}", "", line).strip()
+        if words >= 2 and (money >= 1 or len(line) > 20):
             kept.append(line)
 
     kept = list(dict.fromkeys(kept))
@@ -328,16 +356,26 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
     )
     invoice_date = parse_date(invoice_date_raw)
 
-    net_raw = first_match([r"(?:subtotal|sub total|net amount|net)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"], text)
-    vat_raw = first_match([r"(?:vat|tax)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"], text)
-    total_raw = first_match([r"(?:amount due|balance due|grand total|total due|total)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"], text)
+    totals_region = extract_totals_region(text)
+
+    net_raw = first_match(
+        [r"(?:subtotal|sub total|net amount|net)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"],
+        totals_region or text,
+    )
+    vat_raw = first_match(
+        [r"(?:vat|tax)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"],
+        totals_region or text,
+    )
+    total_raw = first_match(
+        [r"(?:amount due|balance due|grand total|total due|total)\s*[:\-]?\s*(?:EUR)?\s*([0-9.,]+)"],
+        totals_region or text,
+    )
 
     net_amount = parse_amount(net_raw)
     vat_amount = parse_amount(vat_raw)
     total_amount = parse_amount(total_raw)
 
     supplier_name = find_supplier_name(text)
-    totals_raw = extract_totals_region(text)
     line_items_raw = extract_candidate_line_items(text)
 
     description = None
@@ -384,7 +422,7 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
         "validation_status": validation_status,
         "review_required": review_required,
         "header_raw": "\n".join(text.splitlines()[:12]),
-        "totals_raw": totals_raw,
+        "totals_raw": totals_region,
         "page_text_raw": text,
     }
 
@@ -432,7 +470,7 @@ def extract_rows_from_pdf(pdf_path: str | Path, openai_api_key: str | None = Non
         text = page["text"] or ""
         row = regex_extract(text, openai_api_key=openai_api_key)
 
-        if count_meaningful_chars(text) > 5 and not any([
+        if count_meaningful_chars(text) > 20 and not any([
             row.get("supplier_name"),
             row.get("invoice_number"),
             row.get("invoice_date"),

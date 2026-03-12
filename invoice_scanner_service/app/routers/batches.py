@@ -163,6 +163,29 @@ def process_batch(batch_id: UUID, db: Session = Depends(get_db)):
                 openai_api_key=settings.openai_api_key if settings.use_openai else None,
             )
 
+            # Ensure we always return at least one review row
+            if not results:
+                results = [{
+                    "page_no": 1,
+                    "supplier_name": None,
+                    "invoice_number": None,
+                    "invoice_date": None,
+                    "description": "Unreadable invoice - OCR returned no text",
+                    "line_items_raw": None,
+                    "net_amount": None,
+                    "vat_amount": None,
+                    "total_amount": None,
+                    "currency": "EUR",
+                    "tax_code": None,
+                    "method_used": "ocr",
+                    "confidence_score": 0.0,
+                    "validation_status": "review",
+                    "review_required": True,
+                    "header_raw": None,
+                    "totals_raw": None,
+                    "page_text_raw": "",
+                }]
+
             inserted_rows = 0
             invoice_file.page_count = len(results)
 
@@ -198,16 +221,12 @@ def process_batch(batch_id: UUID, db: Session = Depends(get_db)):
             total_pages += len(results)
             total_rows += inserted_rows
 
-            if len(results) == 0:
-                invoice_file.status = "failed"
-                invoice_file.error_message = "This file appears blank or OCR returned no readable text."
-                failed_files += 1
-            elif inserted_rows == 0:
+            if inserted_rows == 0:
                 invoice_file.status = "partial"
-                invoice_file.error_message = "Pages were read, but structured invoice fields were weak. Review extracted text."
+                invoice_file.error_message = "OCR produced no structured data. Manual review required."
                 partial_files += 1
                 processed_files += 1
-            elif inserted_rows < max(1, len(results)):
+            elif inserted_rows < len(results):
                 invoice_file.status = "partial"
                 invoice_file.error_message = f"Only {inserted_rows} page(s) were stored."
                 partial_files += 1
