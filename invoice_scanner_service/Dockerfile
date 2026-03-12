@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 RUN pip install --upgrade pip
-COPY requirements.txt .
+COPY invoice_scanner_service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
