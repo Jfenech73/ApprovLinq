@@ -20,9 +20,34 @@ class BatchOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class BatchFileOut(BaseModel):
+    id: int
+    batch_id: UUID
+    original_filename: str
+    stored_filename: str
+    mime_type: str | None = None
+    status: str
+    page_count: int | None = None
+    error_message: str | None = None
+    uploaded_at: datetime
+    processed_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class BatchDetailOut(BatchOut):
+    uploaded_files: int = 0
+    processed_files: int = 0
+    failed_files: int = 0
+    rows_count: int = 0
+    files: list[BatchFileOut] = []
+
+
 class InvoiceRowOut(BaseModel):
     id: int
     batch_id: UUID
+    source_file_id: int | None = None
+    source_filename: str | None = None
     page_no: int
     supplier_name: str | None = None
     invoice_number: str | None = None

@@ -38,6 +38,36 @@ class InvoiceBatch(Base):
         back_populates="batch",
         cascade="all, delete-orphan",
     )
+    files: Mapped[list["InvoiceFile"]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+    )
+
+
+class InvoiceFile(Base):
+    __tablename__ = "invoice_files"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    batch_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("invoice_batches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    original_filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    stored_filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default="uploaded", nullable=False)
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    uploaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, nullable=False
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    batch: Mapped["InvoiceBatch"] = relationship(back_populates="files")
+    rows: Mapped[list["InvoiceRow"]] = relationship(back_populates="source_file")
 
 
 class InvoiceRow(Base):
@@ -48,6 +78,11 @@ class InvoiceRow(Base):
         ForeignKey("invoice_batches.id", ondelete="CASCADE"),
         nullable=False,
     )
+    source_file_id: Mapped[int | None] = mapped_column(
+        ForeignKey("invoice_files.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_filename: Mapped[str | None] = mapped_column(String(500), nullable=True)
     page_no: Mapped[int] = mapped_column(Integer, nullable=False)
     supplier_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     invoice_number: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -71,3 +106,4 @@ class InvoiceRow(Base):
     )
 
     batch: Mapped["InvoiceBatch"] = relationship(back_populates="rows")
+    source_file: Mapped["InvoiceFile | None"] = relationship(back_populates="rows")

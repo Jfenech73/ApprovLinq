@@ -3,11 +3,13 @@ from io import BytesIO
 import pandas as pd
 
 
+
 def workbook_from_rows(rows: list[dict]) -> BytesIO:
     df = pd.DataFrame(rows)
 
     if df.empty:
         df = pd.DataFrame(columns=[
+            "source_filename",
             "page_no",
             "supplier_name",
             "invoice_number",
@@ -26,6 +28,7 @@ def workbook_from_rows(rows: list[dict]) -> BytesIO:
         ])
 
     preferred_order = [
+        "source_filename",
         "page_no",
         "supplier_name",
         "invoice_number",
@@ -63,10 +66,11 @@ def workbook_from_rows(rows: list[dict]) -> BytesIO:
         "sum_vat_amount": [float(df["vat_amount"].fillna(0).sum()) if "vat_amount" in df.columns else 0],
         "sum_total_amount": [float(df["total_amount"].fillna(0).sum()) if "total_amount" in df.columns else 0],
         "avg_confidence": [float(df["confidence_score"].fillna(0).mean()) if "confidence_score" in df.columns else 0],
+        "distinct_source_files": [int(df["source_filename"].fillna("").replace("", pd.NA).dropna().nunique()) if "source_filename" in df.columns else 0],
     }
     summary_df = pd.DataFrame(summary)
 
-    evidence_cols = [c for c in ["page_no", "invoice_number", "description", "line_items_raw", "header_raw", "totals_raw"] if c in df.columns]
+    evidence_cols = [c for c in ["source_filename", "page_no", "invoice_number", "description", "line_items_raw", "header_raw", "totals_raw"] if c in df.columns]
     evidence_df = df[evidence_cols].copy() if evidence_cols else pd.DataFrame()
 
     out = BytesIO()
