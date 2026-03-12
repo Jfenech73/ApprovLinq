@@ -310,73 +310,6 @@ def summarise_line_items_with_openai(
     return None
 
 
-def llm_extract_invoice_fields(text: str, api_key: str, model: str = "gpt-4.1-mini") -> dict[str, Any] | None:
-    if not api_key or not text.strip():
-        return None
-
-    prompt = (
-        "Extract invoice data from the text below.\n"
-        "Return JSON only with these keys:\n"
-        "supplier_name, invoice_number, invoice_date, description, "
-        "net_amount, vat_amount, total_amount, currency\n"
-        "Rules:\n"
-        "- invoice_date must be DD/MM/YYYY or null\n"
-        "- amounts must be numbers or null\n"
-        "- currency should be a 3-letter code if clear, otherwise EUR if euro is implied, else null\n"
-        "- description should be short business English max 20 words\n"
-        "- do not invent values\n\n"
-        f"Invoice text:\n{text[:12000]}"
-    )
-
-    try:
-        response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "input": prompt,
-                "max_output_tokens": 300,
-            },
-            timeout=60,
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        text_parts = []
-        for item in data.get("output", []):
-            for content in item.get("content", []):
-                if content.get("type") in ("output_text", "text"):
-                    txt = content.get("text", "")
-                    if txt:
-                        text_parts.append(txt)
-
-        raw = " ".join(text_parts).strip()
-        if not raw:
-            return None
-
-        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-        if not match:
-            return None
-
-        payload = json.loads(match.group(0))
-
-        return {
-            "supplier_name": payload.get("supplier_name"),
-            "invoice_number": payload.get("invoice_number"),
-            "invoice_date": parse_date(payload.get("invoice_date")) if payload.get("invoice_date") else None,
-            "description": limit_to_20_words(payload.get("description") or "Invoice goods or services"),
-            "net_amount": parse_amount(str(payload.get("net_amount"))) if payload.get("net_amount") is not None else None,
-            "vat_amount": parse_amount(str(payload.get("vat_amount"))) if payload.get("vat_amount") is not None else None,
-            "total_amount": parse_amount(str(payload.get("total_amount"))) if payload.get("total_amount") is not None else None,
-            "currency": payload.get("currency") or "EUR",
-        }
-    except Exception:
-        return None
-
-
 def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any]:
     invoice_number = first_match(
         [
@@ -413,26 +346,6 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
         ai_desc = summarise_line_items_with_openai(line_items_raw, openai_api_key) if openai_api_key else None
         if ai_desc:
             description = ai_desc
-
-    weak_regex = not any([
-        supplier_name,
-        invoice_number,
-        invoice_date,
-        net_amount is not None,
-        vat_amount is not None,
-        total_amount is not None,
-    ])
-
-    if weak_regex and openai_api_key and looks_meaningful(text, threshold=25):
-        llm = llm_extract_invoice_fields(text, openai_api_key, model=settings.openai_model)
-        if llm:
-            supplier_name = supplier_name or llm.get("supplier_name")
-            invoice_number = invoice_number or llm.get("invoice_number")
-            invoice_date = invoice_date or llm.get("invoice_date")
-            description = description or llm.get("description")
-            net_amount = net_amount if net_amount is not None else llm.get("net_amount")
-            vat_amount = vat_amount if vat_amount is not None else llm.get("vat_amount")
-            total_amount = total_amount if total_amount is not None else llm.get("total_amount")
 
     if not description:
         description = "Invoice goods or services"
@@ -519,8 +432,6 @@ def extract_rows_from_pdf(pdf_path: str | Path, openai_api_key: str | None = Non
         text = page["text"] or ""
         row = regex_extract(text, openai_api_key=openai_api_key)
 
-        # Restore the earlier working behaviour:
-        # if there is OCR/native text but regex is weak, still create a review row.
         if count_meaningful_chars(text) > 5 and not any([
             row.get("supplier_name"),
             row.get("invoice_number"),
@@ -536,7 +447,6 @@ def extract_rows_from_pdf(pdf_path: str | Path, openai_api_key: str | None = Non
         row["method_used"] = page["text_source"]
         row["ocr_error"] = page.get("ocr_error")
 
-        # Only skip pages that are truly blank
         if count_meaningful_chars(row.get("page_text_raw") or "") > 0:
             rows.append(row)
 
