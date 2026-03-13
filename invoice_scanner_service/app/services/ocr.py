@@ -35,8 +35,17 @@ class OCRSpaceBackend(OCRBackend):
     name = "ocr_space"
 
     def __init__(self) -> None:
+        provider = (settings.ocr_provider or "").strip().lower()
+        if provider != "ocr_space":
+            raise RuntimeError(
+                f"OCRSpaceBackend selected while OCR_PROVIDER is '{settings.ocr_provider}'. "
+                "Set OCR_PROVIDER=ocr_space."
+            )
         if not settings.ocr_space_api_key:
-            raise RuntimeError("OCR.space API key is missing. Set OCR_SPACE_API_KEY.")
+            raise RuntimeError(
+                "OCR.space API key is missing. "
+                "Set OCR_SPACE_API_KEY in Koyeb environment variables."
+            )
 
     def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 3.5) -> str:
         image_bytes = self.render_pdf_page_to_png_bytes(pdf_path, page_index, scale=scale)
@@ -56,20 +65,39 @@ class OCRSpaceBackend(OCRBackend):
             "OCREngine": str(settings.ocr_space_ocr_engine),
         }
 
-        resp = requests.post(
-            settings.ocr_space_endpoint,
-            files=files,
-            data=data,
-            timeout=settings.ocr_space_timeout_seconds,
-        )
-        resp.raise_for_status()
+        try:
+            resp = requests.post(
+                settings.ocr_space_endpoint,
+                files=files,
+                data=data,
+                timeout=settings.ocr_space_timeout_seconds,
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            raise RuntimeError(
+                f"OCR.space request failed. "
+                f"endpoint={settings.ocr_space_endpoint}, "
+                f"provider={settings.ocr_provider}, "
+                f"api_key_present={bool(settings.ocr_space_api_key)}, "
+                f"language={settings.ocr_space_language}, "
+                f"engine={settings.ocr_space_ocr_engine}, "
+                f"timeout={settings.ocr_space_timeout_seconds}. "
+                f"Underlying error: {e}"
+            ) from e
+
         payload = resp.json()
 
         if payload.get("IsErroredOnProcessing"):
             msg = payload.get("ErrorMessage") or payload.get("ErrorDetails") or "OCR.space processing error"
             if isinstance(msg, list):
                 msg = "; ".join(str(x) for x in msg)
-            raise RuntimeError(str(msg))
+            raise RuntimeError(
+                f"OCR.space processing error: {msg}. "
+                f"provider={settings.ocr_provider}, "
+                f"api_key_present={bool(settings.ocr_space_api_key)}, "
+                f"language={settings.ocr_space_language}, "
+                f"engine={settings.ocr_space_ocr_engine}"
+            )
 
         lines: list[str] = []
         for item in payload.get("ParsedResults") or []:
@@ -84,6 +112,12 @@ class PaddleOCRBackend(OCRBackend):
     name = "paddleocr"
 
     def __init__(self) -> None:
+        provider = (settings.ocr_provider or "").strip().lower()
+        if provider != "paddleocr":
+            raise RuntimeError(
+                f"PaddleOCRBackend selected while OCR_PROVIDER is '{settings.ocr_provider}'. "
+                "Set OCR_PROVIDER=paddleocr."
+            )
         if not settings.enable_paddle_ocr:
             raise RuntimeError("PaddleOCR is disabled. Set ENABLE_PADDLE_OCR=true.")
         try:

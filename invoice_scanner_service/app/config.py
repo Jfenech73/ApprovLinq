@@ -50,5 +50,22 @@ class Settings(BaseSettings):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def diagnostics(self) -> dict:
+        return {
+            "app_env": self.app_env,
+            "ocr_provider": self.ocr_provider,
+            "enable_paddle_ocr": self.enable_paddle_ocr,
+            "ocr_space_api_key_present": bool(self.ocr_space_api_key),
+            "ocr_space_endpoint": self.ocr_space_endpoint,
+            "ocr_space_language": self.ocr_space_language,
+            "ocr_space_ocr_engine": self.ocr_space_ocr_engine,
+            "ocr_space_timeout_seconds": self.ocr_space_timeout_seconds,
+            "use_openai": self.use_openai,
+            "openai_api_key_present": bool(self.openai_api_key),
+            "openai_model": self.openai_model,
+            "upload_dir": self.upload_dir,
+            "export_dir": self.export_dir,
+        }
+
 
 settings = Settings()
