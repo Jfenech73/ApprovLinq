@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -13,7 +13,7 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title=settings.app_name)
 
-base_dir = Path(__file__).parent
+base_dir = Path(__file__).resolve().parent
 static_dir = base_dir / "static"
 
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -21,7 +21,19 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 @app.get("/")
 def frontend():
-    return FileResponse(base_dir / "index.html")
+    candidates = [
+        base_dir / "index.html",
+        static_dir / "index.html",
+    ]
+
+    for path in candidates:
+        if path.exists():
+            return FileResponse(path)
+
+    raise HTTPException(
+        status_code=500,
+        detail=f"Frontend file not found. Checked: {[str(p) for p in candidates]}",
+    )
 
 
 app.include_router(health.router)
