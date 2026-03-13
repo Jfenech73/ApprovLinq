@@ -109,26 +109,210 @@ def suspicious_invoice_number(value: str | None) -> bool:
     return False
 
 
+def bad_supplier_line(line: str) -> bool:
+    line_l = line.lower().strip()
+
+    if len(line_l) < 3:
+        return True
+
+    skip_patterns = [
+        r"invoice",
+        r"\binv\b",
+        r"tax",
+        r"vat",
+        r"\bdate\b",
+        r"\bpage\b",
+        r"customer",
+        r"bill to",
+        r"ship to",
+        r"amount due",
+        r"balance due",
+        r"total",
+        r"subtotal",
+        r"iban",
+        r"swift",
+        r"bic",
+        r"email",
+        r"www\.",
+        r"http",
+        r"tel",
+        r"phone",
+    ]
+    if any(re.search(p, line_l, re.I) for p in skip_patterns):
+        return True
+
+    # Skip numeric-heavy lines / addresses / VAT numbers
+    digits = len(re.findall(r"\d", line_l))
+    letters = len(re.findall(r"[a-zA-Z]", line_l))
+    if digits > letters:
+        return True
+
+    if len(line_l) > 90:
+        return True
+
+    return False
+
+
 def find_supplier_name(text: str) -> str | None:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if not lines:
         return None
 
-    skip = r"invoice|tax|vat|date|page|customer|bill to|ship to|total|amount due|balance due"
+    header_lines = lines[:15]
+    candidates: list[str] = []
 
-    for line in lines[:12]:
-        if len(line) < 3:
+    for line in header_lines:
+        if bad_supplier_line(line):
             continue
-        if re.search(skip, line, re.I):
+        candidates.append(line)
+
+    if not candidates:
+        return None
+
+    # Prefer all-caps or title-ish company lines early in the page
+    for line in candidates:
+        if re.fullmatch(r"[A-Z0-9 &().,\-'/]+", line) and len(line) >= 4:
+            return line[:200]
+
+    return candidates[0][:200]
+
+
+def extract_candidate_line_items(text: str) -> str:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    kept: list[str] = []
+
+    skip_patterns = [
+        r"invoice\s*(no|number)",
+        r"\bdate\b",
+        r"\bvat\b",
+        r"\btax\b",
+        r"\btotal\b",
+        r"\bsubtotal\b",
+        r"\bamount due\b",
+        r"\bbalance due\b",
+        r"\biban\b",
+        r"\bbic\b",
+        r"\bpage\b",
+        r"\bcustomer\b",
+        r"\bsupplier\b",
+        r"\baddress\b",
+        r"\bemail\b",
+        r"\bphone\b",
+        r"\bqty\b",
+        r"\bquantity\b",
+        r"\bunit price\b",
+        r"\bdiscount\b",
+    ]
+
+    for line in lines:
+        lower = line.lower()
+
+        if len(line) < 6:
             continue
-        if len(line) > 100:
+        if any(re.search(p, lower, re.I) for p in skip_patterns):
             continue
-        return line[:200]
+        if re.fullmatch(r"[\d\W]+", line):
+            continue
+
+        money_like = len(re.findall(r"\d+[.,]\d{2}", line))
+        words_like = len(re.findall(r"[A-Za-z]{3,}", line))
+
+        if words_like >= 2 and (money_like >= 1 or len(line) > 20):
+            kept.append(line)
+
+    kept = list(dict.fromkeys(kept))
+    return "\n".join(kept[:25]).strip()
+
+
+def limit_to_20_words(text: str) -> str:
+    words = re.findall(r"\S+", (text or "").strip())
+    return " ".join(words[:20]).strip()
+
+
+def summarise_line_items_rule_based(line_items_text: str) -> str:
+    text = line_items_text.lower()
+
+    keyword_groups = [
+        ("fuel and related vehicle consumables", ["fuel", "diesel", "petrol", "unleaded", "lubricant"]),
+        ("office supplies and stationery", ["paper", "stationery", "toner", "ink", "folder", "pen", "notebook"]),
+        ("cleaning supplies and hygiene products", ["detergent", "cleaner", "soap", "bleach", "sanitiser", "tissue"]),
+        ("food and catering supplies", ["food", "catering", "beverage", "drink", "snack", "bread", "meat"]),
+        ("vehicle parts and maintenance items", ["filter", "brake", "tyre", "battery", "engine", "service kit"]),
+        ("electrical supplies and components", ["cable", "socket", "switch", "lamp", "electrical", "fuse"]),
+        ("building materials and hardware items", ["cement", "paint", "screw", "bolt", "hardware", "tool"]),
+        ("printing and marketing materials", ["print", "printing", "flyer", "poster", "banner", "brochure"]),
+        ("software, subscriptions, or digital services", ["subscription", "software", "license", "hosting", "domain"]),
+        ("professional or business services", ["service", "consulting", "labour", "maintenance", "support"]),
+    ]
+
+    for label, words in keyword_groups:
+        if any(w in text for w in words):
+            return limit_to_20_words(label)
+
+    lines = [ln.strip() for ln in line_items_text.splitlines() if ln.strip()]
+    if lines:
+        return limit_to_20_words(" ".join(lines[:2]))
+
+    return "Invoice goods or services"
+
+
+def summarise_line_items_with_openai(
+    line_items_text: str,
+    api_key: str,
+    model: str = "gpt-4.1-mini",
+) -> str | None:
+    if not api_key or not line_items_text.strip():
+        return None
+
+    prompt = (
+        "You are extracting an accounting-friendly invoice description.\n"
+        "Based only on the invoice item lines provided, return one short description.\n"
+        "Rules:\n"
+        "- Maximum 20 words\n"
+        "- Plain business English\n"
+        "- No supplier names\n"
+        "- No invoice numbers\n"
+        "- No amounts\n"
+        "- Summarise the goods or services purchased\n"
+        "- Return only the description text\n\n"
+        f"Invoice item lines:\n{line_items_text}"
+    )
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "input": prompt,
+                "max_output_tokens": 80,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        text_parts = []
+        for item in data.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") in ("output_text", "text"):
+                    txt = content.get("text", "")
+                    if txt:
+                        text_parts.append(txt)
+
+        result = " ".join(text_parts).strip()
+        if result:
+            return limit_to_20_words(result)
+    except Exception:
+        return None
 
     return None
 
 
-def simple_extract(text: str) -> dict[str, Any]:
+def simple_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any]:
     invoice_number = first_match([
         r"invoice\s*(?:no|number|#)\s*[:\-]?\s*([A-Z0-9\/\-_]+)",
         r"\binv(?:oice)?\s*[:\-]?\s*([A-Z0-9\/\-_]+)",
@@ -156,13 +340,29 @@ def simple_extract(text: str) -> dict[str, Any]:
     total_amount = parse_amount(total_raw)
 
     supplier_name = find_supplier_name(text)
+    line_items_raw = extract_candidate_line_items(text)
+
+    description = None
+    if line_items_raw:
+        description = summarise_line_items_rule_based(line_items_raw)
+        if openai_api_key:
+            ai_desc = summarise_line_items_with_openai(
+                line_items_raw,
+                openai_api_key,
+                model=settings.openai_model,
+            )
+            if ai_desc:
+                description = ai_desc
+
+    if not description:
+        description = "Invoice goods or services"
 
     return {
         "supplier_name": supplier_name,
         "invoice_number": invoice_number,
         "invoice_date": invoice_date,
-        "description": "Invoice extraction",
-        "line_items_raw": None,
+        "description": description,
+        "line_items_raw": line_items_raw,
         "net_amount": net_amount,
         "vat_amount": vat_amount,
         "total_amount": total_amount,
@@ -282,7 +482,7 @@ def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str
     if not merged.get("tax_code") and ai.get("tax_code"):
         merged["tax_code"] = ai.get("tax_code")
 
-    if merged.get("description") in (None, "", "Invoice extraction") and ai.get("description"):
+    if merged.get("description") in (None, "", "Invoice extraction", "Invoice goods or services") and ai.get("description"):
         merged["description"] = ai.get("description")
 
     return merged
@@ -316,7 +516,7 @@ def process_pdf_page(
         final_text = f"OCR/NATIVE TEXT EMPTY. OCR_ERROR={ocr_error or 'none'}"
         method = f"{method}_empty"
 
-    extracted = simple_extract(final_text)
+    extracted = simple_extract(final_text, openai_api_key=openai_api_key)
 
     if settings.use_openai and openai_api_key and needs_ai_fallback(extracted, final_text):
         ai_fields = openai_extract_invoice_fields(
