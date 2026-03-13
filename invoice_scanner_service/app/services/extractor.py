@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import fitz  # PyMuPDF
+import requests
 
 from app.services.ocr import OCRSpaceBackend, PaddleOCRBackend
 from app.config import settings
@@ -89,10 +91,42 @@ def get_ocr_backend():
     return None
 
 
+def suspicious_invoice_number(value: str | None) -> bool:
+    if not value:
+        return True
+    v = str(value).strip().lower()
+    bad = {"to", "from", "date", "invoice", "invoice no", "invoice number", "page"}
+    if v in bad:
+        return True
+    if len(v) < 3:
+        return True
+    return False
+
+
+def find_supplier_name(text: str) -> str | None:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return None
+
+    skip = r"invoice|tax|vat|date|page|customer|bill to|ship to|total|amount due|balance due"
+
+    for line in lines[:12]:
+        if len(line) < 3:
+            continue
+        if re.search(skip, line, re.I):
+            continue
+        if len(line) > 100:
+            continue
+        return line[:200]
+
+    return None
+
+
 def simple_extract(text: str) -> dict[str, Any]:
     invoice_number = first_match([
         r"invoice\s*(?:no|number|#)\s*[:\-]?\s*([A-Z0-9\/\-_]+)",
         r"\binv(?:oice)?\s*[:\-]?\s*([A-Z0-9\/\-_]+)",
+        r"\bdocument\s*(?:no|number)\s*[:\-]?\s*([A-Z0-9\/\-_]+)",
     ], text)
 
     invoice_date_raw = first_match([
@@ -101,26 +135,153 @@ def simple_extract(text: str) -> dict[str, Any]:
     ], text)
     invoice_date = parse_date(invoice_date_raw)
 
-    total_raw = first_match([
-        r"(?:amount due|balance due|grand total|total due|total)\s*[:\-]?\s*(?:EUR|€)?\s*([0-9.,]+)"
+    net_raw = first_match([
+        r"(?:subtotal|sub total|net amount|amount excl(?:uding)? vat|taxable amount)\s*[:\-]?\s*(?:EUR|€)?\s*([0-9.,]+)"
     ], text)
+    vat_raw = first_match([
+        r"(?:vat|tax|iva)\s*[:\-]?\s*(?:EUR|€)?\s*([0-9.,]+)"
+    ], text)
+    total_raw = first_match([
+        r"(?:amount due|balance due|grand total|total due|total amount|total)\s*[:\-]?\s*(?:EUR|€)?\s*([0-9.,]+)"
+    ], text)
+
+    net_amount = parse_amount(net_raw)
+    vat_amount = parse_amount(vat_raw)
     total_amount = parse_amount(total_raw)
 
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    supplier_name = lines[0][:200] if lines else None
+    supplier_name = find_supplier_name(text)
 
     return {
         "supplier_name": supplier_name,
         "invoice_number": invoice_number,
         "invoice_date": invoice_date,
-        "description": "Diagnostic extraction",
+        "description": "Invoice extraction",
         "line_items_raw": None,
-        "net_amount": None,
-        "vat_amount": None,
+        "net_amount": net_amount,
+        "vat_amount": vat_amount,
         "total_amount": total_amount,
         "currency": "EUR" if ("€" in text or "eur" in text.lower()) else None,
         "tax_code": None,
     }
+
+
+def openai_extract_invoice_fields(
+    page_text: str,
+    api_key: str,
+    model: str = "gpt-4.1-mini",
+) -> dict[str, Any] | None:
+    if not api_key or not page_text.strip():
+        return None
+
+    prompt = (
+        "Extract invoice fields from this ONE invoice page.\n"
+        "Return strict JSON only with keys:\n"
+        "supplier_name, invoice_number, invoice_date, description, "
+        "net_amount, vat_amount, total_amount, currency, tax_code.\n"
+        "Rules:\n"
+        "- Use null when unknown.\n"
+        "- Do not guess.\n"
+        "- invoice_date should be DD/MM/YYYY when present.\n"
+        "- amounts should be plain numbers.\n"
+        "- description max 20 words.\n\n"
+        f"PAGE TEXT:\n{page_text[:12000]}"
+    )
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "input": prompt,
+                "max_output_tokens": 300,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        text_parts = []
+        for item in data.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") in ("output_text", "text"):
+                    txt = content.get("text", "")
+                    if txt:
+                        text_parts.append(txt)
+
+        raw = " ".join(text_parts).strip()
+        if not raw:
+            return None
+
+        m = re.search(r"\{.*\}", raw, re.S)
+        payload = json.loads(m.group(0) if m else raw)
+
+        return {
+            "supplier_name": payload.get("supplier_name"),
+            "invoice_number": payload.get("invoice_number"),
+            "invoice_date": parse_date(payload.get("invoice_date")) if payload.get("invoice_date") else None,
+            "description": payload.get("description"),
+            "net_amount": parse_amount(payload.get("net_amount")) if payload.get("net_amount") is not None else None,
+            "vat_amount": parse_amount(payload.get("vat_amount")) if payload.get("vat_amount") is not None else None,
+            "total_amount": parse_amount(payload.get("total_amount")) if payload.get("total_amount") is not None else None,
+            "currency": payload.get("currency"),
+            "tax_code": payload.get("tax_code"),
+        }
+    except Exception:
+        return None
+
+
+def needs_ai_fallback(extracted: dict[str, Any], text: str) -> bool:
+    if count_meaningful_chars(text) < 20:
+        return False
+
+    if suspicious_invoice_number(extracted.get("invoice_number")):
+        return True
+    if extracted.get("invoice_date") is None:
+        return True
+    if extracted.get("total_amount") is None:
+        return True
+
+    return False
+
+
+def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str, Any]:
+    if not ai:
+        return base
+
+    merged = dict(base)
+
+    if not merged.get("supplier_name") and ai.get("supplier_name"):
+        merged["supplier_name"] = ai.get("supplier_name")
+
+    if suspicious_invoice_number(merged.get("invoice_number")) and ai.get("invoice_number"):
+        merged["invoice_number"] = ai.get("invoice_number")
+
+    if merged.get("invoice_date") is None and ai.get("invoice_date") is not None:
+        merged["invoice_date"] = ai.get("invoice_date")
+
+    if merged.get("net_amount") is None and ai.get("net_amount") is not None:
+        merged["net_amount"] = ai.get("net_amount")
+
+    if merged.get("vat_amount") is None and ai.get("vat_amount") is not None:
+        merged["vat_amount"] = ai.get("vat_amount")
+
+    if merged.get("total_amount") is None and ai.get("total_amount") is not None:
+        merged["total_amount"] = ai.get("total_amount")
+
+    if not merged.get("currency") and ai.get("currency"):
+        merged["currency"] = ai.get("currency")
+
+    if not merged.get("tax_code") and ai.get("tax_code"):
+        merged["tax_code"] = ai.get("tax_code")
+
+    if merged.get("description") in (None, "", "Invoice extraction") and ai.get("description"):
+        merged["description"] = ai.get("description")
+
+    return merged
 
 
 def process_pdf(pdf_path: str | Path, openai_api_key: str | None = None) -> list[dict[str, Any]]:
@@ -154,14 +315,53 @@ def process_pdf(pdf_path: str | Path, openai_api_key: str | None = None) -> list
             method = f"{method}_empty"
 
         extracted = simple_extract(final_text)
+
+        # Reintroduce AI only as fallback
+        if (
+            settings.use_openai
+            and openai_api_key
+            and needs_ai_fallback(extracted, final_text)
+        ):
+            ai_fields = openai_extract_invoice_fields(
+                final_text,
+                openai_api_key,
+                model=settings.openai_model,
+            )
+            extracted = merge_ai_fields(extracted, ai_fields)
+            method = f"{method}+openai_fallback"
+
+        # Better confidence scoring
+        confidence = 0.0
+        if extracted.get("supplier_name"):
+            confidence += 0.15
+        if not suspicious_invoice_number(extracted.get("invoice_number")):
+            confidence += 0.20
+        if extracted.get("invoice_date"):
+            confidence += 0.20
+        if extracted.get("total_amount") is not None:
+            confidence += 0.20
+        if extracted.get("net_amount") is not None:
+            confidence += 0.10
+        if extracted.get("vat_amount") is not None:
+            confidence += 0.10
+        if (
+            extracted.get("net_amount") is not None
+            and extracted.get("vat_amount") is not None
+            and extracted.get("total_amount") is not None
+        ):
+            if round((extracted["net_amount"] + extracted["vat_amount"]) - extracted["total_amount"], 2) == 0:
+                confidence += 0.05
+
+        confidence = round(min(confidence, 0.99), 2)
+
         extracted.update({
             "page_no": idx + 1,
             "method_used": method,
-            "confidence_score": 0.10 if "EMPTY" in final_text else 0.50,
-            "validation_status": "review",
-            "review_required": True,
+            "confidence_score": confidence,
+            "validation_status": "ok" if confidence >= 0.70 else "review",
+            "review_required": confidence < 0.70,
             "header_raw": "\n".join(final_text.splitlines()[:12]),
-            "totals_raw": None,
+            "totals_raw": "\n".join(final_text.splitlines()[-10:]) if final_text else None,
             "page_text_raw": final_text[:20000],
         })
         results.append(extracted)
