@@ -32,8 +32,6 @@ function truncate(value, max = 140) {
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
-
-  // Read body ONCE only
   const rawText = await response.text();
 
   let data = null;
@@ -46,7 +44,9 @@ async function api(url, options = {}) {
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
 
-    if (data && typeof data === "object") {
+    if (rawText.includes("<title>Your service is almost ready!</title>")) {
+      detail = "The service restarted or became unavailable while processing. Check Koyeb runtime logs.";
+    } else if (data && typeof data === "object") {
       detail = data.detail || data.message || JSON.stringify(data);
     } else if (rawText) {
       detail = rawText;
