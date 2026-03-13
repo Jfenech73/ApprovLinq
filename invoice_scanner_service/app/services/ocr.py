@@ -12,18 +12,23 @@ from app.config import settings
 class OCRBackend:
     name = "base"
 
-    def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 2.5) -> str:
+    def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 1.8) -> str:
         raise NotImplementedError
 
     @staticmethod
-    def render_pdf_page_to_png_bytes(pdf_path: Path, page_index: int, scale: float = 2.5) -> bytes:
+    def render_pdf_page_to_jpeg_bytes(
+        pdf_path: Path,
+        page_index: int,
+        scale: float = 1.8,
+        quality: int = 65,
+    ) -> bytes:
         pdf = pdfium.PdfDocument(str(pdf_path))
         try:
             page = pdf.get_page(page_index)
             try:
                 image = page.render(scale=scale).to_pil()
                 buf = BytesIO()
-                image.convert("RGB").save(buf, format="PNG")
+                image.convert("RGB").save(buf, format="JPEG", quality=quality, optimize=True)
                 return buf.getvalue()
             finally:
                 page.close()
@@ -38,14 +43,20 @@ class OCRSpaceBackend(OCRBackend):
         if not settings.ocr_space_api_key:
             raise RuntimeError("OCR.space API key is missing. Set OCR_SPACE_API_KEY.")
 
-    def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 2.0) -> str:
-        image_bytes = self.render_pdf_page_to_png_bytes(pdf_path, page_index, scale=scale)
+    def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 1.8) -> str:
+        image_bytes = self.render_pdf_page_to_jpeg_bytes(
+            pdf_path,
+            page_index,
+            scale=scale,
+            quality=65,
+        )
         if not image_bytes:
             return ""
 
         files = {
-            "file": (f"page_{page_index + 1}.png", image_bytes, "image/png")
+            "file": (f"page_{page_index + 1}.jpg", image_bytes, "image/jpeg")
         }
+
         data = {
             "apikey": settings.ocr_space_api_key,
             "language": settings.ocr_space_language,
@@ -82,32 +93,4 @@ class PaddleOCRBackend(OCRBackend):
     name = "paddleocr"
 
     def __init__(self) -> None:
-        if not settings.enable_paddle_ocr:
-            raise RuntimeError("PaddleOCR is disabled. Set ENABLE_PADDLE_OCR=true.")
-        try:
-            from paddleocr import PaddleOCR  # type: ignore
-        except Exception as e:
-            raise RuntimeError("PaddleOCR is not installed. Install it and rebuild the image.") from e
-
-        # Keep this minimal for compatibility across PaddleOCR builds
-        self.ocr = PaddleOCR(use_angle_cls=True, lang="en")
-
-    def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 2.5) -> str:
-        from PIL import Image
-
-        image_bytes = self.render_pdf_page_to_png_bytes(pdf_path, page_index, scale=scale)
-        if not image_bytes:
-            return ""
-
-        image = Image.open(BytesIO(image_bytes)).convert("RGB")
-        result = self.ocr.ocr(image)
-
-        lines: list[str] = []
-        for block in result or []:
-            for line in block or []:
-                if len(line) > 1 and line[1]:
-                    text = str(line[1][0]).strip()
-                    if text:
-                        lines.append(text)
-
-        return "\n".join(lines).strip()
+        raise RuntimeError("PaddleOCR disabled for this deployment. Use OCR_PROVIDER=ocr_space.")
