@@ -1,6 +1,7 @@
 const state = {
   selectedBatchId: null,
   batches: [],
+  progressPollHandle: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -44,8 +45,12 @@ async function api(url, options = {}) {
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
 
-    if (rawText.includes("<title>Your service is almost ready!</title>")) {
-      detail = "The service restarted or became unavailable while processing. Check Koyeb runtime logs.";
+    if (
+      rawText.includes("<title>Your service is almost ready!</title>") ||
+      rawText.includes("<title>502</title>") ||
+      rawText.includes("Service unavailable")
+    ) {
+      detail = "The service restarted or became unavailable while processing. The job may still resume after restart. Check Koyeb runtime logs.";
     } else if (data && typeof data === "object") {
       detail = data.detail || data.message || JSON.stringify(data);
     } else if (rawText) {
@@ -79,6 +84,104 @@ function confidenceDisplay(value) {
   return Number(value).toFixed(2);
 }
 
+function ensureProgressUI() {
+  if ($("batchProgressWrap")) return;
+
+  const panel = $("selectedBatchPanel");
+  if (!panel) return;
+
+  const wrapper = document.createElement("div");
+  wrapper.id = "batchProgressWrap";
+  wrapper.className = "hidden";
+  wrapper.style.margin = "12px 0 16px 0";
+
+  wrapper.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:6px;">
+      <strong>Processing progress</strong>
+      <span id="batchProgressPercent">0%</span>
+    </div>
+    <div style="width:100%;background:#e5e7eb;border-radius:999px;height:12px;overflow:hidden;">
+      <div id="batchProgressBar" style="width:0%;height:100%;background:#2563eb;transition:width 0.3s ease;"></div>
+    </div>
+    <div id="batchProgressText" class="muted" style="margin-top:8px;">Waiting to start...</div>
+  `;
+
+  panel.insertBefore(wrapper, panel.firstChild);
+}
+
+function showProgress(percent, text) {
+  ensureProgressUI();
+  const wrap = $("batchProgressWrap");
+  const bar = $("batchProgressBar");
+  const pct = $("batchProgressPercent");
+  const txt = $("batchProgressText");
+
+  if (!wrap || !bar || !pct || !txt) return;
+
+  wrap.classList.remove("hidden");
+  const safePercent = Math.max(0, Math.min(100, Number(percent || 0)));
+  bar.style.width = `${safePercent}%`;
+  pct.textContent = `${safePercent}%`;
+  txt.textContent = text || "Processing...";
+}
+
+function hideProgress() {
+  ensureProgressUI();
+  const wrap = $("batchProgressWrap");
+  if (wrap) wrap.classList.add("hidden");
+}
+
+function stopProgressPolling() {
+  if (state.progressPollHandle) {
+    clearInterval(state.progressPollHandle);
+    state.progressPollHandle = null;
+  }
+}
+
+async function refreshSelectedBatchAndRows() {
+  if (!state.selectedBatchId) return;
+  await loadBatches();
+  await selectBatch(state.selectedBatchId, { preservePolling: true });
+}
+
+async function pollProgressOnce() {
+  if (!state.selectedBatchId) {
+    stopProgressPolling();
+    return;
+  }
+
+  try {
+    const progress = await api(`/batches/${state.selectedBatchId}/progress`);
+
+    const label = `${progress.processed_pages || 0}/${progress.total_pages || 0} pages • ${progress.processed_files || 0}/${progress.total_files || 0} files`;
+    const extra = progress.notes ? ` • ${progress.notes}` : "";
+    showProgress(progress.percent || 0, `${label}${extra}`);
+
+    if (progress.status !== "processing") {
+      stopProgressPolling();
+      await refreshSelectedBatchAndRows();
+      if (progress.status === "processed") {
+        setMessage($("actionMessage"), "Batch processing finished.", "success");
+      } else if (progress.status === "partial") {
+        setMessage($("actionMessage"), "Batch processing finished with partial results.", "warn");
+      } else if (progress.status === "failed") {
+        setMessage($("actionMessage"), "Batch processing failed.", "error");
+      }
+    } else {
+      await loadRows();
+    }
+  } catch (error) {
+    stopProgressPolling();
+    setMessage($("actionMessage"), error.message, "error");
+  }
+}
+
+function startProgressPolling() {
+  stopProgressPolling();
+  pollProgressOnce();
+  state.progressPollHandle = setInterval(pollProgressOnce, 2500);
+}
+
 async function loadBatches() {
   const data = await api("/batches");
   state.batches = Array.isArray(data) ? data : [];
@@ -109,7 +212,7 @@ async function loadBatches() {
   }
 }
 
-async function selectBatch(batchId) {
+async function selectBatch(batchId, options = {}) {
   state.selectedBatchId = batchId;
   const batch = await api(`/batches/${batchId}`);
 
@@ -122,6 +225,13 @@ async function selectBatch(batchId) {
 
   renderFiles(batch.files || []);
   await loadRows();
+
+  if (batch.status === "processing") {
+    startProgressPolling();
+  } else if (!options.preservePolling) {
+    stopProgressPolling();
+    hideProgress();
+  }
 }
 
 function renderFiles(files) {
@@ -136,16 +246,10 @@ function renderFiles(files) {
   for (const file of files) {
     const tr = document.createElement("tr");
     const errorText = file.error_message ? truncate(file.error_message, 160) : "-";
-    const statusClass =
-      file.status === "failed"
-        ? "pill"
-        : file.status === "partial"
-        ? "pill"
-        : "pill";
 
     tr.innerHTML = `
       <td>${escapeHtml(file.original_filename)}</td>
-      <td><span class="${statusClass}">${escapeHtml(file.status)}</span></td>
+      <td><span class="pill">${escapeHtml(file.status)}</span></td>
       <td>${file.page_count ?? "-"}</td>
       <td title="${escapeHtml(file.error_message || "")}">${escapeHtml(errorText)}</td>
       <td>${formatDate(file.uploaded_at)}</td>
@@ -263,20 +367,21 @@ $("processBtn").addEventListener("click", async () => {
     return;
   }
 
-  setMessage(message, "Processing batch...");
+  setMessage(message, "Queueing batch for processing...");
   try {
     const batch = await api(`/batches/${state.selectedBatchId}/process`, {
       method: "POST",
     });
 
-    const extra =
-      batch && batch.notes
-        ? `Batch processing finished. ${batch.notes}`
-        : "Batch processing finished.";
+    setMessage(
+      message,
+      batch && batch.notes ? batch.notes : "Batch queued for processing.",
+      "success"
+    );
 
-    setMessage(message, extra, "success");
     await loadBatches();
     await selectBatch(state.selectedBatchId);
+    startProgressPolling();
   } catch (error) {
     setMessage(message, error.message, "error");
   }
@@ -311,6 +416,8 @@ $("refreshRowsBtn").addEventListener("click", async () => {
     setMessage($("actionMessage"), error.message, "error");
   }
 });
+
+ensureProgressUI();
 
 loadBatches().catch((error) => {
   setMessage($("createBatchMessage"), error.message, "error");

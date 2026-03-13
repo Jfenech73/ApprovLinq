@@ -141,6 +141,72 @@ def bad_supplier_line(line: str) -> bool:
     if any(re.search(p, line_l, re.I) for p in skip_patterns):
         return True
 
+    def suspicious_supplier_name(value: str | None) -> bool:
+    if not value:
+        return True
+
+    v = str(value).strip()
+    vl = v.lower()
+
+    bad_exact = {
+        "invoice",
+        "tax invoice",
+        "invoice number",
+        "invoice no",
+        "date",
+        "customer",
+        "bill to",
+        "ship to",
+        "total",
+        "subtotal",
+        "amount due",
+        "balance due",
+        "vat",
+        "tax",
+        "page",
+        "description",
+    }
+    if vl in bad_exact:
+        return True
+
+    if len(v) < 4:
+        return True
+
+    # too numeric / code-like
+    digits = len(re.findall(r"\d", v))
+    letters = len(re.findall(r"[A-Za-z]", v))
+    if digits >= letters:
+        return True
+
+    # looks like address/contact/payment line
+    bad_patterns = [
+        r"invoice",
+        r"\bdate\b",
+        r"\bpage\b",
+        r"\btotal\b",
+        r"\bsubtotal\b",
+        r"\bamount due\b",
+        r"\bbalance due\b",
+        r"\bvat\b",
+        r"\btax\b",
+        r"\biban\b",
+        r"\bswift\b",
+        r"\bbic\b",
+        r"\bemail\b",
+        r"\bwww\.",
+        r"\bhttp",
+        r"\btel\b",
+        r"\bphone\b",
+        r"\bcustomer\b",
+        r"\bbill to\b",
+        r"\bship to\b",
+    ]
+    if any(re.search(p, vl, re.I) for p in bad_patterns):
+        return True
+
+    return False
+
+
     # Skip numeric-heavy lines / addresses / VAT numbers
     digits = len(re.findall(r"\d", line_l))
     letters = len(re.findall(r"[a-zA-Z]", line_l))
@@ -158,7 +224,7 @@ def find_supplier_name(text: str) -> str | None:
     if not lines:
         return None
 
-    header_lines = lines[:15]
+    header_lines = lines[:18]
     candidates: list[str] = []
 
     for line in header_lines:
@@ -169,12 +235,29 @@ def find_supplier_name(text: str) -> str | None:
     if not candidates:
         return None
 
-    # Prefer all-caps or title-ish company lines early in the page
-    for line in candidates:
-        if re.fullmatch(r"[A-Z0-9 &().,\-'/]+", line) and len(line) >= 4:
-            return line[:200]
+    # Prefer stronger business-name looking lines
+    scored: list[tuple[int, str]] = []
 
-    return candidates[0][:200]
+    for line in candidates:
+        score = 0
+
+        if re.fullmatch(r"[A-Z0-9 &().,\-'/]+", line) and len(line) >= 4:
+            score += 3
+
+        if re.search(r"\b(ltd|limited|plc|llc|inc|co\.?|company|services|trading|holdings|group)\b", line, re.I):
+            score += 3
+
+        if 4 <= len(line) <= 45:
+            score += 2
+
+        if not suspicious_supplier_name(line):
+            score += 3
+
+        scored.append((score, line))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best = scored[0][1] if scored else None
+    return best[:200] if best else None
 
 
 def extract_candidate_line_items(text: str) -> str:
@@ -443,12 +526,16 @@ def openai_extract_invoice_fields(
 def needs_ai_fallback(extracted: dict[str, Any], text: str) -> bool:
     if count_meaningful_chars(text) < 20:
         return False
+
+    if suspicious_supplier_name(extracted.get("supplier_name")):
+        return True
     if suspicious_invoice_number(extracted.get("invoice_number")):
         return True
     if extracted.get("invoice_date") is None:
         return True
     if extracted.get("total_amount") is None:
         return True
+
     return False
 
 
@@ -458,7 +545,7 @@ def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str
 
     merged = dict(base)
 
-    if not merged.get("supplier_name") and ai.get("supplier_name"):
+    if suspicious_supplier_name(merged.get("supplier_name")) and ai.get("supplier_name"):
         merged["supplier_name"] = ai.get("supplier_name")
 
     if suspicious_invoice_number(merged.get("invoice_number")) and ai.get("invoice_number"):
