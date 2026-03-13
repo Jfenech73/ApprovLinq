@@ -15,7 +15,7 @@ app = FastAPI(title=settings.app_name)
 
 static_dir = Path(__file__).parent / "static"
 static_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/static", StaticFiles(directory="invoice_scanner_service/app/static/img/approvlinq-logo.png"), name="static")
+app.mount("/static", StaticFiles(directory="app/static/img/approvlinq-logo.png"), name="static")
 
 
 @app.get("/")
