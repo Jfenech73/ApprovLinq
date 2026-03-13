@@ -72,22 +72,26 @@ def extract_pdf_pages(pdf_path: str | Path) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
 
     for idx, native_text in enumerate(native_pages):
+        native_text = clean_text(native_text or "")
         final_text = native_text
         method = "native_text"
         ocr_error = None
 
-        # Force OCR whenever native text is weak / junk-like
-        should_try_ocr = count_meaningful_chars(native_text) < 60
+        # Treat native text as weak unless it has enough real content
+        should_try_ocr = count_meaningful_chars(native_text) < 120
 
         if should_try_ocr and ocr_backend is not None:
             try:
                 ocr_text = clean_text(
                     ocr_backend.extract_text_from_pdf_page(pdf_path, idx, scale=3.5)
                 )
-                if ocr_text:
-                    chosen, source = choose_best_text(native_text, ocr_text)
-                    final_text = chosen
-                    method = f"ocr_{ocr_backend.name}" if source == "ocr" else "native_text"
+
+                # IMPORTANT:
+                # If we decided native text is weak and OCR returns anything useful,
+                # trust OCR directly instead of comparing against native junk.
+                if count_meaningful_chars(ocr_text) > 10:
+                    final_text = ocr_text
+                    method = f"ocr_{ocr_backend.name}"
             except Exception as e:
                 ocr_error = str(e)
 
@@ -155,34 +159,24 @@ def find_supplier_name(text: str) -> str | None:
     if not lines:
         return None
 
-    header = lines[:15]
-    skip = r"invoice|tax|vat|date|page|customer|bill to|ship to|total"
+    skip = r"invoice|tax|vat|date|page|customer|bill to|ship to|total|amount due|balance due"
 
-    candidates = []
-    for line in header:
+    for line in lines[:12]:
         if len(line) < 3:
             continue
         if re.search(skip, line, re.I):
             continue
-        if re.search(r"\d{3,}", line):
+        if len(line) > 100:
             continue
-        if len(line) > 80:
-            continue
-        candidates.append(line)
-
-    if candidates:
-        return candidates[0][:200]
+        return line[:200]
 
     return None
 
 
 def extract_totals_region(text: str) -> str:
-    lines = text.splitlines()
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if not lines:
         return ""
-
-    start = int(len(lines) * 0.65)
-    bottom = lines[start:]
 
     markers = (
         "subtotal",
@@ -198,54 +192,39 @@ def extract_totals_region(text: str) -> str:
         "total due",
     )
 
-    selected = []
-    for line in bottom:
-        if any(m in line.lower() for m in markers):
-            selected.append(line)
+    # Prefer the bottom half of the page first
+    start = int(len(lines) * 0.5)
+    candidates = lines[start:] + lines[:start]
 
+    selected = [ln for ln in candidates if any(m in ln.lower() for m in markers)]
     return "\n".join(selected[:20]).strip()
 
 
-def extract_candidate_line_items(text: str) -> str:
+def extract_totals_region(text: str) -> str:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    kept: list[str] = []
+    if not lines:
+        return ""
 
-    header_skip = [
-        r"invoice",
-        r"date",
-        r"vat",
-        r"tax",
-        r"total",
-        r"subtotal",
-        r"amount due",
-        r"balance due",
-        r"iban",
-        r"bic",
-        r"page",
-        r"customer",
-        r"supplier",
-        r"address",
-        r"email",
-        r"phone",
-    ]
+    markers = (
+        "subtotal",
+        "sub total",
+        "vat",
+        "tax",
+        "total",
+        "gross",
+        "net amount",
+        "amount due",
+        "balance due",
+        "grand total",
+        "total due",
+    )
 
-    for line in lines:
-        if len(line) < 6:
-            continue
+    # Prefer the bottom half of the page first
+    start = int(len(lines) * 0.5)
+    candidates = lines[start:] + lines[:start]
 
-        lower = line.lower()
-
-        if any(re.search(p, lower) for p in header_skip):
-            continue
-
-        words = len(re.findall(r"[A-Za-z]{3,}", line))
-        money = len(re.findall(r"\d+[.,]\d{2}", line))
-
-        if words >= 2 and (money >= 1 or len(line) > 20):
-            kept.append(line)
-
-    kept = list(dict.fromkeys(kept))
-    return "\n".join(kept[:25]).strip()
+    selected = [ln for ln in candidates if any(m in ln.lower() for m in markers)]
+    return "\n".join(selected[:20]).strip()
 
 
 def limit_to_20_words(text: str) -> str:
@@ -470,7 +449,7 @@ def extract_rows_from_pdf(pdf_path: str | Path, openai_api_key: str | None = Non
         text = page["text"] or ""
         row = regex_extract(text, openai_api_key=openai_api_key)
 
-        if count_meaningful_chars(text) > 20 and not any([
+        if count_meaningful_chars(text) > 8 and not any([
             row.get("supplier_name"),
             row.get("invoice_number"),
             row.get("invoice_date"),
