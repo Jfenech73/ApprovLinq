@@ -234,7 +234,7 @@ def process_batch(batch_id: UUID, db: Session = Depends(get_db)):
             else:
                 invoice_file.status = "processed"
                 processed_files += 1
-
+                
             invoice_file.processed_at = datetime.utcnow()
             db.commit()
 
