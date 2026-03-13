@@ -1,9 +1,3 @@
-ALTER TABLE invoice_rows
-ADD COLUMN IF NOT EXISTS source_file_id bigint;
-
-ALTER TABLE invoice_rows
-ADD COLUMN IF NOT EXISTS source_filename text;
-
 create extension if not exists pgcrypto;
 
 create table if not exists invoice_batches (

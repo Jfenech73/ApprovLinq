@@ -86,9 +86,7 @@ def extract_pdf_pages(pdf_path: str | Path) -> list[dict[str, Any]]:
                     ocr_backend.extract_text_from_pdf_page(pdf_path, idx, scale=3.5)
                 )
 
-                # IMPORTANT:
-                # If we decided native text is weak and OCR returns anything useful,
-                # trust OCR directly instead of comparing against native junk.
+                # If native text is weak and OCR returns useful text, trust OCR directly.
                 if count_meaningful_chars(ocr_text) > 10:
                     final_text = ocr_text
                     method = f"ocr_{ocr_backend.name}"
@@ -200,31 +198,47 @@ def extract_totals_region(text: str) -> str:
     return "\n".join(selected[:20]).strip()
 
 
-def extract_totals_region(text: str) -> str:
+def extract_candidate_line_items(text: str) -> str:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if not lines:
-        return ""
+    kept: list[str] = []
 
-    markers = (
-        "subtotal",
-        "sub total",
-        "vat",
-        "tax",
-        "total",
-        "gross",
-        "net amount",
-        "amount due",
-        "balance due",
-        "grand total",
-        "total due",
-    )
+    skip_patterns = [
+        r"invoice\s*(no|number)",
+        r"\bdate\b",
+        r"\bvat\b",
+        r"\btax\b",
+        r"\btotal\b",
+        r"\bsubtotal\b",
+        r"\bamount due\b",
+        r"\bbalance due\b",
+        r"\biban\b",
+        r"\bbic\b",
+        r"\bpage\b",
+        r"\bcustomer\b",
+        r"\bsupplier\b",
+        r"\baddress\b",
+        r"\bemail\b",
+        r"\bphone\b",
+    ]
 
-    # Prefer the bottom half of the page first
-    start = int(len(lines) * 0.5)
-    candidates = lines[start:] + lines[:start]
+    for line in lines:
+        lower = line.lower()
 
-    selected = [ln for ln in candidates if any(m in ln.lower() for m in markers)]
-    return "\n".join(selected[:20]).strip()
+        if len(line) < 6:
+            continue
+        if any(re.search(p, lower, re.I) for p in skip_patterns):
+            continue
+        if re.fullmatch(r"[\d\W]+", line):
+            continue
+
+        money_like = len(re.findall(r"\d+[.,]\d{2}", line))
+        words_like = len(re.findall(r"[A-Za-z]{3,}", line))
+
+        if words_like >= 2 and (money_like >= 1 or len(line) > 20):
+            kept.append(line)
+
+    kept = list(dict.fromkeys(kept))
+    return "\n".join(kept[:25]).strip()
 
 
 def limit_to_20_words(text: str) -> str:
