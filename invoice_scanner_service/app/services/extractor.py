@@ -141,7 +141,19 @@ def bad_supplier_line(line: str) -> bool:
     if any(re.search(p, line_l, re.I) for p in skip_patterns):
         return True
 
-    def suspicious_supplier_name(value: str | None) -> bool:
+    # Skip numeric-heavy lines / addresses / VAT numbers
+    digits = len(re.findall(r"\d", line_l))
+    letters = len(re.findall(r"[a-zA-Z]", line_l))
+    if digits > letters:
+        return True
+
+    if len(line_l) > 90:
+        return True
+
+    return False
+
+
+def suspicious_supplier_name(value: str | None) -> bool:
     if not value:
         return True
 
@@ -172,13 +184,11 @@ def bad_supplier_line(line: str) -> bool:
     if len(v) < 4:
         return True
 
-    # too numeric / code-like
     digits = len(re.findall(r"\d", v))
     letters = len(re.findall(r"[A-Za-z]", v))
     if digits >= letters:
         return True
 
-    # looks like address/contact/payment line
     bad_patterns = [
         r"invoice",
         r"\bdate\b",
@@ -207,18 +217,6 @@ def bad_supplier_line(line: str) -> bool:
     return False
 
 
-    # Skip numeric-heavy lines / addresses / VAT numbers
-    digits = len(re.findall(r"\d", line_l))
-    letters = len(re.findall(r"[a-zA-Z]", line_l))
-    if digits > letters:
-        return True
-
-    if len(line_l) > 90:
-        return True
-
-    return False
-
-
 def find_supplier_name(text: str) -> str | None:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if not lines:
@@ -235,7 +233,6 @@ def find_supplier_name(text: str) -> str | None:
     if not candidates:
         return None
 
-    # Prefer stronger business-name looking lines
     scored: list[tuple[int, str]] = []
 
     for line in candidates:
