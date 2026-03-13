@@ -140,7 +140,7 @@ def process_pdf(pdf_path: str | Path, openai_api_key: str | None = None) -> list
         if count_meaningful_chars(native_text) < 80 and ocr_backend is not None:
             try:
                 ocr_text = clean_text(
-                    ocr_backend.extract_text_from_pdf_page(pdf_path, idx, scale=3.5)
+                    ocr_backend.extract_text_from_pdf_page(pdf_path, idx, scale=2.5)
                 )
                 if count_meaningful_chars(ocr_text) > count_meaningful_chars(native_text):
                     final_text = ocr_text
