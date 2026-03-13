@@ -14,6 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --upgrade pip
 
+RUN apt-get update && apt-get install -y \
+    libgomp1 \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY invoice_scanner_service/requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
 
