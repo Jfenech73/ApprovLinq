@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -14,7 +15,7 @@ from app.services.ocr import OCRSpaceBackend, PaddleOCRBackend
 
 
 def clean_text(text: str) -> str:
-    text = text.replace("\x00", " ")
+    text = (text or "").replace("\x00", " ")
     text = text.replace("|", " ")
     text = text.replace("€", " EUR ")
     text = re.sub(r"[ \t]+", " ", text)
@@ -56,14 +57,6 @@ def get_ocr_backend():
     return None
 
 
-def choose_best_text(native_text: str, ocr_text: str) -> tuple[str, str]:
-    native_score = count_meaningful_chars(native_text)
-    ocr_score = count_meaningful_chars(ocr_text)
-    if ocr_score > native_score:
-        return ocr_text, "ocr"
-    return native_text, "native_text"
-
-
 def extract_pdf_pages(pdf_path: str | Path) -> list[dict[str, Any]]:
     pdf_path = Path(pdf_path)
     native_pages = extract_native_pdf_pages(pdf_path)
@@ -77,7 +70,7 @@ def extract_pdf_pages(pdf_path: str | Path) -> list[dict[str, Any]]:
         method = "native_text"
         ocr_error = None
 
-        # Treat native text as weak unless it has enough real content
+        # Use OCR aggressively when native text is weak/junky.
         should_try_ocr = count_meaningful_chars(native_text) < 120
 
         if should_try_ocr and ocr_backend is not None:
@@ -85,8 +78,7 @@ def extract_pdf_pages(pdf_path: str | Path) -> list[dict[str, Any]]:
                 ocr_text = clean_text(
                     ocr_backend.extract_text_from_pdf_page(pdf_path, idx, scale=3.5)
                 )
-
-                # If native text is weak and OCR returns useful text, trust OCR directly.
+                # If OCR produced useful text, trust it directly.
                 if count_meaningful_chars(ocr_text) > 10:
                     final_text = ocr_text
                     method = f"ocr_{ocr_backend.name}"
@@ -106,10 +98,12 @@ def extract_pdf_pages(pdf_path: str | Path) -> list[dict[str, Any]]:
 
 
 def parse_amount(value: str | None) -> float | None:
-    if not value:
+    if value is None:
         return None
 
-    raw = value.strip().replace("€", "").replace("EUR", "").replace(" ", "")
+    raw = str(value).strip().replace("€", "").replace("EUR", "").replace(" ", "")
+    if not raw:
+        return None
 
     if re.match(r"^\d{1,3}(\.\d{3})+,\d{2}$", raw):
         raw = raw.replace(".", "").replace(",", ".")
@@ -138,7 +132,7 @@ def parse_date(value: str | None):
     ]
     for fmt in patterns:
         try:
-            return datetime.strptime(value.strip(), fmt).date()
+            return datetime.strptime(str(value).strip(), fmt).date()
         except ValueError:
             pass
     return None
@@ -190,7 +184,6 @@ def extract_totals_region(text: str) -> str:
         "total due",
     )
 
-    # Prefer the bottom half of the page first
     start = int(len(lines) * 0.5)
     candidates = lines[start:] + lines[:start]
 
@@ -242,7 +235,7 @@ def extract_candidate_line_items(text: str) -> str:
 
 
 def limit_to_20_words(text: str) -> str:
-    words = re.findall(r"\S+", text.strip())
+    words = re.findall(r"\S+", (text or "").strip())
     return " ".join(words[:20]).strip()
 
 
@@ -331,6 +324,75 @@ def summarise_line_items_with_openai(
     return None
 
 
+def openai_extract_invoice_fields(
+    page_text: str,
+    api_key: str,
+    model: str = "gpt-4.1-mini",
+) -> dict[str, Any] | None:
+    if not api_key or not page_text.strip():
+        return None
+
+    prompt = (
+        "Extract invoice fields from this ONE invoice page.\n"
+        "Return strict JSON only with keys:\n"
+        "supplier_name, invoice_number, invoice_date, description, "
+        "net_amount, vat_amount, total_amount, currency, tax_code.\n"
+        "Rules:\n"
+        "- Use null when unknown.\n"
+        "- Do not guess.\n"
+        "- invoice_date should be DD/MM/YYYY when present.\n"
+        "- amounts should be plain numbers.\n"
+        "- description max 20 words.\n\n"
+        f"PAGE TEXT:\n{page_text[:12000]}"
+    )
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "input": prompt,
+                "max_output_tokens": 300,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        text_parts = []
+        for item in data.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") in ("output_text", "text"):
+                    txt = content.get("text", "")
+                    if txt:
+                        text_parts.append(txt)
+
+        raw = " ".join(text_parts).strip()
+        if not raw:
+            return None
+
+        m = re.search(r"\{.*\}", raw, re.S)
+        payload = json.loads(m.group(0) if m else raw)
+
+        return {
+            "supplier_name": payload.get("supplier_name"),
+            "invoice_number": payload.get("invoice_number"),
+            "invoice_date": parse_date(payload.get("invoice_date")) if payload.get("invoice_date") else None,
+            "description": limit_to_20_words(payload.get("description") or "") if payload.get("description") else None,
+            "net_amount": parse_amount(payload.get("net_amount")) if payload.get("net_amount") is not None else None,
+            "vat_amount": parse_amount(payload.get("vat_amount")) if payload.get("vat_amount") is not None else None,
+            "total_amount": parse_amount(payload.get("total_amount")) if payload.get("total_amount") is not None else None,
+            "currency": payload.get("currency"),
+            "tax_code": payload.get("tax_code"),
+        }
+    except Exception:
+        return None
+
+
 def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any]:
     invoice_number = first_match(
         [
@@ -377,6 +439,28 @@ def regex_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any
         ai_desc = summarise_line_items_with_openai(line_items_raw, openai_api_key) if openai_api_key else None
         if ai_desc:
             description = ai_desc
+
+    # Reintroduce AI field extraction from the original version,
+    # but only when regex is weak.
+    weak_regex = not any([
+        supplier_name,
+        invoice_number,
+        invoice_date,
+        net_amount is not None,
+        vat_amount is not None,
+        total_amount is not None,
+    ])
+
+    if weak_regex and openai_api_key and count_meaningful_chars(text) > 20:
+        ai_fields = openai_extract_invoice_fields(text, openai_api_key, model=settings.openai_model)
+        if ai_fields:
+            supplier_name = supplier_name or ai_fields.get("supplier_name")
+            invoice_number = invoice_number or ai_fields.get("invoice_number")
+            invoice_date = invoice_date or ai_fields.get("invoice_date")
+            description = description or ai_fields.get("description")
+            net_amount = net_amount if net_amount is not None else ai_fields.get("net_amount")
+            vat_amount = vat_amount if vat_amount is not None else ai_fields.get("vat_amount")
+            total_amount = total_amount if total_amount is not None else ai_fields.get("total_amount")
 
     if not description:
         description = "Invoice goods or services"
