@@ -68,16 +68,22 @@ def first_match(patterns: list[str], text: str, group: int = 1) -> str | None:
     return None
 
 
-def extract_native_pdf_pages(pdf_path: str | Path) -> list[str]:
+def get_pdf_page_count(pdf_path: str | Path) -> int:
     doc = fitz.open(str(pdf_path))
     try:
-        pages: list[str] = []
-        for page in doc:
-            blocks = page.get_text("blocks")
-            blocks = sorted(blocks, key=lambda b: (round(b[1], 1), round(b[0], 1)))
-            text = "\n".join(b[4].strip() for b in blocks if len(b) > 4 and b[4].strip())
-            pages.append(clean_text(text))
-        return pages
+        return len(doc)
+    finally:
+        doc.close()
+
+
+def extract_native_pdf_page(pdf_path: str | Path, page_index: int) -> str:
+    doc = fitz.open(str(pdf_path))
+    try:
+        page = doc[page_index]
+        blocks = page.get_text("blocks")
+        blocks = sorted(blocks, key=lambda b: (round(b[1], 1), round(b[0], 1)))
+        text = "\n".join(b[4].strip() for b in blocks if len(b) > 4 and b[4].strip())
+        return clean_text(text)
     finally:
         doc.close()
 
@@ -199,7 +205,7 @@ def openai_extract_invoice_fields(
                 "input": prompt,
                 "max_output_tokens": 300,
             },
-            timeout=60,
+            timeout=45,
         )
         response.raise_for_status()
         data = response.json()
@@ -237,14 +243,12 @@ def openai_extract_invoice_fields(
 def needs_ai_fallback(extracted: dict[str, Any], text: str) -> bool:
     if count_meaningful_chars(text) < 20:
         return False
-
     if suspicious_invoice_number(extracted.get("invoice_number")):
         return True
     if extracted.get("invoice_date") is None:
         return True
     if extracted.get("total_amount") is None:
         return True
-
     return False
 
 
@@ -284,86 +288,84 @@ def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str
     return merged
 
 
-def process_pdf(pdf_path: str | Path, openai_api_key: str | None = None) -> list[dict[str, Any]]:
+def process_pdf_page(
+    pdf_path: str | Path,
+    page_index: int,
+    openai_api_key: str | None = None,
+) -> dict[str, Any]:
     pdf_path = Path(pdf_path)
-    native_pages = extract_native_pdf_pages(pdf_path)
+    native_text = extract_native_pdf_page(pdf_path, page_index)
     ocr_backend = get_ocr_backend()
 
-    results: list[dict[str, Any]] = []
+    final_text = native_text
+    method = "native_text"
+    ocr_error = None
 
-    for idx, native_text in enumerate(native_pages):
-        native_text = clean_text(native_text)
-        final_text = native_text
-        method = "native_text"
-        ocr_error = None
-
-        # Simple rule: if native text is weak, try OCR
-        if count_meaningful_chars(native_text) < 80 and ocr_backend is not None:
-            try:
-                ocr_text = clean_text(
-                    ocr_backend.extract_text_from_pdf_page(pdf_path, idx, scale=2.5)
-                )
-                if count_meaningful_chars(ocr_text) > count_meaningful_chars(native_text):
-                    final_text = ocr_text
-                    method = f"ocr_{ocr_backend.name}"
-            except Exception as e:
-                ocr_error = str(e)
-
-        # Always return one row per page
-        if count_meaningful_chars(final_text) == 0:
-            final_text = f"OCR/NATIVE TEXT EMPTY. OCR_ERROR={ocr_error or 'none'}"
-            method = f"{method}_empty"
-
-        extracted = simple_extract(final_text)
-
-        # Reintroduce AI only as fallback
-        if (
-            settings.use_openai
-            and openai_api_key
-            and needs_ai_fallback(extracted, final_text)
-        ):
-            ai_fields = openai_extract_invoice_fields(
-                final_text,
-                openai_api_key,
-                model=settings.openai_model,
+    if count_meaningful_chars(native_text) < 80 and ocr_backend is not None:
+        try:
+            ocr_text = clean_text(
+                ocr_backend.extract_text_from_pdf_page(pdf_path, page_index, scale=1.8)
             )
-            extracted = merge_ai_fields(extracted, ai_fields)
-            method = f"{method}+openai_fallback"
+            if count_meaningful_chars(ocr_text) > count_meaningful_chars(native_text):
+                final_text = ocr_text
+                method = f"ocr_{ocr_backend.name}"
+        except Exception as e:
+            ocr_error = str(e)
 
-        # Better confidence scoring
-        confidence = 0.0
-        if extracted.get("supplier_name"):
-            confidence += 0.15
-        if not suspicious_invoice_number(extracted.get("invoice_number")):
-            confidence += 0.20
-        if extracted.get("invoice_date"):
-            confidence += 0.20
-        if extracted.get("total_amount") is not None:
-            confidence += 0.20
-        if extracted.get("net_amount") is not None:
-            confidence += 0.10
-        if extracted.get("vat_amount") is not None:
-            confidence += 0.10
-        if (
-            extracted.get("net_amount") is not None
-            and extracted.get("vat_amount") is not None
-            and extracted.get("total_amount") is not None
-        ):
-            if round((extracted["net_amount"] + extracted["vat_amount"]) - extracted["total_amount"], 2) == 0:
-                confidence += 0.05
+    if count_meaningful_chars(final_text) == 0:
+        final_text = f"OCR/NATIVE TEXT EMPTY. OCR_ERROR={ocr_error or 'none'}"
+        method = f"{method}_empty"
 
-        confidence = round(min(confidence, 0.99), 2)
+    extracted = simple_extract(final_text)
 
-        extracted.update({
-            "page_no": idx + 1,
-            "method_used": method,
-            "confidence_score": confidence,
-            "validation_status": "ok" if confidence >= 0.70 else "review",
-            "review_required": confidence < 0.70,
-            "header_raw": "\n".join(final_text.splitlines()[:12]),
-            "totals_raw": "\n".join(final_text.splitlines()[-10:]) if final_text else None,
-            "page_text_raw": final_text[:20000],
-        })
-        results.append(extracted)
+    if settings.use_openai and openai_api_key and needs_ai_fallback(extracted, final_text):
+        ai_fields = openai_extract_invoice_fields(
+            final_text,
+            openai_api_key,
+            model=settings.openai_model,
+        )
+        extracted = merge_ai_fields(extracted, ai_fields)
+        method = f"{method}+openai_fallback"
 
-    return results
+    confidence = 0.0
+    if extracted.get("supplier_name"):
+        confidence += 0.15
+    if not suspicious_invoice_number(extracted.get("invoice_number")):
+        confidence += 0.20
+    if extracted.get("invoice_date"):
+        confidence += 0.20
+    if extracted.get("total_amount") is not None:
+        confidence += 0.20
+    if extracted.get("net_amount") is not None:
+        confidence += 0.10
+    if extracted.get("vat_amount") is not None:
+        confidence += 0.10
+    if (
+        extracted.get("net_amount") is not None
+        and extracted.get("vat_amount") is not None
+        and extracted.get("total_amount") is not None
+    ):
+        if round((extracted["net_amount"] + extracted["vat_amount"]) - extracted["total_amount"], 2) == 0:
+            confidence += 0.05
+
+    confidence = round(min(confidence, 0.99), 2)
+
+    extracted.update({
+        "page_no": page_index + 1,
+        "method_used": method,
+        "confidence_score": confidence,
+        "validation_status": "ok" if confidence >= 0.70 else "review",
+        "review_required": confidence < 0.70,
+        "header_raw": "\n".join(final_text.splitlines()[:12]),
+        "totals_raw": "\n".join(final_text.splitlines()[-10:]) if final_text else None,
+        "page_text_raw": final_text[:20000],
+    })
+    return extracted
+
+
+def process_pdf(pdf_path: str | Path, openai_api_key: str | None = None) -> list[dict[str, Any]]:
+    page_count = get_pdf_page_count(pdf_path)
+    return [
+        process_pdf_page(pdf_path, page_index=i, openai_api_key=openai_api_key)
+        for i in range(page_count)
+    ]

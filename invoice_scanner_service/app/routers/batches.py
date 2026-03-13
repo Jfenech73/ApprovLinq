@@ -13,7 +13,7 @@ from app.db.models import InvoiceBatch, InvoiceFile, InvoiceRow
 from app.db.session import get_db
 from app.schemas import BatchCreate, BatchDetailOut, BatchFileOut, BatchOut, InvoiceRowOut
 from app.services.exporter import workbook_from_rows
-from app.services.extractor import process_pdf
+from app.services.extractor import get_pdf_page_count, process_pdf_page
 
 router = APIRouter(prefix="/batches", tags=["batches"])
 
@@ -153,92 +153,114 @@ def process_batch(batch_id: UUID, db: Session = Depends(get_db)):
     total_rows = 0
 
     for invoice_file in files:
+        inserted_rows = 0
+        page_failures = 0
+
         try:
             invoice_file.status = "processing"
             invoice_file.error_message = None
             db.commit()
 
-            results = process_pdf(
-                invoice_file.file_path,
-                openai_api_key=settings.openai_api_key if settings.use_openai else None,
-            )
-
-            # Ensure we always return at least one review row
-            if not results:
-                results = [{
-                    "page_no": 1,
-                    "supplier_name": None,
-                    "invoice_number": None,
-                    "invoice_date": None,
-                    "description": "Unreadable invoice - OCR returned no text",
-                    "line_items_raw": None,
-                    "net_amount": None,
-                    "vat_amount": None,
-                    "total_amount": None,
-                    "currency": "EUR",
-                    "tax_code": None,
-                    "method_used": "ocr",
-                    "confidence_score": 0.0,
-                    "validation_status": "review",
-                    "review_required": True,
-                    "header_raw": None,
-                    "totals_raw": None,
-                    "page_text_raw": "",
-                }]
-
-            inserted_rows = 0
-            invoice_file.page_count = len(results)
-
-            for r in results:
-                row = InvoiceRow(
-                    batch_id=batch_id,
-                    source_file_id=invoice_file.id,
-                    source_filename=invoice_file.original_filename,
-                    page_no=r.get("page_no"),
-                    supplier_name=r.get("supplier_name"),
-                    invoice_number=r.get("invoice_number"),
-                    invoice_date=r.get("invoice_date"),
-                    description=r.get("description"),
-                    line_items_raw=r.get("line_items_raw"),
-                    net_amount=r.get("net_amount"),
-                    vat_amount=r.get("vat_amount"),
-                    total_amount=r.get("total_amount"),
-                    currency=r.get("currency"),
-                    tax_code=r.get("tax_code"),
-                    method_used=r.get("method_used"),
-                    confidence_score=r.get("confidence_score"),
-                    validation_status=r.get("validation_status"),
-                    review_required=r.get("review_required", False),
-                    header_raw=r.get("header_raw"),
-                    totals_raw=r.get("totals_raw"),
-                    page_text_raw=r.get("page_text_raw"),
-                )
-                db.add(row)
-                inserted_rows += 1
-
+            page_count = get_pdf_page_count(invoice_file.file_path)
+            invoice_file.page_count = page_count
             db.commit()
 
-            total_pages += len(results)
-            total_rows += inserted_rows
+            for page_index in range(page_count):
+                try:
+                    r = process_pdf_page(
+                        invoice_file.file_path,
+                        page_index=page_index,
+                        openai_api_key=settings.openai_api_key if settings.use_openai else None,
+                    )
+
+                    row = InvoiceRow(
+                        batch_id=batch_id,
+                        source_file_id=invoice_file.id,
+                        source_filename=invoice_file.original_filename,
+                        page_no=r.get("page_no"),
+                        supplier_name=r.get("supplier_name"),
+                        invoice_number=r.get("invoice_number"),
+                        invoice_date=r.get("invoice_date"),
+                        description=r.get("description"),
+                        line_items_raw=r.get("line_items_raw"),
+                        net_amount=r.get("net_amount"),
+                        vat_amount=r.get("vat_amount"),
+                        total_amount=r.get("total_amount"),
+                        currency=r.get("currency"),
+                        tax_code=r.get("tax_code"),
+                        method_used=r.get("method_used"),
+                        confidence_score=r.get("confidence_score"),
+                        validation_status=r.get("validation_status"),
+                        review_required=r.get("review_required", False),
+                        header_raw=r.get("header_raw"),
+                        totals_raw=r.get("totals_raw"),
+                        page_text_raw=r.get("page_text_raw"),
+                    )
+                    db.add(row)
+                    db.commit()
+                    inserted_rows += 1
+                    total_rows += 1
+                    total_pages += 1
+
+                    batch.page_count = total_pages
+                    batch.notes = (
+                        f"Processing file {invoice_file.original_filename}: "
+                        f"page {page_index + 1}/{page_count}"
+                    )
+                    db.commit()
+
+                except Exception as page_error:
+                    db.rollback()
+                    page_failures += 1
+
+                    fallback_row = InvoiceRow(
+                        batch_id=batch_id,
+                        source_file_id=invoice_file.id,
+                        source_filename=invoice_file.original_filename,
+                        page_no=page_index + 1,
+                        supplier_name=None,
+                        invoice_number=None,
+                        invoice_date=None,
+                        description=f"Page processing error: {str(page_error)[:180]}",
+                        line_items_raw=None,
+                        net_amount=None,
+                        vat_amount=None,
+                        total_amount=None,
+                        currency="EUR",
+                        tax_code=None,
+                        method_used="page_error",
+                        confidence_score=0.0,
+                        validation_status="review",
+                        review_required=True,
+                        header_raw=None,
+                        totals_raw=None,
+                        page_text_raw=f"PAGE_ERROR={str(page_error)}",
+                    )
+                    db.add(fallback_row)
+                    db.commit()
+                    inserted_rows += 1
+                    total_rows += 1
+                    total_pages += 1
 
             if inserted_rows == 0:
+                invoice_file.status = "failed"
+                invoice_file.error_message = "No pages could be processed."
+                failed_files += 1
+            elif page_failures > 0:
                 invoice_file.status = "partial"
-                invoice_file.error_message = "OCR produced no structured data. Manual review required."
-                partial_files += 1
-                processed_files += 1
-            elif inserted_rows < len(results):
-                invoice_file.status = "partial"
-                invoice_file.error_message = f"Only {inserted_rows} page(s) were stored."
+                invoice_file.error_message = f"{page_failures} page(s) failed and were marked for review."
                 partial_files += 1
                 processed_files += 1
             else:
                 invoice_file.status = "processed"
+                invoice_file.error_message = None
                 processed_files += 1
-                
+
             invoice_file.processed_at = datetime.utcnow()
             db.commit()
 
         except Exception as e:
+            db.rollback()
             invoice_file.status = "failed"
             invoice_file.error_message = str(e)
             invoice_file.processed_at = datetime.utcnow()
