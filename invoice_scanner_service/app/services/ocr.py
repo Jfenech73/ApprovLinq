@@ -35,28 +35,17 @@ class OCRSpaceBackend(OCRBackend):
     name = "ocr_space"
 
     def __init__(self) -> None:
-        provider = (settings.ocr_provider or "").strip().lower()
-        if provider != "ocr_space":
-            raise RuntimeError(
-                f"OCRSpaceBackend selected while OCR_PROVIDER is '{settings.ocr_provider}'. "
-                "Set OCR_PROVIDER=ocr_space."
-            )
         if not settings.ocr_space_api_key:
-            raise RuntimeError(
-                "OCR.space API key is missing. "
-                "Set OCR_SPACE_API_KEY in Koyeb environment variables."
-            )
+            raise RuntimeError("OCR.space API key is missing. Set OCR_SPACE_API_KEY.")
 
     def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 2.0) -> str:
         image_bytes = self.render_pdf_page_to_png_bytes(pdf_path, page_index, scale=scale)
-
         if not image_bytes:
             return ""
 
         files = {
             "file": (f"page_{page_index + 1}.png", image_bytes, "image/png")
         }
-
         data = {
             "apikey": settings.ocr_space_api_key,
             "language": settings.ocr_space_language,
@@ -93,12 +82,6 @@ class PaddleOCRBackend(OCRBackend):
     name = "paddleocr"
 
     def __init__(self) -> None:
-        provider = (settings.ocr_provider or "").strip().lower()
-        if provider != "paddleocr":
-            raise RuntimeError(
-                f"PaddleOCRBackend selected while OCR_PROVIDER is '{settings.ocr_provider}'. "
-                "Set OCR_PROVIDER=paddleocr."
-            )
         if not settings.enable_paddle_ocr:
             raise RuntimeError("PaddleOCR is disabled. Set ENABLE_PADDLE_OCR=true.")
         try:
@@ -106,11 +89,8 @@ class PaddleOCRBackend(OCRBackend):
         except Exception as e:
             raise RuntimeError("PaddleOCR is not installed. Install it and rebuild the image.") from e
 
-        self.ocr = PaddleOCR(
-            use_angle_cls=True,
-            lang="en",
-            show_log=False,
-        )
+        # Keep this minimal for compatibility across PaddleOCR builds
+        self.ocr = PaddleOCR(use_angle_cls=True, lang="en")
 
     def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 2.5) -> str:
         from PIL import Image
