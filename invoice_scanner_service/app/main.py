@@ -16,8 +16,6 @@ app = FastAPI(title=settings.app_name)
 base_dir = Path(__file__).parent
 static_dir = base_dir / "static"
 
-static_dir.mkdir(parents=True, exist_ok=True)
-
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 
