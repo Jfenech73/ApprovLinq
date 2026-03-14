@@ -20,8 +20,10 @@ function formatDate(value) {
 }
 
 function setInlineMessage(element, text, kind = "") {
-  element.textContent = text || "";
-  element.className = `message ${kind}`.trim();
+  const clean = normalizeUiErrorMessage(text);
+  element.textContent = clean || "";
+  const finalKind = kind || (clean && clean.includes("server") ? "server-error" : "");
+  element.className = `message ${finalKind}`.trim();
 }
 
 function confidenceDisplay(value) {
@@ -312,8 +314,10 @@ $("exportBtn").addEventListener("click", async () => {
 });
 
 $("refreshRowsBtn").addEventListener("click", loadRows);
-const logoutBtn = $("logoutBtn");
-if (logoutBtn) logoutBtn.addEventListener("click", logoutAndGo);
+const logoutBtn = document.getElementById("logoutBtn");
+if (logoutBtn) {
+  logoutBtn.addEventListener("click", logoutAndGo);
+}
 $("refreshBatchesBtn").addEventListener("click", loadBatches);
 $("companySelector").addEventListener("change", async () => {
   state.selectedBatchId = null;
@@ -331,7 +335,7 @@ $("tenantSelector").addEventListener("change", async (event) => {
     await loadCompanies();
     await loadBatches();
   } catch (error) {
-    setInlineMessage($("createBatchMessage"), error.message);
+    setInlineMessage($("createBatchMessage"), normalizeUiErrorMessage(error.message), "server-error");
   }
 });
 
@@ -344,7 +348,7 @@ async function initScannerPage() {
     await loadCompanies();
     await loadBatches();
   } catch (error) {
-    setInlineMessage($("createBatchMessage"), error.message);
+    setInlineMessage($("createBatchMessage"), normalizeUiErrorMessage(error.message), "server-error");
   }
 }
 

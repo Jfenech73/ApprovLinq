@@ -9,23 +9,32 @@
 <body>
   <div class="page-shell">
         <header class="hero">
-      <div class="hero-left">
-        <div class="hero-copy">
-          <h1>Platform Admin</h1>
-          <div class="version-badge">v3.03</div>
-        </div>
-        <div class="hero-nav">
-          <a class="btn btn-secondary" href="/static/scanner.html">Scanning Tool</a>
-        </div>
+  <div class="hero-copy">
+    <div class="hero-copy-top">
+      <h1>Platform Admin</h1>
+      <div class="version-badge">v3.03</div>
+    </div>
+
+    <div class="hero-copy-bottom">
+      <a class="btn btn-secondary" href="/static/scanner.html">Scanning Tool</a>
+    </div>
+  </div>
+
+  <div class="hero-actions">
+    <div class="hero-logo-wrap">
+      <img src="/static/img/approvlinq-logo.png" alt="Approvlinq" class="hero-logo" />
+    </div>
+
+    <div class="hero-toolbar">
+      <div class="hero-toolbar-left"></div>
+
+      <div class="hero-toolbar-right">
+        <button id="logoutBtn" class="btn btn-secondary" type="button">Logout</button>
+        <button id="pageHelpBtn" class="btn btn-secondary help-btn" type="button">?</button>
       </div>
-      <div class="hero-right">
-        <img src="/static/img/approvlinq-logo.png" alt="Approvlinq" class="hero-logo" />
-        <div class="header-controls">
-          <button id="logoutBtn" class="btn btn-secondary" type="button">Logout</button>
-          <button id="pageHelpBtn" class="help-trigger" type="button" aria-label="Open help">?</button>
-        </div>
-      </div>
-    </header>
+    </div>
+  </div>
+</header>
 
     <div id="pageMessage" class="message"></div>
 

@@ -38,23 +38,41 @@ async function apiFetch(path, options = {}) {
   });
 
   if (!response.ok) {
-    let message = `${response.status} ${response.statusText}`;
+    let message = "Something went wrong on the server. Please refresh the page or try again.";
+
     try {
       const data = await response.json();
-      if (data?.detail) {
-        message = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
-      }
-    } catch (_) {}
 
-    if (String(message).startsWith("500")) {
-      message = "Something went wrong on the server. Please refresh the page or try again.";
+      if (response.status === 401) {
+        message = "Your session has expired. Please log in again.";
+      } else if (response.status === 403) {
+        message = "You do not have permission to use this feature.";
+      } else if (response.status === 404) {
+        message = "The requested item could not be found.";
+      } else if (response.status >= 500) {
+        message = "Something went wrong on the server. Please refresh the page or try again.";
+      } else if (data?.detail) {
+        if (typeof data.detail === "string") {
+          message = data.detail;
+        } else {
+          message = "The request could not be completed.";
+        }
+      }
+    } catch (_) {
+      if (response.status >= 500) {
+        message = "Something went wrong on the server. Please refresh the page or try again.";
+      }
     }
 
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
 
-  const ct = response.headers.get("content-type") || "";
-  if (ct.includes("application/json")) return response.json();
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
   return response;
 }
 
@@ -63,11 +81,32 @@ function setText(id, text) {
   if (el) el.textContent = text || "";
 }
 
+function normalizeUiErrorMessage(message) {
+  if (!message) return "";
+  const text = String(message).trim();
+
+  if (text === "500" || text.startsWith("500 ") || text.includes("Internal Server Error")) {
+    return "Something went wrong on the server. Please refresh the page or try again.";
+  }
+
+  if (text === "401" || text.startsWith("401 ")) {
+    return "Your session has expired. Please log in again.";
+  }
+
+  if (text === "403" || text.startsWith("403 ")) {
+    return "You do not have permission to use this feature.";
+  }
+
+  return text;
+}
+
 function setMessage(id, text, kind = "") {
   const el = document.getElementById(id);
   if (!el) return;
-  el.textContent = text || "";
-  el.className = `message ${kind}`.trim();
+
+  const clean = normalizeUiErrorMessage(text);
+  el.textContent = clean || "";
+  el.className = `message ${kind || (clean && clean.includes("server") ? "server-error" : "")}`.trim();
 }
 
 function escapeHtml(value) {
@@ -206,7 +245,7 @@ function helpModalEscHandler(event) {
 }
 
 function initPageHelp(config) {
-  const btn = document.getElementById("pageHelpBtn");
+  const btn = document.getElementById("pageHelpBtn") || document.getElementById("helpBtn");
   if (!btn) return;
   btn.addEventListener("click", () => openHelpModal(config));
 }
