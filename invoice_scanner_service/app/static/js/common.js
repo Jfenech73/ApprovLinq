@@ -197,6 +197,7 @@ async function populateTenantSelector(selectorId, options = {}) {
 function closeHelpModal() {
   const overlay = document.getElementById("helpModalOverlay");
   if (overlay) overlay.remove();
+  document.removeEventListener("keydown", helpModalEscHandler);
 }
 
 function renderHelpCard(section) {
@@ -237,7 +238,7 @@ function openHelpModal(config) {
     if (event.target === overlay) closeHelpModal();
   });
   overlay.querySelector(".help-modal-close").addEventListener("click", closeHelpModal);
-  document.addEventListener("keydown", helpModalEscHandler, { once: true });
+  document.addEventListener("keydown", helpModalEscHandler);
 }
 
 function helpModalEscHandler(event) {
@@ -245,7 +246,7 @@ function helpModalEscHandler(event) {
 }
 
 function initPageHelp(config) {
-  const btn = document.getElementById("pageHelpBtn") || document.getElementById("helpBtn");
+  const btn = document.getElementById("helpBtn") || document.getElementById("pageHelpBtn");
   if (!btn) return;
-  btn.onclick = () => openHelpModal(config);
+  btn.addEventListener("click", () => openHelpModal(config));
 }
