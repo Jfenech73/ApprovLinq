@@ -512,3 +512,60 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; justif
     grid-template-columns: 1fr;
   }
 }
+
+
+.hero {
+  align-items: stretch;
+}
+
+.hero-left {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.hero-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.hero-nav {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.help-trigger {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 920px) {
+  .hero-left,
+  .hero-right {
+    width: 100%;
+  }
+
+  .hero-right {
+    align-items: flex-start;
+  }
+
+  .header-controls {
+    justify-content: flex-start;
+  }
+}

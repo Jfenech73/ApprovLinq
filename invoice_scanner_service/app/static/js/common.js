@@ -45,6 +45,11 @@ async function apiFetch(path, options = {}) {
         message = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
       }
     } catch (_) {}
+
+    if (String(message).startsWith("500")) {
+      message = "Something went wrong on the server. Please refresh the page or try again.";
+    }
+
     throw new Error(message);
   }
 

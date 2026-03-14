@@ -312,6 +312,8 @@ $("exportBtn").addEventListener("click", async () => {
 });
 
 $("refreshRowsBtn").addEventListener("click", loadRows);
+const logoutBtn = $("logoutBtn");
+if (logoutBtn) logoutBtn.addEventListener("click", logoutAndGo);
 $("refreshBatchesBtn").addEventListener("click", loadBatches);
 $("companySelector").addEventListener("change", async () => {
   state.selectedBatchId = null;
