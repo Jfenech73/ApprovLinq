@@ -32,6 +32,10 @@ from app.utils.security import hash_password
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
+VALID_STATUSES = {"active", "inactive"}
+VALID_ROLES = {"admin", "tenant"}
+
+
 def require_admin(user: User = Depends(current_user)) -> User:
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
@@ -45,14 +49,22 @@ def list_tenants(_user: User = Depends(require_admin), db: Session = Depends(get
 
 @router.post("/tenants", response_model=TenantOut)
 def create_tenant(payload: TenantCreate, _user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    status = (payload.status or "active").strip().lower()
+    if status not in VALID_STATUSES:
+        raise HTTPException(status_code=400, detail="Status must be active or inactive")
+
+    tenant_code = payload.tenant_code.strip().lower()
+    if db.query(Tenant).filter(Tenant.tenant_code == tenant_code).first():
+        raise HTTPException(status_code=400, detail="Tenant code already exists")
+
     tenant = Tenant(
-        tenant_code=payload.tenant_code.strip().lower(),
+        tenant_code=tenant_code,
         tenant_name=payload.tenant_name.strip(),
         contact_name=payload.contact_name,
         contact_email=payload.contact_email,
         notes=payload.notes,
-        status="active",
-        is_active=True,
+        status=status,
+        is_active=status == "active",
     )
     db.add(tenant)
     db.commit()
@@ -65,8 +77,18 @@ def update_tenant(tenant_id: str, payload: TenantUpdate, _user: User = Depends(r
     tenant = db.get(Tenant, tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    for field, value in payload.model_dump(exclude_unset=True).items():
+
+    values = payload.model_dump(exclude_unset=True)
+    if "status" in values and values["status"] is not None:
+        status = values["status"].strip().lower()
+        if status not in VALID_STATUSES:
+            raise HTTPException(status_code=400, detail="Status must be active or inactive")
+        values["status"] = status
+        values.setdefault("is_active", status == "active")
+
+    for field, value in values.items():
         setattr(tenant, field, value)
+
     db.commit()
     db.refresh(tenant)
     return tenant
@@ -79,11 +101,27 @@ def list_users(_user: User = Depends(require_admin), db: Session = Depends(get_d
 
 @router.post("/users", response_model=UserOut)
 def create_user(payload: UserCreate, _user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    role = payload.role.strip().lower()
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="Role must be admin or tenant")
+
+    email = payload.email.lower().strip()
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=400, detail="User email already exists")
+
+    if role != "admin" and not payload.tenant_ids:
+        raise HTTPException(status_code=400, detail="Tenant users must be assigned to at least one tenant")
+
+    if payload.tenant_ids:
+        found = db.query(Tenant.id).filter(Tenant.id.in_(payload.tenant_ids)).all()
+        if len(found) != len(set(payload.tenant_ids)):
+            raise HTTPException(status_code=400, detail="One or more tenant assignments are invalid")
+
     user = User(
-        email=payload.email.lower().strip(),
+        email=email,
         full_name=payload.full_name.strip(),
         password_hash=hash_password(payload.password),
-        role=payload.role,
+        role=role,
         is_active=payload.is_active,
     )
     db.add(user)
@@ -95,7 +133,7 @@ def create_user(payload: UserCreate, _user: User = Depends(require_admin), db: S
         link = UserTenant(
             user_id=user.id,
             tenant_id=tenant_id,
-            tenant_role="tenant_admin" if payload.role != "admin" else "observer",
+            tenant_role="tenant_admin" if role != "admin" else "observer",
             is_default=not default_set,
         )
         db.add(link)
@@ -112,15 +150,34 @@ def update_user(user_id: str, payload: UserUpdate, _user: User = Depends(require
 
     values = payload.model_dump(exclude_unset=True)
     tenant_ids = values.pop("tenant_ids", None)
+
+    if "role" in values and values["role"] is not None:
+        role = values["role"].strip().lower()
+        if role not in VALID_ROLES:
+            raise HTTPException(status_code=400, detail="Role must be admin or tenant")
+        values["role"] = role
+
     for field, value in values.items():
         setattr(user, field, value)
     db.commit()
 
     if tenant_ids is not None:
+        if user.role != "admin" and not tenant_ids:
+            raise HTTPException(status_code=400, detail="Tenant users must be assigned to at least one tenant")
+        if tenant_ids:
+            found = db.query(Tenant.id).filter(Tenant.id.in_(tenant_ids)).all()
+            if len(found) != len(set(tenant_ids)):
+                raise HTTPException(status_code=400, detail="One or more tenant assignments are invalid")
+
         db.query(UserTenant).filter(UserTenant.user_id == user.id).delete()
         default_set = False
         for tenant_id in tenant_ids:
-            db.add(UserTenant(user_id=user.id, tenant_id=tenant_id, tenant_role="tenant_admin", is_default=not default_set))
+            db.add(UserTenant(
+                user_id=user.id,
+                tenant_id=tenant_id,
+                tenant_role="tenant_admin" if user.role != "admin" else "observer",
+                is_default=not default_set,
+            ))
             default_set = True
         db.commit()
 

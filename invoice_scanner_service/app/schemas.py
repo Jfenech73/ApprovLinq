@@ -1,7 +1,6 @@
 from datetime import date, datetime
-from uuid import UUID
-
 from pydantic import BaseModel, Field, EmailStr
+from uuid import UUID
 
 
 class LoginRequest(BaseModel):
@@ -35,6 +34,7 @@ class ChangePasswordRequest(BaseModel):
 class TenantCreate(BaseModel):
     tenant_code: str = Field(min_length=2, max_length=100)
     tenant_name: str = Field(min_length=2, max_length=255)
+    status: str = Field(default="active")
     contact_name: str | None = None
     contact_email: EmailStr | None = None
     notes: str | None = None
