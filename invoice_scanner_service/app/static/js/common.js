@@ -247,5 +247,5 @@ function helpModalEscHandler(event) {
 function initPageHelp(config) {
   const btn = document.getElementById("pageHelpBtn") || document.getElementById("helpBtn");
   if (!btn) return;
-  btn.addEventListener("click", () => openHelpModal(config));
+  btn.onclick = () => openHelpModal(config);
 }

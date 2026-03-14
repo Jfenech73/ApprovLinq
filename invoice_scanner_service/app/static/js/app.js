@@ -22,8 +22,7 @@ function formatDate(value) {
 function setInlineMessage(element, text, kind = "") {
   const clean = normalizeUiErrorMessage(text);
   element.textContent = clean || "";
-  const finalKind = kind || (clean && clean.includes("server") ? "server-error" : "");
-  element.className = `message ${finalKind}`.trim();
+  element.className = `message ${kind}`.trim();
 }
 
 function confidenceDisplay(value) {
@@ -238,7 +237,7 @@ $("createBatchForm").addEventListener("submit", async (event) => {
     await loadBatches();
     await selectBatch(batch.id);
   } catch (error) {
-    setInlineMessage(message, error.message);
+    setInlineMessage(message, normalizeUiErrorMessage(error.message), "server-error");
   }
 });
 
@@ -265,7 +264,7 @@ $("uploadBtn").addEventListener("click", async () => {
     await selectBatch(state.selectedBatchId);
     await loadBatches();
   } catch (error) {
-    setInlineMessage(message, error.message);
+    setInlineMessage(message, normalizeUiErrorMessage(error.message), "server-error");
   }
 });
 
@@ -284,7 +283,7 @@ $("processBtn").addEventListener("click", async () => {
     await loadBatches();
     startProgressPolling();
   } catch (error) {
-    setInlineMessage(message, error.message);
+    setInlineMessage(message, normalizeUiErrorMessage(error.message), "server-error");
   }
 });
 
@@ -309,7 +308,7 @@ $("exportBtn").addEventListener("click", async () => {
     URL.revokeObjectURL(url);
     setInlineMessage(message, "Export downloaded.", "success");
   } catch (error) {
-    setInlineMessage(message, error.message);
+    setInlineMessage(message, normalizeUiErrorMessage(error.message), "server-error");
   }
 });
 
