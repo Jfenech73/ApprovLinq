@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Approvlinq Admin</title>
+  <link rel="stylesheet" href="/static/css/app.css" />
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <h1>Admin Console</h1>
+        <div class="version-badge">v3.00</div>
+      </div>
+      <div class="hero-actions">
+        <img src="/static/img/approvlinq-logo.png" alt="Approvlinq" class="hero-logo" />
+        <div class="row gap-sm wrap">
+          <a class="btn btn-secondary" href="/static/scanner.html">Open scanner</a>
+          <button id="logoutBtn" class="btn btn-secondary" type="button">Logout</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="card">
+        <h2>Create tenant</h2>
+        <form id="tenantForm" class="stack">
+          <input id="tenantCode" type="text" placeholder="Tenant code" required />
+          <input id="tenantName" type="text" placeholder="Tenant name" required />
+          <input id="tenantContactName" type="text" placeholder="Contact name" />
+          <input id="tenantContactEmail" type="text" placeholder="Contact email" />
+          <textarea id="tenantNotes" placeholder="Notes"></textarea>
+          <button class="btn btn-primary" type="submit">Create tenant</button>
+        </form>
+        <div id="tenantMessage" class="message"></div>
+      </section>
+
+      <section class="card">
+        <h2>Create user</h2>
+        <form id="userForm" class="stack">
+          <input id="userFullName" type="text" placeholder="Full name" required />
+          <input id="userEmail" type="text" placeholder="Email" required />
+          <input id="userPassword" type="password" placeholder="Temporary password" required />
+          <select id="userRole"><option value="tenant">Tenant user</option><option value="admin">Admin</option></select>
+          <label for="userTenantIds">Assign tenants</label>
+          <select id="userTenantIds" multiple size="5"></select>
+          <button class="btn btn-primary" type="submit">Create user</button>
+        </form>
+        <div id="userMessage" class="message"></div>
+      </section>
+
+      <section class="card full-width">
+        <div class="section-head"><h2>Tenant maintenance</h2><span class="muted">Set inactive when payment lapses.</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Tenant</th><th>Code</th><th>Status</th><th>Active</th><th>Contact</th><th>Action</th></tr></thead><tbody id="tenantsTableBody"></tbody></table></div>
+      </section>
+
+      <section class="card full-width">
+        <div class="section-head"><h2>Capacity usage by tenant</h2><button id="refreshCapacityBtn" class="btn btn-secondary" type="button">Refresh</button></div>
+        <div class="table-wrap"><table><thead><tr><th>Tenant</th><th>Status</th><th>Companies</th><th>Batches</th><th>Files</th><th>Rows</th><th>Storage MB</th></tr></thead><tbody id="capacityTableBody"></tbody></table></div>
+      </section>
+
+      <section class="card full-width">
+        <div class="section-head"><h2>Issue log</h2><span class="muted">Pending, in progress, resolved.</span></div>
+        <div class="table-wrap"><table><thead><tr><th>ID</th><th>Tenant</th><th>Title</th><th>Status</th><th>Priority</th><th>Resolution</th><th>Action</th></tr></thead><tbody id="issuesTableBody"></tbody></table></div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/js/admin.js"></script>
+</body>
+</html>

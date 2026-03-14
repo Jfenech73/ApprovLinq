@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Approvlinq Scanner</title>
+  <link rel="stylesheet" href="/static/css/app.css" />
+</head>
+<body>
+  <div class="page-shell">
+    <div class="page">
+      <header class="hero">
+        <div class="hero-copy">
+          <h1>Approvlinq</h1>
+          <div class="version-badge">v2.20</div>
+        </div>
+
+        <div class="hero-actions">
+          <img
+            src="/static/img/approvlinq-logo.png"
+            alt="Approvlinq"
+            class="hero-logo"
+          />
+          <div class="row gap-sm wrap"><select id="companySelector"></select><button id="refreshBatchesBtn" class="btn btn-secondary" type="button">Refresh batches</button><a class="btn btn-secondary" href="/static/tenant.html">Workspace</a></div>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="card">
+          <h2>Create batch</h2>
+          <form id="createBatchForm" class="stack">
+            <label for="companySelector">Company</label><div class="message muted">Choose company before creating a batch.</div><label for="batchName">Batch name</label>
+            <div class="row gap-sm wrap">
+              <input
+                id="batchName"
+                name="batchName"
+                type="text"
+                placeholder="Example: March supplier invoices"
+                required
+                maxlength="255"
+              />
+              <button class="btn btn-primary" type="submit">Create batch</button>
+            </div>
+          </form>
+          <div id="createBatchMessage" class="message"></div>
+        </section>
+
+        <section class="card">
+          <h2>Selected batch</h2>
+          <div id="selectedBatchEmpty" class="muted">Create or select a batch to continue.</div>
+
+          <div id="selectedBatchPanel" class="hidden stack-lg">
+            <div class="batch-meta">
+              <div><span class="label">Batch ID</span><code id="selectedBatchId"></code></div>
+              <div><span class="label">Name</span><span id="selectedBatchName"></span></div>
+              <div><span class="label">Status</span><span id="selectedBatchStatus" class="pill"></span></div>
+              <div><span class="label">Notes</span><span id="selectedBatchNotes">-</span></div>
+            </div>
+
+            <div class="stack">
+              <label for="pdfFiles">Upload PDF files</label>
+              <input id="pdfFiles" type="file" accept=".pdf,application/pdf" multiple />
+              <div class="row gap-sm wrap">
+                <button id="uploadBtn" class="btn btn-primary" type="button">Upload selected files</button>
+                <button id="processBtn" class="btn btn-secondary" type="button">Process batch</button>
+                <button id="exportBtn" class="btn btn-secondary" type="button">Export Excel</button>
+              </div>
+              <div id="actionMessage" class="message"></div>
+            </div>
+
+            <div>
+              <h3>Uploaded files</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>File</th>
+                      <th>Status</th>
+                      <th>Pages</th>
+                      <th>Error</th>
+                      <th>Uploaded</th>
+                    </tr>
+                  </thead>
+                  <tbody id="filesTableBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card full-width">
+          <div class="section-head">
+            <h2>Batches</h2>
+            <span class="muted">Click a batch to work on it.</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Batch</th>
+                  <th>Status</th>
+                  <th>Pages</th>
+                  <th>Created</th>
+                  <th>Processed</th>
+                </tr>
+              </thead>
+              <tbody id="batchesTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card full-width">
+          <div class="section-head">
+            <h2>Extracted rows</h2>
+            <button id="refreshRowsBtn" class="btn btn-secondary" type="button">Refresh rows</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Source file</th>
+                  <th>Page</th>
+                  <th>Supplier</th>
+                  <th>Invoice no</th>
+                  <th>Date</th>
+                  <th>Description</th>
+                  <th>Total</th>
+                  <th>Confidence</th>
+                  <th>Review</th>
+                </tr>
+              </thead>
+              <tbody id="rowsTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
