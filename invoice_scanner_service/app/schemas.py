@@ -1,6 +1,7 @@
-from datetime import date, datetime
-from pydantic import BaseModel, Field, EmailStr
+from datetime import datetime
 from uuid import UUID
+
+from pydantic import BaseModel, Field, EmailStr
 
 
 class LoginRequest(BaseModel):

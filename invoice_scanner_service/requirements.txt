@@ -6,6 +6,7 @@ psycopg[binary]==3.2.10
 psycopg2-binary==2.9.10
 pydantic==2.11.7
 pydantic-settings==2.10.1
+email-validator>=2.2.0
 pandas==2.3.2
 openpyxl==3.1.5
 python-dateutil==2.9.0.post0
@@ -13,7 +14,6 @@ PyMuPDF==1.26.4
 pillow==11.3.0
 pypdfium2==4.30.0
 openai==1.107.2
-
 requests==2.32.3
 urllib3==2.2.3
 charset-normalizer==3.4.0
