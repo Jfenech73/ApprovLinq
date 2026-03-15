@@ -425,7 +425,7 @@ tr:last-child td {
 
 
 .hero-copy-bottom {
-  margin-top: auto;
+  margin-top: 20px;
   align-items: flex-end;
   padding-bottom: 4px;
 }
