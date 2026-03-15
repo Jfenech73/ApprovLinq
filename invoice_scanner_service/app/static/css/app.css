@@ -608,7 +608,6 @@ tr:last-child td {
   justify-content: flex-start;
 }
 
-.admin-hero .hero-copy-bottom,
 .scanner-hero .hero-copy-bottom {
   margin-top: 34px;
 }
@@ -616,6 +615,10 @@ tr:last-child td {
 .admin-hero .hero-toolbar,
 .scanner-hero .hero-toolbar {
   margin-top: 34px;
+}
+
+.admin-hero .hero-copy-bottom {
+  margin-top: 48px;
 }
 
 .admin-hero .hero-toolbar-left,
