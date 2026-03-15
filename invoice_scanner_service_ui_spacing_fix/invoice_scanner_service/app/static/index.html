@@ -3,62 +3,50 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Approvlinq Scanning Tool</title>
+  <title>Approvlinq</title>
   <link rel="stylesheet" href="/static/css/app.css" />
 </head>
 <body>
   <div class="page-shell">
     <div class="page">
-            <header class="hero scanner-hero">
-  <div class="hero-copy">
-    <div class="hero-copy-top">
-      <h1>Scanning Tool</h1>
-      <div class="version-badge">v3.03</div>
-    </div>
+      <header class="hero">
+        <div class="hero-copy">
+          <h1>Approvlinq</h1>
+          <div class="version-badge">v2.20</div>
+        </div>
 
-    <div class="hero-copy-bottom">
-      <select id="tenantSelector"></select>
-      <select id="companySelector"></select>
-      <button id="refreshBatchesBtn" class="btn btn-secondary" type="button">Refresh Batches</button>
-      <a id="workspaceLink" class="btn btn-secondary" href="/static/tenant.html">Tenant Admin</a>
-    </div>
-  </div>
-
-  <div class="hero-actions">
-    <div class="hero-logo-wrap">
-      <img src="/static/img/approvlinq-logo.png" alt="Approvlinq" class="hero-logo" />
-    </div>
-
-    <div class="hero-toolbar">
-      <div class="hero-toolbar-left"></div>
-
-      <div class="hero-toolbar-right">
-        <button id="logoutBtn" class="btn btn-secondary" type="button">Logout</button>
-        <button id="helpBtn" class="btn btn-secondary help-btn" type="button">?</button>
-      </div>
-    </div>
-  </div>
-</header>
-
-      <div id="pageMessage" class="message"></div>
+        <div class="hero-actions">
+          <img
+            src="/static/img/approvlinq-logo.png"
+            alt="Approvlinq"
+            class="hero-logo"
+          />
+          <button id="refreshBatchesBtn" class="btn btn-secondary" type="button">Refresh batches</button>
+        </div>
+      </header>
 
       <main class="grid">
         <section class="card">
-          <h2>Create Batch</h2>
+          <h2>Create batch</h2>
           <form id="createBatchForm" class="stack">
-            <label for="companySelector">Company</label>
-            <div class="message muted">Choose a tenant and company before creating a batch.</div>
             <label for="batchName">Batch name</label>
             <div class="row gap-sm wrap">
-              <input id="batchName" name="batchName" type="text" placeholder="Example: March supplier invoices" required maxlength="255" />
-              <button class="btn btn-primary" type="submit">Create Batch</button>
+              <input
+                id="batchName"
+                name="batchName"
+                type="text"
+                placeholder="Example: March supplier invoices"
+                required
+                maxlength="255"
+              />
+              <button class="btn btn-primary" type="submit">Create batch</button>
             </div>
           </form>
           <div id="createBatchMessage" class="message"></div>
         </section>
 
         <section class="card">
-          <h2>Selected Batch</h2>
+          <h2>Selected batch</h2>
           <div id="selectedBatchEmpty" class="muted">Create or select a batch to continue.</div>
 
           <div id="selectedBatchPanel" class="hidden stack-lg">
@@ -73,15 +61,15 @@
               <label for="pdfFiles">Upload PDF files</label>
               <input id="pdfFiles" type="file" accept=".pdf,application/pdf" multiple />
               <div class="row gap-sm wrap">
-                <button id="uploadBtn" class="btn btn-primary" type="button">Upload Selected Files</button>
-                <button id="processBtn" class="btn btn-secondary" type="button">Process Batch</button>
+                <button id="uploadBtn" class="btn btn-primary" type="button">Upload selected files</button>
+                <button id="processBtn" class="btn btn-secondary" type="button">Process batch</button>
                 <button id="exportBtn" class="btn btn-secondary" type="button">Export Excel</button>
               </div>
               <div id="actionMessage" class="message"></div>
             </div>
 
             <div>
-              <h3>Uploaded Files</h3>
+              <h3>Uploaded files</h3>
               <div class="table-wrap">
                 <table>
                   <thead>
@@ -123,8 +111,8 @@
 
         <section class="card full-width">
           <div class="section-head">
-            <h2>Extracted Rows</h2>
-            <button id="refreshRowsBtn" class="btn btn-secondary" type="button">Refresh Rows</button>
+            <h2>Extracted rows</h2>
+            <button id="refreshRowsBtn" class="btn btn-secondary" type="button">Refresh rows</button>
           </div>
           <div class="table-wrap">
             <table>
@@ -149,7 +137,6 @@
     </div>
   </div>
 
-  <script src="/static/js/common.js"></script>
   <script src="/static/js/app.js"></script>
 </body>
 </html>
