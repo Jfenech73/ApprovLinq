@@ -97,7 +97,7 @@ h1, h2, h3 {
 .hero-copy-bottom {
   display: flex;
   align-items: flex-end;
-  gap: 12px;
+  gap: 14px;
   margin-top: auto;
   flex-wrap: wrap;
 }
@@ -140,14 +140,14 @@ h1, h2, h3 {
 .hero-toolbar-left {
   display: flex;
   align-items: flex-end;
-  gap: 12px;
+  gap: 14px;
   margin-right: auto;
 }
 
 .hero-toolbar-right {
   display: flex;
   align-items: flex-end;
-  gap: 12px;
+  gap: 14px;
 }
 
 .version-badge {
