@@ -114,6 +114,10 @@ h1, h2, h3 {
   margin-top: 12px;
 }
 
+.hero-copy-bottom .hero-toolbar-right {
+  margin-top: 12px;
+}
+
 .hero-logo-wrap {
   display: flex;
   justify-content: flex-end;
