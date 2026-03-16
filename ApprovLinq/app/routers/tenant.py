@@ -5,7 +5,6 @@ import io
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Query
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import Tenant, User, Company, TenantSupplier, TenantNominalAccount, IssueLog, UserTenant
@@ -212,7 +211,6 @@ def import_suppliers(file: UploadFile = File(...), company_id: UUID | None = Que
     skipped = 0
     errors: list[str] = []
     seen_codes: set[str] = set()
-    seen_names: set[str] = set()
 
     for idx, row in enumerate(data_rows, start=2):
         supplier_account_code = _csv_value(row, columns.get("supplier account code"))
@@ -227,35 +225,41 @@ def import_suppliers(file: UploadFile = File(...), company_id: UUID | None = Que
             continue
 
         code_key = supplier_account_code.casefold()
-        name_key = supplier_name.casefold()
-        if code_key in seen_codes or name_key in seen_names:
+        if code_key in seen_codes:
             skipped += 1
-            errors.append(f"Row {idx}: duplicate supplier found in the import file and was skipped.")
+            errors.append(f"Row {idx}: duplicate supplier account code found in the import file and was skipped.")
             continue
         seen_codes.add(code_key)
-        seen_names.add(name_key)
 
-        existing = (
+        code_match = (
             db.query(TenantSupplier)
-            .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.company_id == company_id, TenantSupplier.supplier_account_code == supplier_account_code)
+            .filter(
+                TenantSupplier.tenant_id == tenant_id,
+                TenantSupplier.company_id == company_id,
+                TenantSupplier.supplier_account_code == supplier_account_code,
+            )
             .first()
         )
-        if not existing:
-            existing = (
-                db.query(TenantSupplier)
-                .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.company_id == company_id, TenantSupplier.supplier_name.ilike(supplier_name))
-                .first()
+        name_matches = (
+            db.query(TenantSupplier)
+            .filter(
+                TenantSupplier.tenant_id == tenant_id,
+                TenantSupplier.company_id == company_id,
+                TenantSupplier.supplier_name.ilike(supplier_name),
             )
+            .all()
+        )
+        name_match = name_matches[0] if len(name_matches) == 1 else None
 
         try:
             with db.begin_nested():
-                if existing:
-                    existing.supplier_account_code = supplier_account_code
-                    existing.supplier_name = supplier_name
-                    existing.default_nominal = default_nominal or None
-                    existing.posting_account = supplier_account_code
-                    existing.is_active = True
-                    db.flush()
+                target = code_match or name_match
+                if target:
+                    target.supplier_account_code = supplier_account_code
+                    target.supplier_name = supplier_name
+                    target.default_nominal = default_nominal or None
+                    target.posting_account = supplier_account_code
+                    target.is_active = True
                     updated += 1
                 else:
                     db.add(TenantSupplier(
@@ -267,15 +271,12 @@ def import_suppliers(file: UploadFile = File(...), company_id: UUID | None = Que
                         posting_account=supplier_account_code,
                         is_active=True,
                     ))
-                    db.flush()
                     imported += 1
-        except IntegrityError:
-            skipped += 1
-            errors.append(f"Row {idx}: conflicts with another supplier already stored in this selected company.")
-            continue
+                db.flush()
+            
         except Exception:
             skipped += 1
-            errors.append(f"Row {idx}: could not be imported due to an unexpected supplier import error.")
+            errors.append(f"Row {idx}: could not be imported because another supplier row in the selected company already uses that supplier account code.")
             continue
 
     db.commit()
