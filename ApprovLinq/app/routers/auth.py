@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.db.models import User, UserSession, UserTenant, Tenant
 from app.db.session import get_db
@@ -112,13 +112,17 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=503, detail="Database connection temporarily unavailable")
 
-    tenant_rows = (
+    try:
+        tenant_rows = (
         db.query(UserTenant, Tenant)
         .join(Tenant, Tenant.id == UserTenant.tenant_id)
         .filter(UserTenant.user_id == user.id)
         .order_by(UserTenant.is_default.desc(), Tenant.tenant_name.asc())
         .all()
-    )
+        )
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable")
     tenants = [
         TenantBrief(
             tenant_id=tenant.id,
@@ -151,7 +155,10 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
         .filter(UserTenant.user_id == user.id)
         .order_by(UserTenant.is_default.desc(), Tenant.tenant_name.asc())
         .all()
-    )
+        )
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable")
     return {
         "user_id": str(user.id),
         "email": user.email,

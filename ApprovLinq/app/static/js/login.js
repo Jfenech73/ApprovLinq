@@ -18,27 +18,22 @@ document.getElementById("loginForm").addEventListener("submit", async (event) =>
     if (contentType.includes("application/json")) {
       data = await response.json();
     } else {
-      const raw = await response.text();
-      throw new Error(
-        raw && raw.includes("Internal Server Error")
-          ? "Something went wrong on the server. Please try again."
-          : (raw || "Login failed")
-      );
+      const text = await response.text();
+      throw new Error(text || "Something went wrong on the server. Please try again.");
     }
 
     if (!response.ok) {
-      throw new Error(data?.detail || "Login failed");
+      throw new Error(data?.detail || data?.message || "Login failed");
     }
 
     localStorage.setItem("approvlinq_token", data.access_token);
-    const defaultTenant = (data.tenants || []).find((t) => t.is_default) || (data.tenants || [])[0];
+    const defaultTenant = (data.tenants || []).find(t => t.is_default) || (data.tenants || [])[0];
     if (defaultTenant) localStorage.setItem("approvlinq_tenant_id", defaultTenant.tenant_id);
     window.location.href = data.landing_page;
   } catch (error) {
-    message.textContent = error?.message || "Login failed";
+    message.textContent = error.message || "Something went wrong on the server. Please try again.";
   }
 });
-
 
 initPageHelp({
   title: "Login page help",
