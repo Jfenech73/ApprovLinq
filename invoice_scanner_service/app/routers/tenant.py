@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import io
 
+from sqlalchemy.exc import IntegrityError
+
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
 from sqlalchemy.orm import Session
 
@@ -107,6 +109,28 @@ def _header_key(value: str) -> str:
     return " ".join((value or "").strip().lower().replace("_", " ").replace("-", " ").split())
 
 
+def _resolve_csv_header(header: list[str], aliases: dict[str, tuple[str, ...]]) -> dict[str, int]:
+    resolved: dict[str, int] = {}
+    for canonical, options in aliases.items():
+        for option in options:
+            key = _header_key(option)
+            if key in header:
+                resolved[canonical] = header.index(key)
+                break
+    missing = [canonical for canonical in aliases if canonical not in resolved]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV header is missing required columns: {', '.join(missing)}",
+        )
+    return resolved
+
+
+def _cell(row: list[str], idx: int) -> str:
+    value = row[idx] if idx < len(row) else ""
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _read_csv_upload(file: UploadFile) -> tuple[list[str], list[list[str]]]:
     filename = (file.filename or "").lower()
     if not filename.endswith(".csv"):
@@ -154,23 +178,40 @@ def update_supplier(supplier_id: int, payload: SupplierUpdate, tenant_id=Depends
 @router.post("/suppliers/import")
 def import_suppliers(file: UploadFile = File(...), tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
     header, data_rows = _read_csv_upload(file)
-    expected = ["supplier account code", "supplier name", "default nominal"]
-    if header != expected:
-        raise HTTPException(
-            status_code=400,
-            detail="Supplier CSV header must be exactly: supplier account code, supplier name, default nominal",
-        )
+    header_map = _resolve_csv_header(
+        header,
+        {
+            "supplier account code": (
+                "supplier account code",
+                "supplier code",
+                "account code",
+                "posting account",
+                "supplier account",
+                "customer code",
+            ),
+            "supplier name": (
+                "supplier name",
+                "name",
+                "supplier",
+            ),
+            "default nominal": (
+                "default nominal",
+                "nominal code",
+                "nominal",
+                "default nominal code",
+            ),
+        },
+    )
 
     imported = 0
     skipped = 0
     errors: list[str] = []
 
     for idx, row in enumerate(data_rows, start=2):
-        values = [col.strip() if isinstance(col, str) else "" for col in row[:3]]
-        while len(values) < 3:
-            values.append("")
+        supplier_account_code = _cell(row, header_map["supplier account code"])
+        supplier_name = _cell(row, header_map["supplier name"])
+        default_nominal = _cell(row, header_map["default nominal"])
 
-        supplier_account_code, supplier_name, default_nominal = values
         if not supplier_account_code and not supplier_name and not default_nominal:
             continue
         if not supplier_account_code or not supplier_name:
@@ -178,34 +219,54 @@ def import_suppliers(file: UploadFile = File(...), tenant_id=Depends(current_ten
             errors.append(f"Row {idx}: supplier account code and supplier name are required.")
             continue
 
-        existing = (
-            db.query(TenantSupplier)
-            .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.supplier_account_code == supplier_account_code)
-            .first()
-        )
-        if not existing:
-            existing = (
-                db.query(TenantSupplier)
-                .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.supplier_name.ilike(supplier_name))
-                .first()
-            )
+        try:
+            with db.begin_nested():
+                existing_by_code = (
+                    db.query(TenantSupplier)
+                    .filter(
+                        TenantSupplier.tenant_id == tenant_id,
+                        TenantSupplier.supplier_account_code == supplier_account_code,
+                    )
+                    .first()
+                )
+                existing_by_name = (
+                    db.query(TenantSupplier)
+                    .filter(
+                        TenantSupplier.tenant_id == tenant_id,
+                        TenantSupplier.supplier_name.ilike(supplier_name),
+                    )
+                    .first()
+                )
 
-        if existing:
-            existing.supplier_account_code = supplier_account_code
-            existing.supplier_name = supplier_name
-            existing.default_nominal = default_nominal or None
-            existing.posting_account = supplier_account_code
-            existing.is_active = True
-        else:
-            db.add(TenantSupplier(
-                tenant_id=tenant_id,
-                supplier_account_code=supplier_account_code,
-                supplier_name=supplier_name,
-                default_nominal=default_nominal or None,
-                posting_account=supplier_account_code,
-                is_active=True,
-            ))
-        imported += 1
+                if existing_by_code and existing_by_name and existing_by_code.id != existing_by_name.id:
+                    skipped += 1
+                    errors.append(
+                        f"Row {idx}: supplier conflicts with existing records by code and name. Review this supplier manually."
+                    )
+                    continue
+
+                existing = existing_by_code or existing_by_name
+
+                if existing:
+                    existing.supplier_account_code = supplier_account_code
+                    existing.supplier_name = supplier_name
+                    existing.default_nominal = default_nominal or None
+                    existing.posting_account = supplier_account_code
+                    existing.is_active = True
+                else:
+                    db.add(TenantSupplier(
+                        tenant_id=tenant_id,
+                        supplier_account_code=supplier_account_code,
+                        supplier_name=supplier_name,
+                        default_nominal=default_nominal or None,
+                        posting_account=supplier_account_code,
+                        is_active=True,
+                    ))
+                db.flush()
+                imported += 1
+        except IntegrityError:
+            skipped += 1
+            errors.append(f"Row {idx}: supplier could not be imported because it duplicates an existing record.")
 
     db.commit()
     return {"ok": True, "imported": imported, "skipped": skipped, "errors": errors[:20]}
@@ -240,23 +301,22 @@ def update_nominal_account(account_id: int, payload: NominalAccountUpdate, tenan
 @router.post("/nominal-accounts/import")
 def import_nominal_accounts(file: UploadFile = File(...), tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
     header, data_rows = _read_csv_upload(file)
-    expected = ["nominal code", "nominal account name"]
-    if header != expected:
-        raise HTTPException(
-            status_code=400,
-            detail="Nominal CSV header must be exactly: nominal code, nominal account name",
-        )
+    header_map = _resolve_csv_header(
+        header,
+        {
+            "nominal code": ("nominal code", "account code", "code"),
+            "nominal account name": ("nominal account name", "account name", "nominal name", "name"),
+        },
+    )
 
     imported = 0
     skipped = 0
     errors: list[str] = []
 
     for idx, row in enumerate(data_rows, start=2):
-        values = [col.strip() if isinstance(col, str) else "" for col in row[:2]]
-        while len(values) < 2:
-            values.append("")
+        account_code = _cell(row, header_map["nominal code"])
+        account_name = _cell(row, header_map["nominal account name"])
 
-        account_code, account_name = values
         if not account_code and not account_name:
             continue
         if not account_code or not account_name:
@@ -264,22 +324,28 @@ def import_nominal_accounts(file: UploadFile = File(...), tenant_id=Depends(curr
             errors.append(f"Row {idx}: nominal code and nominal account name are required.")
             continue
 
-        existing = (
-            db.query(TenantNominalAccount)
-            .filter(TenantNominalAccount.tenant_id == tenant_id, TenantNominalAccount.account_code == account_code)
-            .first()
-        )
-        if existing:
-            existing.account_name = account_name
-            existing.is_active = True
-        else:
-            db.add(TenantNominalAccount(
-                tenant_id=tenant_id,
-                account_code=account_code,
-                account_name=account_name,
-                is_active=True,
-            ))
-        imported += 1
+        try:
+            with db.begin_nested():
+                existing = (
+                    db.query(TenantNominalAccount)
+                    .filter(TenantNominalAccount.tenant_id == tenant_id, TenantNominalAccount.account_code == account_code)
+                    .first()
+                )
+                if existing:
+                    existing.account_name = account_name
+                    existing.is_active = True
+                else:
+                    db.add(TenantNominalAccount(
+                        tenant_id=tenant_id,
+                        account_code=account_code,
+                        account_name=account_name,
+                        is_active=True,
+                    ))
+                db.flush()
+                imported += 1
+        except IntegrityError:
+            skipped += 1
+            errors.append(f"Row {idx}: nominal account could not be imported because it duplicates an existing record.")
 
     db.commit()
     return {"ok": True, "imported": imported, "skipped": skipped, "errors": errors[:20]}

@@ -9,6 +9,78 @@ if (tenantSelectorEl) {
   });
 }
 
+function setImportProgress(prefix, percent, label, active = true) {
+  const wrap = document.getElementById(`${prefix}ImportProgress`);
+  const bar = document.getElementById(`${prefix}ImportProgressBar`);
+  const text = document.getElementById(`${prefix}ImportProgressText`);
+  if (!wrap || !bar || !text) return;
+
+  wrap.classList.toggle("active", active);
+  const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
+  bar.style.width = `${safePercent}%`;
+  text.textContent = label || "";
+}
+
+function resetImportProgress(prefix) {
+  setImportProgress(prefix, 0, "", false);
+}
+
+function uploadWithProgress(path, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", path, true);
+
+    const headers = authHeaders();
+    Object.entries(headers).forEach(([key, value]) => {
+      if (value) xhr.setRequestHeader(key, value);
+    });
+
+    xhr.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable && onProgress) {
+        const percent = Math.round((event.loaded / event.total) * 100);
+        onProgress(percent, true);
+      }
+    });
+
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState !== XMLHttpRequest.DONE) return;
+
+      const contentType = xhr.getResponseHeader("content-type") || "";
+      let payload = null;
+      if (contentType.includes("application/json") && xhr.responseText) {
+        try {
+          payload = JSON.parse(xhr.responseText);
+        } catch (_) {
+          payload = null;
+        }
+      }
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(payload || {});
+        return;
+      }
+
+      let message = "Something went wrong on the server. Please refresh the page or try again.";
+      if (xhr.status === 401) {
+        message = "Your session has expired. Please log in again.";
+      } else if (xhr.status === 403) {
+        message = "You do not have permission to use this feature.";
+      } else if (xhr.status === 404) {
+        message = "The requested item could not be found.";
+      } else if (payload?.detail) {
+        message = typeof payload.detail === "string" ? payload.detail : "The request could not be completed.";
+      }
+
+      const error = new Error(message);
+      error.status = xhr.status;
+      reject(error);
+    };
+
+    xhr.onerror = () => reject(new Error("Something went wrong on the server. Please refresh the page or try again."));
+    xhr.send(formData);
+  });
+}
+
 document.getElementById("profileForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -92,6 +164,7 @@ document.getElementById("supplierForm").addEventListener("submit", async (event)
 
 document.getElementById("supplierImportBtn").addEventListener("click", async () => {
   const fileInput = document.getElementById("supplierImportFile");
+  const btn = document.getElementById("supplierImportBtn");
   const file = fileInput?.files?.[0];
   if (!file) {
     setMessage("supplierMessage", "Select a suppliers CSV file first.");
@@ -102,16 +175,23 @@ document.getElementById("supplierImportBtn").addEventListener("click", async () 
   formData.append("file", file);
 
   try {
-    const result = await apiFetch("/tenant/suppliers/import", {
-      method: "POST",
-      body: formData,
+    btn.disabled = true;
+    setMessage("supplierMessage", "");
+    setImportProgress("supplier", 3, "Preparing supplier import…", true);
+    const result = await uploadWithProgress("/tenant/suppliers/import", formData, (percent) => {
+      const visual = Math.min(percent, 95);
+      setImportProgress("supplier", visual, visual < 100 ? `Uploading supplier CSV… ${visual}%` : "Processing supplier import…", true);
     });
+    setImportProgress("supplier", 100, "Supplier import complete.", true);
     const summary = `Suppliers imported: ${result.imported}. Skipped: ${result.skipped}.`;
     setMessage("supplierMessage", result.errors?.length ? `${summary} ${result.errors.join(" ")}` : summary, "success");
     fileInput.value = "";
     await loadSuppliers();
   } catch (error) {
     setMessage("supplierMessage", error.message);
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => resetImportProgress("supplier"), 1200);
   }
 });
 
@@ -158,6 +238,7 @@ document.getElementById("issueForm").addEventListener("submit", async (event) =>
 
 document.getElementById("nominalImportBtn").addEventListener("click", async () => {
   const fileInput = document.getElementById("nominalImportFile");
+  const btn = document.getElementById("nominalImportBtn");
   const file = fileInput?.files?.[0];
   if (!file) {
     setMessage("accountMessage", "Select an AP nominal CSV file first.");
@@ -168,16 +249,23 @@ document.getElementById("nominalImportBtn").addEventListener("click", async () =
   formData.append("file", file);
 
   try {
-    const result = await apiFetch("/tenant/nominal-accounts/import", {
-      method: "POST",
-      body: formData,
+    btn.disabled = true;
+    setMessage("accountMessage", "");
+    setImportProgress("nominal", 3, "Preparing nominal import…", true);
+    const result = await uploadWithProgress("/tenant/nominal-accounts/import", formData, (percent) => {
+      const visual = Math.min(percent, 95);
+      setImportProgress("nominal", visual, visual < 100 ? `Uploading nominal CSV… ${visual}%` : "Processing nominal import…", true);
     });
+    setImportProgress("nominal", 100, "Nominal import complete.", true);
     const summary = `Nominal accounts imported: ${result.imported}. Skipped: ${result.skipped}.`;
     setMessage("accountMessage", result.errors?.length ? `${summary} ${result.errors.join(" ")}` : summary, "success");
     fileInput.value = "";
     await loadAccounts();
   } catch (error) {
     setMessage("accountMessage", error.message);
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => resetImportProgress("nominal"), 1200);
   }
 });
 
@@ -259,32 +347,58 @@ async function reloadTenantAdmin() {
 
 async function initTenantPage() {
   try {
-    const me = await getSessionInfo();
-    const platformAdminLink = document.getElementById("platformAdminLink");
-    if (platformAdminLink) {
-      platformAdminLink.classList.toggle("hidden", me.role !== "admin");
-    }
-
-    if (document.getElementById("tenantSelector")) {
+    if (tenantSelectorEl) {
       await populateTenantSelector("tenantSelector");
     }
     await reloadTenantAdmin();
   } catch (error) {
     setMessage("pageMessage", error.message);
   }
+
+  initPageHelp({
+    title: "Tenant Admin help",
+    subtitle: "Manage the master data your tenant uses during invoice processing.",
+    sections: [
+      {
+        heading: "Tenant details",
+        body: "Keep the tenant profile and contact details up to date so the workspace remains identifiable.",
+        items: [
+          "Use Tenant Details to maintain the tenant name and notes.",
+          "Change Password updates the current user password for this account.",
+        ],
+      },
+      {
+        heading: "Companies",
+        body: "Companies let you store invoice data against the correct legal entity.",
+        items: [
+          "Add company code and company name before scanning live invoices.",
+          "Registration and VAT numbers are optional reference fields.",
+        ],
+      },
+      {
+        heading: "Suppliers and nominals",
+        body: "These master lists improve supplier matching and nominal code assignment.",
+        items: [
+          "Supplier CSV must contain supplier account code, supplier name and default nominal.",
+          "Nominal CSV must contain nominal code and nominal account name.",
+          "During import you will now see a progress bar while the file uploads and processes.",
+        ],
+      },
+      {
+        heading: "Issues",
+        body: "Use Report Issue to capture problems for follow-up and resolution.",
+        items: [
+          "Set a higher priority for processing issues that block invoice work.",
+          "Review the issue table to track the current status and any resolution notes.",
+        ],
+      },
+    ],
+    quickChecks: [
+      "Confirm the correct tenant is selected before importing master data.",
+      "Use UTF-8 CSV files for supplier and nominal imports.",
+      "Check the success message after each import to confirm imported and skipped rows.",
+    ],
+  });
 }
 
 initTenantPage();
-
-
-initPageHelp({
-  title: "Tenant Admin help",
-  subtitle: "Use this page to maintain your tenant profile, company master data and issue reporting.",
-  sections: [
-    { heading: "Tenant details", items: ["Update the display name, contact details and notes for the selected tenant.", "If you have access to more than one tenant, switch the tenant from the selector before editing details."] },
-    { heading: "Companies", items: ["Create a company for each legal entity or reporting entity that will own scanned invoice data.", "Choose clear company codes because the scanning tool works per company."] },
-    { heading: "Suppliers and nominal accounts", items: ["Maintain supplier account code, supplier name and default nominal to improve matching and coding.", "You can add suppliers and AP nominal accounts manually or import them by CSV using the required header format shown on screen.", "Keep names and codes consistent with your finance system for the best matching results."] },
-    { heading: "Password and issues", items: ["Use Change Password to rotate credentials.", "Use Report Issue to raise a support request and track progress and resolution directly in the system."] }
-  ],
-  quickChecks: ["Create at least one company before using the Scanning Tool.", "Review supplier and nominal account naming before the first production batch.", "Raise issues with enough detail for support to reproduce the problem."]
-});

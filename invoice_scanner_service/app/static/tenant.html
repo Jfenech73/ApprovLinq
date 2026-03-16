@@ -101,7 +101,11 @@
             <input id="supplierImportFile" type="file" accept=".csv,text/csv" />
             <button id="supplierImportBtn" class="btn btn-secondary" type="button">Import Suppliers</button>
           </div>
-          <div class="muted small-text">Header must be: supplier account code, supplier name, default nominal</div>
+          <div class="muted small-text">Header should include supplier account code, supplier name and default nominal.</div>
+          <div id="supplierImportProgress" class="import-progress" aria-live="polite">
+            <div class="import-progress-track"><div id="supplierImportProgressBar" class="import-progress-bar"></div></div>
+            <div id="supplierImportProgressText" class="import-progress-text"></div>
+          </div>
         </div>
         <div id="supplierMessage" class="message"></div>
         <div class="table-wrap compact-table">
@@ -131,7 +135,11 @@
             <input id="nominalImportFile" type="file" accept=".csv,text/csv" />
             <button id="nominalImportBtn" class="btn btn-secondary" type="button">Import AP Nominal Codes</button>
           </div>
-          <div class="muted small-text">Header must be: nominal code, nominal account name</div>
+          <div class="muted small-text">Header should include nominal code and nominal account name.</div>
+          <div id="nominalImportProgress" class="import-progress" aria-live="polite">
+            <div class="import-progress-track"><div id="nominalImportProgressBar" class="import-progress-bar"></div></div>
+            <div id="nominalImportProgressText" class="import-progress-text"></div>
+          </div>
         </div>
         <div id="accountMessage" class="message"></div>
         <div class="table-wrap compact-table">
@@ -184,7 +192,6 @@
   <script src="/static/js/common.js"></script>
   <script src="/static/js/tenant.js"></script>
 
-    <script src="/static/js/common.js"></script>
 <script>
   (async function () {
     if (!ensureAuth()) return;
