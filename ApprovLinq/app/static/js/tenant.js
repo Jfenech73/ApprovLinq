@@ -161,7 +161,7 @@ document.getElementById("supplierImportBtn").addEventListener("click", async () 
       setImportProgress("supplier", Math.max(10, percent), `Uploading suppliers... ${Math.round((loaded / Math.max(total || 1, 1)) * 100)}%`);
     });
     setImportProgress("supplier", 95, "Processing supplier import...");
-    const summary = `Suppliers imported: ${result.imported}. Updated: ${result.updated || 0}. Skipped: ${result.skipped}.`;
+    const summary = `Suppliers imported: ${result.imported}. Skipped: ${result.skipped}.`;
     setImportProgress("supplier", 100, result.errors?.length ? "Supplier import completed with warnings." : "Supplier import completed.");
     setMessage("supplierMessage", result.errors?.length ? `${summary} ${result.errors.join(" ")}` : summary, result.errors?.length ? "" : "success");
     fileInput.value = "";

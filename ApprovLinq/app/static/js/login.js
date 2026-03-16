@@ -19,23 +19,22 @@ document.getElementById("loginForm").addEventListener("submit", async (event) =>
       data = await response.json();
     } else {
       const text = await response.text();
-      throw new Error(
-        text && text.includes("Internal Server Error")
-          ? "Something went wrong on the server. Please refresh the page or try again."
-          : (text || "Login failed.")
-      );
+      throw new Error(text || "Login failed");
     }
 
     if (!response.ok) {
-      throw new Error(data?.detail || "Login failed.");
+      throw new Error(data?.detail || "Login failed");
     }
 
     localStorage.setItem("approvlinq_token", data.access_token);
-    const defaultTenant = (data.tenants || []).find((t) => t.is_default) || (data.tenants || [])[0];
+    const defaultTenant = (data.tenants || []).find(t => t.is_default) || (data.tenants || [])[0];
     if (defaultTenant) localStorage.setItem("approvlinq_tenant_id", defaultTenant.tenant_id);
     window.location.href = data.landing_page;
   } catch (error) {
-    message.textContent = error.message || "Login failed.";
+    const msg = String(error?.message || "Login failed");
+    message.textContent = msg.includes("Internal Server Error")
+      ? "The server hit an internal error during sign-in. Please try again."
+      : msg;
   }
 });
 

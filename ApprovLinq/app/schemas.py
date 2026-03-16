@@ -58,7 +58,6 @@ class TenantOut(BaseModel):
     contact_name: str | None = None
     contact_email: str | None = None
     notes: str | None = None
-    scan_mode: str = "summary"
     created_at: datetime
     updated_at: datetime
 
@@ -221,7 +220,6 @@ class CapacityRow(BaseModel):
 class BatchCreate(BaseModel):
     batch_name: str = Field(min_length=1, max_length=255)
     company_id: UUID
-    scan_mode: str = Field(default="summary", pattern="^(summary|lines)$")
 
 
 class BatchOut(BaseModel):
@@ -233,7 +231,6 @@ class BatchOut(BaseModel):
     status: str
     page_count: int | None = None
     notes: str | None = None
-    scan_mode: str = "summary"
     created_at: datetime
     processed_at: datetime | None = None
 

@@ -59,14 +59,14 @@ create table if not exists companies (
 create table if not exists tenant_suppliers (
     id bigserial primary key,
     tenant_id uuid not null references tenants(id) on delete cascade,
-    company_id uuid references companies(id) on delete cascade,
     supplier_account_code text,
     supplier_name text not null,
     default_nominal text,
     posting_account text not null,
     is_active boolean not null default true,
     created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
+    updated_at timestamptz not null default now(),
+    constraint uq_tenant_supplier_name unique (tenant_id, supplier_name)
 );
 
 create table if not exists tenant_nominal_accounts (
@@ -196,39 +196,6 @@ update tenant_suppliers
 set supplier_account_code = coalesce(nullif(supplier_account_code, ''), posting_account)
 where supplier_account_code is null or supplier_account_code = '';
 
-alter table tenant_suppliers add column if not exists company_id uuid references companies(id) on delete cascade;
-alter table tenant_nominal_accounts add column if not exists company_id uuid references companies(id) on delete cascade;
-
-update tenant_suppliers ts
-set company_id = c.id
-from companies c
-where ts.company_id is null
-  and c.tenant_id = ts.tenant_id;
-
-update tenant_nominal_accounts na
-set company_id = c.id
-from companies c
-where na.company_id is null
-  and c.tenant_id = na.tenant_id;
-
-do $$
-begin
-    begin
-        alter table tenant_suppliers drop constraint uq_tenant_supplier_name;
-    exception when undefined_object then null;
-    end;
-    begin
-        alter table tenant_suppliers drop constraint uq_tenant_company_supplier_name;
-    exception when undefined_object then null;
-    end;
-end $$;
-
-drop index if exists ix_tenant_suppliers_tenant_account_code;
-drop index if exists ix_tenant_suppliers_tenant_company_supplier_name;
-
-create unique index if not exists ix_tenant_suppliers_tenant_company_account_code
-    on tenant_suppliers(tenant_id, company_id, supplier_account_code)
+create unique index if not exists ix_tenant_suppliers_tenant_account_code
+    on tenant_suppliers(tenant_id, supplier_account_code)
     where supplier_account_code is not null;
-
-create index if not exists ix_tenant_suppliers_tenant_company_name
-    on tenant_suppliers(tenant_id, company_id, supplier_name);

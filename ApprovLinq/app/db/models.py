@@ -30,7 +30,6 @@ class Tenant(Base):
     contact_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     contact_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    scan_mode: Mapped[str] = mapped_column(String(20), default="summary", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -89,6 +88,7 @@ class Company(Base):
 class TenantSupplier(Base):
     __tablename__ = "tenant_suppliers"
     __table_args__ = (
+        UniqueConstraint("tenant_id", "company_id", "supplier_name", name="uq_tenant_company_supplier_name"),
         UniqueConstraint("tenant_id", "company_id", "supplier_account_code", name="uq_tenant_company_supplier_account_code"),
     )
 
@@ -144,7 +144,6 @@ class InvoiceBatch(Base):
     status: Mapped[str] = mapped_column(String(50), default="created", nullable=False)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    scan_mode: Mapped[str] = mapped_column(String(20), default="summary", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

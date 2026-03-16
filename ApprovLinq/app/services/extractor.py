@@ -647,63 +647,6 @@ def process_pdf_page(
     return extracted
 
 
-
-def _line_amount_from_text(line: str) -> float | None:
-    matches = re.findall(r"(?<!\d)(\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|\d+[.,]\d{2})(?!\d)", line or "")
-    if not matches:
-        return None
-    return parse_amount(matches[-1])
-
-
-def split_line_item_rows(page_result: dict[str, Any], tolerance: float = 0.05) -> list[dict[str, Any]]:
-    raw = page_result.get("line_items_raw") or ""
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-    if not lines:
-        return [page_result]
-
-    rows: list[dict[str, Any]] = []
-    summed_total = 0.0
-    counted = 0
-    for idx, line in enumerate(lines, start=1):
-        line_total = _line_amount_from_text(line)
-        if line_total is not None:
-            summed_total += line_total
-            counted += 1
-        row = dict(page_result)
-        row["description"] = limit_to_20_words(line) or page_result.get("description")
-        row["line_items_raw"] = line
-        row["line_no"] = idx
-        if line_total is not None:
-            row["total_amount"] = line_total
-            row["net_amount"] = line_total
-            row["vat_amount"] = 0.0
-        rows.append(row)
-
-    invoice_total = page_result.get("total_amount")
-    mismatch = False
-    if invoice_total is not None and counted > 0:
-        mismatch = abs(float(invoice_total) - float(summed_total)) > tolerance
-
-    for row in rows:
-        if mismatch:
-            row["review_required"] = True
-            row["validation_status"] = "review"
-            row["description"] = f"{row.get('description') or 'Invoice line'}"
-    return rows
-
-
-def process_pdf_page_rows(
-    pdf_path: str | Path,
-    page_index: int,
-    scan_mode: str = "summary",
-    openai_api_key: str | None = None,
-) -> list[dict[str, Any]]:
-    page_result = process_pdf_page(pdf_path, page_index=page_index, openai_api_key=openai_api_key)
-    if (scan_mode or "summary").lower() == "lines":
-        return split_line_item_rows(page_result)
-    return [page_result]
-
-
 def process_pdf(pdf_path: str | Path, openai_api_key: str | None = None) -> list[dict[str, Any]]:
     page_count = get_pdf_page_count(pdf_path)
     return [
