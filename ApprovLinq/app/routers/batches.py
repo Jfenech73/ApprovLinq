@@ -43,7 +43,7 @@ def _clear_active(batch_id: UUID) -> None:
         _ACTIVE_BATCHES.discard(str(batch_id))
 
 
-def _apply_account_suggestions(db: Session, tenant_id, row: InvoiceRow):
+def _apply_account_suggestions(db: Session, tenant_id, company_id, row: InvoiceRow):
     if row.supplier_name and not row.supplier_posting_account:
         supplier = (
             db.query(TenantSupplier)
@@ -84,6 +84,7 @@ def _build_batch_detail(batch: InvoiceBatch, db: Session) -> BatchDetailOut:
         status=batch.status,
         page_count=batch.page_count,
         notes=batch.notes,
+        scan_mode=getattr(batch, "scan_mode", "summary") or "summary",
         created_at=batch.created_at,
         processed_at=batch.processed_at,
         uploaded_files=uploaded_files,
@@ -143,8 +144,11 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 page_count = invoice_file.page_count or 0
                 for page_index in range(page_count):
                     try:
-                        r = process_pdf_page(invoice_file.file_path, page_index=page_index, openai_api_key=settings.openai_api_key if settings.use_openai else None)
-                        row = InvoiceRow(
+                        page_results = process_pdf_page(invoice_file.file_path, page_index=page_index, openai_api_key=settings.openai_api_key if settings.use_openai else None, scan_mode=(getattr(batch, "scan_mode", "summary") or "summary"))
+                        if not isinstance(page_results, list):
+                            page_results = [page_results]
+                        for r in page_results:
+                            row = InvoiceRow(
                             batch_id=batch_id,
                             tenant_id=batch.tenant_id,
                             company_id=batch.company_id,
@@ -248,7 +252,10 @@ def create_batch(payload: BatchCreate, db: Session = Depends(get_db), tenant_id=
     company = db.get(Company, payload.company_id)
     if not company or company.tenant_id != tenant_id:
         raise HTTPException(status_code=400, detail="Selected company does not belong to tenant")
-    batch = InvoiceBatch(batch_name=payload.batch_name.strip(), company_id=payload.company_id, tenant_id=tenant_id, status="created", notes="Batch created")
+    scan_mode = (payload.scan_mode or "summary").strip().lower()
+    if scan_mode not in {"summary", "lines"}:
+        scan_mode = "summary"
+    batch = InvoiceBatch(batch_name=payload.batch_name.strip(), company_id=payload.company_id, tenant_id=tenant_id, status="created", notes=f"Batch created ({scan_mode})", scan_mode=scan_mode)
     db.add(batch)
     db.commit()
     db.refresh(batch)

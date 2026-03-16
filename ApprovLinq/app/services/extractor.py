@@ -572,11 +572,67 @@ def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str
     return merged
 
 
+
+def _parse_line_item_amount(line: str) -> float | None:
+    amounts = re.findall(r"(?<!\d)(?:\d{1,3}(?:[.,]\d{3})*|\d+)[.,]\d{2}(?!\d)", line)
+    if not amounts:
+        return None
+    for candidate in reversed(amounts):
+        parsed = parse_amount(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def build_line_mode_rows(extracted: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = (extracted.get("line_items_raw") or "").strip()
+    if not raw:
+        return [dict(extracted)]
+
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return [dict(extracted)]
+
+    rows: list[dict[str, Any]] = []
+    summed = 0.0
+    amt_count = 0
+    for line in lines:
+        row = dict(extracted)
+        row["description"] = limit_to_20_words(line)
+        amount = _parse_line_item_amount(line)
+        row["total_amount"] = amount
+        row["net_amount"] = amount
+        row["vat_amount"] = None
+        row["line_items_raw"] = line
+        row["method_used"] = f"{extracted.get('method_used') or 'extract'}+line_mode"
+        row["review_required"] = bool(extracted.get("review_required", False))
+        row["validation_status"] = extracted.get("validation_status") or "ok"
+        rows.append(row)
+        if amount is not None:
+            summed += float(amount)
+            amt_count += 1
+
+    invoice_total = extracted.get("total_amount")
+    mismatch = False
+    if invoice_total is not None and amt_count > 0:
+        mismatch = abs(round(summed - float(invoice_total), 2)) > 0.05
+    else:
+        mismatch = True
+
+    if mismatch:
+        for row in rows:
+            row["review_required"] = True
+            row["validation_status"] = "review"
+            row["method_used"] = f"{row.get('method_used') or 'line_mode'}+reconcile_review"
+
+    return rows or [dict(extracted)]
+
 def process_pdf_page(
     pdf_path: str | Path,
     page_index: int,
     openai_api_key: str | None = None,
-) -> dict[str, Any]:
+    scan_mode: str = "summary",
+) -> dict[str, Any] | list[dict[str, Any]]:
     pdf_path = Path(pdf_path)
     native_text = extract_native_pdf_page(pdf_path, page_index)
     ocr_backend = get_ocr_backend()
@@ -644,6 +700,8 @@ def process_pdf_page(
         "totals_raw": "\n".join(final_text.splitlines()[-10:]) if final_text else None,
         "page_text_raw": final_text[:20000],
     })
+    if scan_mode == "lines":
+        return build_line_mode_rows(extracted)
     return extracted
 
 

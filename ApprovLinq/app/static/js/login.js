@@ -4,39 +4,23 @@ document.getElementById("loginForm").addEventListener("submit", async (event) =>
   const password = document.getElementById("password").value;
   const message = document.getElementById("loginMessage");
   message.textContent = "Signing in...";
-
   try {
     const response = await fetch("/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password }),
     });
-
-    const contentType = response.headers.get("content-type") || "";
-    let data = null;
-
-    if (contentType.includes("application/json")) {
-      data = await response.json();
-    } else {
-      const text = await response.text();
-      throw new Error(text || "Login failed");
-    }
-
-    if (!response.ok) {
-      throw new Error(data?.detail || "Login failed");
-    }
-
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Login failed");
     localStorage.setItem("approvlinq_token", data.access_token);
     const defaultTenant = (data.tenants || []).find(t => t.is_default) || (data.tenants || [])[0];
     if (defaultTenant) localStorage.setItem("approvlinq_tenant_id", defaultTenant.tenant_id);
     window.location.href = data.landing_page;
   } catch (error) {
-    const msg = String(error?.message || "Login failed");
-    message.textContent = msg.includes("Internal Server Error")
-      ? "The server hit an internal error during sign-in. Please try again."
-      : msg;
+    message.textContent = error.message;
   }
 });
+
 
 initPageHelp({
   title: "Login page help",
