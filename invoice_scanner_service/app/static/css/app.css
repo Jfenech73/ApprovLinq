@@ -646,3 +646,8 @@ tr:last-child td {
     margin-top: 18px;
   }
 }
+
+
+.small-text { font-size: 13px; }
+.tenant-hero .hero-toolbar-right { margin-top: 18px; transform: translateY(6px); }
+.tenant-hero .hero-toolbar { padding-bottom: 10px; }

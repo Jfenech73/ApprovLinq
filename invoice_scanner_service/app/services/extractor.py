@@ -340,6 +340,76 @@ def summarise_line_items_rule_based(line_items_text: str) -> str:
     return "Invoice goods or services"
 
 
+
+
+def extract_structured_invoice_lines(text: str) -> list[dict[str, Any]]:
+    lines = [ln.strip() for ln in (text or '').splitlines() if ln.strip()]
+    results: list[dict[str, Any]] = []
+    seen: set[tuple[str, float]] = set()
+    skip_patterns = [
+        r"invoice\s*(no|number)", r"\bdate\b", r"\bvat\b", r"\btax\b", r"\btotal\b",
+        r"\bsubtotal\b", r"\bamount due\b", r"\bbalance due\b", r"\biban\b", r"\bbic\b",
+        r"\bpage\b", r"\bcustomer\b", r"\bsupplier\b", r"\baddress\b", r"\bemail\b",
+        r"\bphone\b", r"\bqty\b", r"\bquantity\b", r"\bunit price\b", r"\bdiscount\b",
+        r"\btotal excl\b", r"\btotal incl\b", r"\bnet amount\b"
+    ]
+    money_tail = re.compile(r"^(?P<desc>.*?)(?:\s{2,}|\s+)(?P<amount>-?(?:€|EUR)?\s*[0-9][0-9.,]*)$")
+    for line in lines:
+        lower = line.lower()
+        if len(line) < 6:
+            continue
+        if any(re.search(p, lower, re.I) for p in skip_patterns):
+            continue
+        m = money_tail.match(line)
+        if not m:
+            continue
+        desc = re.sub(r"\s+", " ", m.group('desc')).strip(' -:|')
+        amount = parse_amount(m.group('amount'))
+        if not desc or amount is None:
+            continue
+        if len(desc) < 3 or len(re.findall(r"[A-Za-z]", desc)) < 2:
+            continue
+        key = (desc.lower(), round(float(amount), 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append({
+            'description': limit_to_20_words(desc),
+            'line_total': float(amount),
+            'raw_line': line,
+        })
+    return results[:50]
+
+
+def build_line_mode_rows(base: dict[str, Any]) -> list[dict[str, Any]]:
+    line_items = extract_structured_invoice_lines(base.get('page_text_raw') or '')
+    if not line_items:
+        fallback = dict(base)
+        fallback['review_required'] = True
+        fallback['validation_status'] = 'review | no_structured_lines_found'
+        fallback['method_used'] = f"{base.get('method_used') or 'unknown'}+line_mode_fallback"
+        return [fallback]
+
+    invoice_total = base.get('total_amount')
+    line_sum = round(sum(float(item['line_total']) for item in line_items), 2)
+    diff = round(abs(line_sum - float(invoice_total)), 2) if invoice_total is not None else None
+    mismatch = diff is not None and diff > 0.05
+    rows: list[dict[str, Any]] = []
+    for item in line_items:
+        row = dict(base)
+        row['description'] = item['description']
+        row['line_items_raw'] = item['raw_line']
+        row['net_amount'] = None
+        row['vat_amount'] = None
+        row['total_amount'] = item['line_total']
+        row['method_used'] = f"{base.get('method_used') or 'unknown'}+line_mode"
+        row['review_required'] = bool(mismatch)
+        row['validation_status'] = 'review | line_total_mismatch' if mismatch else 'ok'
+        row['line_reconciliation_total'] = line_sum
+        row['line_reconciliation_difference'] = diff
+        rows.append(row)
+    return rows
+
 def _collect_response_text(data: dict[str, Any]) -> str:
     text_parts: list[str] = []
     for item in data.get("output", []):
@@ -588,6 +658,7 @@ def process_pdf_page(
     pdf_path: str | Path,
     page_index: int,
     openai_api_key: str | None = None,
+    scan_mode: str = "summary",
 ) -> dict[str, Any]:
     pdf_path = Path(pdf_path)
     page_no = page_index + 1

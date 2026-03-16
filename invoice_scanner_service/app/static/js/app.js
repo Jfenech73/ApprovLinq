@@ -279,7 +279,8 @@ $("processBtn").addEventListener("click", async () => {
 
   setInlineMessage(message, "Starting processing...");
   try {
-    await api(`/batches/${state.selectedBatchId}/process`, { method: "POST" });
+    const scanMode = $("scanMode")?.value || "summary";
+    await api(`/batches/${state.selectedBatchId}/process?scan_mode=${encodeURIComponent(scanMode)}`, { method: "POST" });
     setInlineMessage(message, "Batch processing started.", "success");
     await selectBatch(state.selectedBatchId);
     await loadBatches();
@@ -362,7 +363,7 @@ initPageHelp({
   sections: [
     { heading: "Tenant and company selection", items: ["Select the correct tenant first.", "Then select the company that should own the scanned invoices.", "Batches are company-specific, so changing company changes the batch list."] },
     { heading: "Create and upload", items: ["Create a new batch with a meaningful name.", "Upload one or more invoice PDFs into the selected batch.", "Review the uploaded files table for page counts and file status."] },
-    { heading: "Process and review", items: ["Use Process Batch to trigger extraction.", "Watch status and notes while processing is running.", "Use Extracted Rows to spot-check supplier, invoice number, dates, totals and review flags."] },
+    { heading: "Process and review", items: ["Choose Summary mode for one accounting row per invoice page.", "Choose Line mode to create one row per detected invoice line.", "In Line mode, rows are flagged for review when line totals do not reconcile to the invoice total.", "Use Process Batch to trigger extraction and then spot-check review flags."] },
     { heading: "Export", items: ["Use Export Excel after processing finishes.", "Check posting account and nominal account suggestions before posting into the ERP if your process requires review."] }
   ],
   quickChecks: ["Confirm the correct tenant and company before creating the batch.", "Use clear batch names such as month plus supplier or business purpose.", "Do not export until the batch status is no longer processing."]

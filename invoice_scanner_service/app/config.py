@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     page_render_timeout_seconds: int = 40
     openai_timeout_seconds: int = 45
     supplier_match_threshold: float = 0.88
+    nominal_match_threshold: float = 0.90
 
     # OCR
     ocr_provider: str = "none"   # none | ocr_space | paddleocr
@@ -71,6 +72,7 @@ class Settings(BaseSettings):
             "openai_timeout_seconds": self.openai_timeout_seconds,
             "page_render_timeout_seconds": self.page_render_timeout_seconds,
             "supplier_match_threshold": self.supplier_match_threshold,
+            "nominal_match_threshold": self.nominal_match_threshold,
             "upload_dir": self.upload_dir,
             "export_dir": self.export_dir,
             "log_level": self.log_level,

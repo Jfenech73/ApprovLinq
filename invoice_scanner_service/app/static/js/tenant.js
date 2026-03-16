@@ -1,10 +1,13 @@
 ensureAuth();
 
 document.getElementById("logoutBtn").addEventListener("click", logoutAndGo);
-document.getElementById("tenantSelector").addEventListener("change", async (event) => {
-  setTenantId(event.target.value);
-  await reloadTenantAdmin();
-});
+const tenantSelectorEl = document.getElementById("tenantSelector");
+if (tenantSelectorEl) {
+  tenantSelectorEl.addEventListener("change", async (event) => {
+    setTenantId(event.target.value);
+    await reloadTenantAdmin();
+  });
+}
 
 document.getElementById("profileForm").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -262,7 +265,9 @@ async function initTenantPage() {
       platformAdminLink.classList.toggle("hidden", me.role !== "admin");
     }
 
-    await populateTenantSelector("tenantSelector");
+    if (document.getElementById("tenantSelector")) {
+      await populateTenantSelector("tenantSelector");
+    }
     await reloadTenantAdmin();
   } catch (error) {
     setMessage("pageMessage", error.message);

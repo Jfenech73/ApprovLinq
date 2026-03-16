@@ -31,8 +31,7 @@
 
     <div class="hero-toolbar">
       <div class="hero-toolbar-left"></div>
-        <a class="btn btn-secondary" href="/static/tenant.html">Tenant Admin</a>
-        <a class="btn btn-secondary" href="/static/admin.html">Platform Admin</a>
+        <a id="workspaceLink" class="btn btn-secondary" href="/static/tenant.html">Tenant Admin</a>
       <div class="hero-toolbar-right">
         <button id="logoutBtn" class="btn btn-secondary" type="button">Logout</button>
         <button id="helpBtn" class="btn btn-secondary help-btn" type="button">?</button>
@@ -49,6 +48,12 @@
           <form id="createBatchForm" class="stack">
             <label for="companySelector">Company</label>
             <div class="message muted">Choose a tenant and company before creating a batch.</div>
+            <label for="scanMode">Scan mode</label>
+            <select id="scanMode">
+              <option value="summary" selected>Summary mode - one row per invoice page</option>
+              <option value="lines">Line mode - one row per invoice line</option>
+            </select>
+            <div class="muted small-text">In line mode, line totals are checked against the invoice total and mismatches are marked for review.</div>
             <label for="batchName">Batch name</label>
             <div class="row gap-sm wrap">
               <input id="batchName" name="batchName" type="text" placeholder="Example: March supplier invoices" required maxlength="255" />
@@ -134,6 +139,7 @@
                   <th>Source file</th>
                   <th>Page</th>
                   <th>Supplier</th>
+                  <th>Customer code</th>
                   <th>Invoice no</th>
                   <th>Date</th>
                   <th>Description</th>
