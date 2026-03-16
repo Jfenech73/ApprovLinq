@@ -8,16 +8,11 @@
 </head>
 <body>
   <div class="page-shell">
-        <header class="hero tenant-hero">
+       <header class="hero tenant-hero">
   <div class="hero-copy">
     <div class="hero-copy-top">
       <h1>Tenant Admin</h1>
       <div class="version-badge">v3.03</div>
-    </div>
-
-    <div class="hero-copy-bottom">
-      <select id="tenantSelector"></select>
-      
     </div>
   </div>
 
@@ -27,10 +22,7 @@
     </div>
 
     <div class="hero-toolbar">
-      <div class="hero-toolbar-left">
-       
-      </div>
-
+      <div class="hero-toolbar-left"></div>
       <div class="hero-toolbar-right">
         <a id="platformAdminLink" class="btn btn-secondary hidden" href="/static/admin.html">Platform Admin</a>
         <a class="btn btn-secondary" href="/static/scanner.html">Scanning Tool</a>
@@ -191,5 +183,32 @@
   </div>
   <script src="/static/js/common.js"></script>
   <script src="/static/js/tenant.js"></script>
+
+    <script src="/static/js/common.js"></script>
+<script>
+  (async function () {
+    if (!ensureAuth()) return;
+
+    const logoutBtn = document.getElementById("logoutBtn");
+    if (logoutBtn) {
+      logoutBtn.addEventListener("click", logoutAndGo);
+    }
+
+    try {
+      const me = await getSessionInfo();
+      const platformAdminLink = document.getElementById("platformAdminLink");
+
+      if (me && String(me.role || "").toLowerCase() === "admin") {
+        platformAdminLink?.classList.remove("hidden");
+      } else {
+        platformAdminLink?.classList.add("hidden");
+      }
+    } catch (err) {
+      console.error("Failed to load session info", err);
+      const platformAdminLink = document.getElementById("platformAdminLink");
+      platformAdminLink?.classList.add("hidden");
+    }
+  })();
+</script>
 </body>
 </html>

@@ -29,14 +29,14 @@
     </div>
 
     <div class="hero-toolbar">
-      <div class="hero-toolbar-left"></div>
-      <div class="hero-toolbar-right">
-        <a id="platformAdminLink" class="btn btn-secondary hidden" href="/static/admin.html">Platform Admin</a>
-        <a class="btn btn-secondary" href="/static/tenant.html">Tenant Admin</a>
-        <button id="logoutBtn" class="btn btn-secondary" type="button">Logout</button>
-        <button id="helpBtn" class="btn btn-secondary help-btn" type="button">?</button>
-      </div>
+    <div class="hero-toolbar-left"></div>
+    <div class="hero-toolbar-right">
+      <a id="platformAdminLink" class="btn btn-secondary hidden" href="/static/admin.html">Platform Admin</a>
+      <a class="btn btn-secondary" href="/static/tenant.html">Tenant Admin</a>
+      <button id="logoutBtn" class="btn btn-secondary" type="button">Logout</button>
+      <button id="helpBtn" class="btn btn-secondary help-btn" type="button">?</button>
     </div>
+  </div>
   </div>
 </header>
 
@@ -160,5 +160,33 @@
 
   <script src="/static/js/common.js"></script>
   <script src="/static/js/app.js"></script>
+
+  <script src="/static/js/common.js"></script>
+  <script>
+    (async function () {
+      if (!ensureAuth()) return;
+
+      const logoutBtn = document.getElementById("logoutBtn");
+      if (logoutBtn) {
+        logoutBtn.addEventListener("click", logoutAndGo);
+      }
+
+      try {
+        const me = await getSessionInfo();
+        const platformAdminLink = document.getElementById("platformAdminLink");
+
+        if (me && String(me.role || "").toLowerCase() === "admin") {
+          platformAdminLink?.classList.remove("hidden");
+        } else {
+          platformAdminLink?.classList.add("hidden");
+        }
+      } catch (err) {
+        console.error("Failed to load session info", err);
+        const platformAdminLink = document.getElementById("platformAdminLink");
+        platformAdminLink?.classList.add("hidden");
+      }
+    })();
+  </script>
+
 </body>
 </html>
