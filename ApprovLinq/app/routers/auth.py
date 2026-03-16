@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy.exc import OperationalError
 
 from app.db.models import User, UserSession, UserTenant, Tenant
 from app.db.session import get_db
@@ -91,7 +91,7 @@ def current_tenant_id(
     return tenant.id
 
 
-@router.post("/login")
+@router.post("/login", response_model=LoginResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     try:
         user = db.query(User).filter(User.email == payload.email.lower().strip()).first()
@@ -100,63 +100,11 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         if not user.is_active:
             raise HTTPException(status_code=403, detail="User inactive")
 
-        user_id = user.id
-        email = (user.email or "").strip()
-        full_name = (user.full_name or "").strip()
-        role = (user.role or "tenant").strip()
-
-        tenants: list[dict] = []
-        try:
-            tenant_rows = (
-                db.query(UserTenant, Tenant)
-                .join(Tenant, Tenant.id == UserTenant.tenant_id)
-                .filter(UserTenant.user_id == user_id)
-                .order_by(UserTenant.is_default.desc(), Tenant.tenant_name.asc())
-                .all()
-            )
-            tenants = [
-                {
-                    "tenant_id": str(tenant.id),
-                    "tenant_name": (tenant.tenant_name or "").strip(),
-                    "tenant_code": (tenant.tenant_code or "").strip(),
-                    "tenant_role": (link.tenant_role or "tenant_admin").strip(),
-                    "is_default": bool(link.is_default),
-                }
-                for link, tenant in tenant_rows
-                if getattr(tenant, "is_active", True)
-            ]
-        except SQLAlchemyError:
-            db.rollback()
-            tenants = []
-
         token, token_hash, expires_at = new_session_token()
-        session_row = UserSession(user_id=user_id, token_hash=token_hash, expires_at=expires_at)
+        session_row = UserSession(user_id=user.id, token_hash=token_hash, expires_at=expires_at)
         db.add(session_row)
         db.commit()
 
-        landing_page = "/static/admin.html" if role == "admin" else "/static/tenant.html"
-        return {
-            "access_token": token,
-            "user_id": str(user_id),
-            "email": email,
-            "full_name": full_name,
-            "role": role,
-            "tenants": tenants,
-            "landing_page": landing_page,
-        }
-    except HTTPException:
-        db.rollback()
-        raise
-    except SQLAlchemyError:
-        db.rollback()
-        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
-    except Exception:
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Login could not be completed. Please try again.")
-
-@router.get("/me")
-def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    try:
         tenant_rows = (
             db.query(UserTenant, Tenant)
             .join(Tenant, Tenant.id == UserTenant.tenant_id)
@@ -165,26 +113,59 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
             .all()
         )
         tenants = [
-            {
-                "tenant_id": str(tenant.id),
-                "tenant_name": (tenant.tenant_name or "").strip(),
-                "tenant_code": (tenant.tenant_code or "").strip(),
-                "tenant_role": (link.tenant_role or "tenant_admin").strip(),
-                "is_default": bool(link.is_default),
-            }
+            TenantBrief(
+                tenant_id=tenant.id,
+                tenant_name=tenant.tenant_name,
+                tenant_code=tenant.tenant_code,
+                tenant_role=link.tenant_role,
+                is_default=link.is_default,
+            )
             for link, tenant in tenant_rows
-            if getattr(tenant, "is_active", True)
+            if tenant.is_active
         ]
-    except SQLAlchemyError:
+
+        landing_page = "/static/admin.html" if user.role == "admin" else "/static/tenant.html"
+        return LoginResponse(
+            access_token=token,
+            user_id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            role=user.role,
+            tenants=tenants,
+            landing_page=landing_page,
+        )
+    except HTTPException:
         db.rollback()
-        tenants = []
+        raise
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
+
+@router.get("/me")
+def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    tenant_rows = (
+        db.query(UserTenant, Tenant)
+        .join(Tenant, Tenant.id == UserTenant.tenant_id)
+        .filter(UserTenant.user_id == user.id)
+        .order_by(UserTenant.is_default.desc(), Tenant.tenant_name.asc())
+        .all()
+    )
     return {
         "user_id": str(user.id),
-        "email": (user.email or "").strip(),
-        "full_name": (user.full_name or "").strip(),
-        "role": (user.role or "tenant").strip(),
-        "is_active": bool(user.is_active),
-        "tenants": tenants,
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": user.role,
+        "is_active": user.is_active,
+        "tenants": [
+            {
+                "tenant_id": str(tenant.id),
+                "tenant_name": tenant.tenant_name,
+                "tenant_code": tenant.tenant_code,
+                "tenant_role": link.tenant_role,
+                "is_default": link.is_default,
+            }
+            for link, tenant in tenant_rows
+        ],
     }
 
 
