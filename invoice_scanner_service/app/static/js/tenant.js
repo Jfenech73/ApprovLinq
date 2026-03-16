@@ -203,7 +203,19 @@ async function reloadTenantAdmin() {
 }
 
 async function initTenantPage() {
-  try { await populateTenantSelector("tenantSelector"); await reloadTenantAdmin(); } catch (error) { setMessage("pageMessage", error.message); }
+  try {
+    const me = await getSessionInfo();
+    const platformAdminLink = document.getElementById("platformAdminLink");
+    if (platformAdminLink) {
+      if (String(me.role || "").toLowerCase() === "admin") {
+        platformAdminLink.classList.remove("hidden");
+      } else {
+        platformAdminLink.classList.add("hidden");
+      }
+    }
+    await populateTenantSelector("tenantSelector");
+    await reloadTenantAdmin();
+  } catch (error) { setMessage("pageMessage", error.message); }
 }
 
 initTenantPage();

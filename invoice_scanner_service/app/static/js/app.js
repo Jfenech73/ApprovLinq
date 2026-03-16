@@ -47,14 +47,20 @@ async function api(path, options = {}) {
 }
 
 function setWorkspaceLink(role) {
-  const link = $("workspaceLink");
-  if (!link) return;
-  if (role === "admin") {
-    link.href = "/static/admin.html";
-    link.textContent = "Platform Admin";
+  const platformAdminLink = $("platformAdminLink");
+  const tenantAdminLink = $("tenantAdminLink");
+
+  if (tenantAdminLink) {
+    tenantAdminLink.href = "/static/tenant.html";
+    tenantAdminLink.textContent = "Tenant Admin";
+  }
+
+  if (!platformAdminLink) return;
+
+  if (String(role || "").toLowerCase() === "admin") {
+    platformAdminLink.classList.remove("hidden");
   } else {
-    link.href = "/static/tenant.html";
-    link.textContent = "Tenant Admin";
+    platformAdminLink.classList.add("hidden");
   }
 }
 
