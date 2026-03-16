@@ -137,7 +137,7 @@ async function selectBatch(batchId, options = {}) {
   $("selectedBatchId").textContent = batch.id;
   $("selectedBatchName").textContent = batch.batch_name;
   $("selectedBatchStatus").textContent = batch.status;
-  $("selectedBatchNotes").textContent = batch.notes || "-";
+  $("selectedBatchNotes").textContent = `${batch.notes || "-"}${batch.scan_mode ? ` • Mode: ${batch.scan_mode}` : ""}`;
 
   renderFiles(batch.files || []);
   await loadRows();

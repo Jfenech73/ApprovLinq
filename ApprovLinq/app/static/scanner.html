@@ -49,6 +49,23 @@
           <form id="createBatchForm" class="stack">
             <label for="companySelector">Company</label>
             <div class="message muted">Choose a tenant and company before creating a batch.</div>
+            <label>Scan mode</label>
+            <div class="scan-mode-group">
+              <label class="scan-mode-card">
+                <input type="radio" name="scanMode" value="summary" checked />
+                <div>
+                  <strong>Total invoice</strong>
+                  <div class="muted">Store the invoice as one row with a summary description.</div>
+                </div>
+              </label>
+              <label class="scan-mode-card">
+                <input type="radio" name="scanMode" value="lines" />
+                <div>
+                  <strong>Separate line items</strong>
+                  <div class="muted">Store invoice rows using detected line items and review mismatches.</div>
+                </div>
+              </label>
+            </div>
             <label for="batchName">Batch name</label>
             <div class="row gap-sm wrap">
               <input id="batchName" name="batchName" type="text" placeholder="Example: March supplier invoices" required maxlength="255" />
