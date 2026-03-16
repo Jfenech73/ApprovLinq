@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
@@ -31,7 +32,11 @@ def current_session(
         .where(UserSession.token_hash == token_hash)
         .where(UserSession.revoked_at.is_(None))
     )
-    result = db.execute(stmt).first()
+    try:
+        result = db.execute(stmt).first()
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
     if not result:
         raise HTTPException(status_code=401, detail="Invalid session")
     session_row, user = result
@@ -88,7 +93,11 @@ def current_tenant_id(
 
 @router.post("/login", response_model=LoginResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == payload.email.lower().strip()).first()
+    try:
+        user = db.query(User).filter(User.email == payload.email.lower().strip()).first()
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
@@ -97,7 +106,11 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     token, token_hash, expires_at = new_session_token()
     session_row = UserSession(user_id=user.id, token_hash=token_hash, expires_at=expires_at)
     db.add(session_row)
-    db.commit()
+    try:
+        db.commit()
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
 
     tenant_rows = (
         db.query(UserTenant, Tenant)
