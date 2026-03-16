@@ -256,6 +256,12 @@ async function reloadTenantAdmin() {
 
 async function initTenantPage() {
   try {
+    const me = await getSessionInfo();
+    const platformAdminLink = document.getElementById("platformAdminLink");
+    if (platformAdminLink) {
+      platformAdminLink.classList.toggle("hidden", me.role !== "admin");
+    }
+
     await populateTenantSelector("tenantSelector");
     await reloadTenantAdmin();
   } catch (error) {
