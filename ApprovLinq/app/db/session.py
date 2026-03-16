@@ -31,7 +31,7 @@ else:
     })
 
 engine = create_engine(db_url, **engine_kwargs)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
 
 def get_db():
     db = SessionLocal()
