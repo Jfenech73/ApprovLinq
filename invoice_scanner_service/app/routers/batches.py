@@ -47,7 +47,7 @@ def _apply_account_suggestions(db: Session, tenant_id, row: InvoiceRow):
     if row.supplier_name and not row.supplier_posting_account:
         supplier = (
             db.query(TenantSupplier)
-            .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.company_id == company_id, TenantSupplier.is_active.is_(True))
+            .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.is_active.is_(True))
             .filter(TenantSupplier.supplier_name.ilike(row.supplier_name.strip()))
             .first()
         )
@@ -59,7 +59,7 @@ def _apply_account_suggestions(db: Session, tenant_id, row: InvoiceRow):
     if row.description and not row.nominal_account_code:
         accounts = (
             db.query(TenantNominalAccount)
-            .filter(TenantNominalAccount.tenant_id == tenant_id, TenantNominalAccount.company_id == company_id, TenantNominalAccount.is_active.is_(True))
+            .filter(TenantNominalAccount.tenant_id == tenant_id, TenantNominalAccount.is_active.is_(True))
             .all()
         )
         text = row.description.lower()
@@ -169,7 +169,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             totals_raw=r.get("totals_raw"),
                             page_text_raw=r.get("page_text_raw"),
                         )
-                        _apply_account_suggestions(db, tenant_id, batch.company_id, row)
+                        _apply_account_suggestions(db, tenant_id, row)
                         db.add(row)
                         db.commit()
                         inserted_rows += 1

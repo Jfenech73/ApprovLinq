@@ -21,25 +21,15 @@ def ensure_runtime_schema() -> None:
         statements = [
             "ALTER TABLE tenant_suppliers ADD COLUMN IF NOT EXISTS supplier_account_code VARCHAR(100)",
             "ALTER TABLE tenant_suppliers ADD COLUMN IF NOT EXISTS default_nominal VARCHAR(100)",
-            "ALTER TABLE tenant_suppliers ADD COLUMN IF NOT EXISTS company_id UUID",
-            "ALTER TABLE tenant_nominal_accounts ADD COLUMN IF NOT EXISTS company_id UUID",
             "UPDATE tenant_suppliers SET supplier_account_code = COALESCE(NULLIF(supplier_account_code, ''), posting_account) WHERE supplier_account_code IS NULL OR supplier_account_code = ''",
-            "UPDATE tenant_suppliers ts SET company_id = c.id FROM companies c WHERE ts.company_id IS NULL AND c.tenant_id = ts.tenant_id",
-            "UPDATE tenant_nominal_accounts na SET company_id = c.id FROM companies c WHERE na.company_id IS NULL AND c.tenant_id = na.tenant_id",
-            "CREATE INDEX IF NOT EXISTS ix_tenant_suppliers_tenant_company_account_code ON tenant_suppliers (tenant_id, company_id, supplier_account_code)",
-            "CREATE INDEX IF NOT EXISTS ix_tenant_nominals_tenant_company_account_code ON tenant_nominal_accounts (tenant_id, company_id, account_code)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_tenant_suppliers_tenant_account_code ON tenant_suppliers (tenant_id, supplier_account_code) WHERE supplier_account_code IS NOT NULL",
         ]
     elif dialect == "sqlite":
         statements = [
             "ALTER TABLE tenant_suppliers ADD COLUMN supplier_account_code VARCHAR(100)",
             "ALTER TABLE tenant_suppliers ADD COLUMN default_nominal VARCHAR(100)",
-            "ALTER TABLE tenant_suppliers ADD COLUMN company_id VARCHAR(36)",
-            "ALTER TABLE tenant_nominal_accounts ADD COLUMN company_id VARCHAR(36)",
             "UPDATE tenant_suppliers SET supplier_account_code = COALESCE(NULLIF(supplier_account_code, ''), posting_account) WHERE supplier_account_code IS NULL OR supplier_account_code = ''",
-            "UPDATE tenant_suppliers SET company_id = (SELECT id FROM companies WHERE companies.tenant_id = tenant_suppliers.tenant_id LIMIT 1) WHERE company_id IS NULL",
-            "UPDATE tenant_nominal_accounts SET company_id = (SELECT id FROM companies WHERE companies.tenant_id = tenant_nominal_accounts.tenant_id LIMIT 1) WHERE company_id IS NULL",
-            "CREATE INDEX IF NOT EXISTS ix_tenant_suppliers_tenant_company_account_code ON tenant_suppliers (tenant_id, company_id, supplier_account_code)",
-            "CREATE INDEX IF NOT EXISTS ix_tenant_nominals_tenant_company_account_code ON tenant_nominal_accounts (tenant_id, company_id, account_code)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_tenant_suppliers_tenant_account_code ON tenant_suppliers (tenant_id, supplier_account_code)",
         ]
 
     if not statements:

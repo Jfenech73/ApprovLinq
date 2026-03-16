@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import io
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Query
 from sqlalchemy.orm import Session
@@ -33,15 +32,6 @@ def require_tenant_user(user: User = Depends(current_user)) -> User:
     if user.role not in ("tenant", "admin"):
         raise HTTPException(status_code=403, detail="Tenant access required")
     return user
-
-
-def _get_company_or_400(db: Session, tenant_id, company_id: UUID | None) -> Company:
-    if not company_id:
-        raise HTTPException(status_code=400, detail="Select a company first")
-    company = db.get(Company, company_id)
-    if not company or company.tenant_id != tenant_id:
-        raise HTTPException(status_code=400, detail="Selected company does not belong to tenant")
-    return company
 
 
 @router.get("/profile", response_model=TenantOut)
@@ -93,14 +83,8 @@ def update_company(company_id: str, payload: CompanyUpdate, tenant_id=Depends(cu
 
 
 @router.get("/suppliers", response_model=list[SupplierOut])
-def list_suppliers(company_id: UUID | None = Query(default=None), tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
-    _get_company_or_400(db, tenant_id, company_id)
-    return (
-        db.query(TenantSupplier)
-        .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.company_id == company_id)
-        .order_by(TenantSupplier.supplier_name.asc())
-        .all()
-    )
+def list_suppliers(tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
+    return db.query(TenantSupplier).filter(TenantSupplier.tenant_id == tenant_id).order_by(TenantSupplier.supplier_name.asc()).all()
 
 
 def _normalized_supplier_payload(payload: SupplierCreate | SupplierUpdate) -> dict:
@@ -120,7 +104,26 @@ def _normalized_supplier_payload(payload: SupplierCreate | SupplierUpdate) -> di
 
 
 def _header_key(value: str) -> str:
-    return " ".join((value or "").strip().lower().replace("_", " ").replace("-", " ").split())
+    return " ".join((value or "").strip().lower().replace("_", " ").replace("-", " ").replace("/", " ").split())
+
+
+def _pick_column_map(header: list[str], aliases: dict[str, list[str]]) -> dict[str, int]:
+    positions: dict[str, int] = {}
+    for idx, name in enumerate(header):
+        for canonical, possible in aliases.items():
+            if canonical in positions:
+                continue
+            if name == canonical or name in possible:
+                positions[canonical] = idx
+                break
+    return positions
+
+
+def _csv_value(row: list[str], idx: int | None) -> str:
+    if idx is None or idx >= len(row):
+        return ""
+    value = row[idx]
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _read_csv_upload(file: UploadFile) -> tuple[list[str], list[list[str]]]:
@@ -148,7 +151,6 @@ def _read_csv_upload(file: UploadFile) -> tuple[list[str], list[list[str]]]:
 
 @router.post("/suppliers", response_model=SupplierOut)
 def create_supplier(payload: SupplierCreate, tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
-    _get_company_or_400(db, tenant_id, payload.company_id)
     supplier = TenantSupplier(tenant_id=tenant_id, **_normalized_supplier_payload(payload))
     db.add(supplier)
     db.commit()
@@ -169,23 +171,34 @@ def update_supplier(supplier_id: int, payload: SupplierUpdate, tenant_id=Depends
 
 
 @router.post("/suppliers/import")
-def import_suppliers(file: UploadFile = File(...), company_id: UUID | None = Query(default=None), tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
-    _get_company_or_400(db, tenant_id, company_id)
+def import_suppliers(file: UploadFile = File(...), tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
     header, data_rows = _read_csv_upload(file)
-    expected = ["supplier account code", "supplier name", "default nominal"]
-    if header != expected:
-        raise HTTPException(status_code=400, detail="Supplier CSV header must be exactly: supplier account code, supplier name, default nominal")
+    aliases = {
+        "supplier account code": [
+            "supplier code", "account code", "supplier account", "supplier account number", "account number",
+            "supplier posting account", "posting account", "customer code",
+        ],
+        "supplier name": ["name", "supplier", "vendor", "vendor name", "supplier description"],
+        "default nominal": ["nominal", "nominal code", "default nominal code", "default account", "default gl", "gl code"],
+    }
+    columns = _pick_column_map(header, aliases)
+    if "supplier account code" not in columns or "supplier name" not in columns:
+        raise HTTPException(
+            status_code=400,
+            detail="Supplier CSV must include columns for supplier account code and supplier name. Optional: default nominal.",
+        )
 
     imported = 0
     skipped = 0
     errors: list[str] = []
+    seen_codes: set[str] = set()
+    seen_names: set[str] = set()
 
     for idx, row in enumerate(data_rows, start=2):
-        values = [col.strip() if isinstance(col, str) else "" for col in row[:3]]
-        while len(values) < 3:
-            values.append("")
+        supplier_account_code = _csv_value(row, columns.get("supplier account code"))
+        supplier_name = _csv_value(row, columns.get("supplier name"))
+        default_nominal = _csv_value(row, columns.get("default nominal"))
 
-        supplier_account_code, supplier_name, default_nominal = values
         if not supplier_account_code and not supplier_name and not default_nominal:
             continue
         if not supplier_account_code or not supplier_name:
@@ -193,45 +206,62 @@ def import_suppliers(file: UploadFile = File(...), company_id: UUID | None = Que
             errors.append(f"Row {idx}: supplier account code and supplier name are required.")
             continue
 
+        code_key = supplier_account_code.casefold()
+        name_key = supplier_name.casefold()
+        if code_key in seen_codes or name_key in seen_names:
+            skipped += 1
+            errors.append(f"Row {idx}: duplicate supplier found in the import file and was skipped.")
+            continue
+        seen_codes.add(code_key)
+        seen_names.add(name_key)
+
         existing = (
             db.query(TenantSupplier)
-            .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.company_id == company_id, TenantSupplier.supplier_account_code == supplier_account_code)
+            .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.supplier_account_code == supplier_account_code)
             .first()
         )
         if not existing:
             existing = (
                 db.query(TenantSupplier)
-                .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.company_id == company_id, TenantSupplier.supplier_name.ilike(supplier_name))
+                .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.supplier_name.ilike(supplier_name))
                 .first()
             )
-        if existing:
-            existing.supplier_account_code = supplier_account_code
-            existing.supplier_name = supplier_name
-            existing.default_nominal = default_nominal or None
-            existing.posting_account = supplier_account_code
-            existing.is_active = True
-        else:
-            db.add(TenantSupplier(tenant_id=tenant_id, company_id=company_id, supplier_account_code=supplier_account_code, supplier_name=supplier_name, default_nominal=default_nominal or None, posting_account=supplier_account_code, is_active=True))
-        imported += 1
+
+        try:
+            with db.begin_nested():
+                if existing:
+                    existing.supplier_account_code = supplier_account_code
+                    existing.supplier_name = supplier_name
+                    existing.default_nominal = default_nominal or None
+                    existing.posting_account = supplier_account_code
+                    existing.is_active = True
+                else:
+                    db.add(TenantSupplier(
+                        tenant_id=tenant_id,
+                        supplier_account_code=supplier_account_code,
+                        supplier_name=supplier_name,
+                        default_nominal=default_nominal or None,
+                        posting_account=supplier_account_code,
+                        is_active=True,
+                    ))
+                db.flush()
+            imported += 1
+        except Exception:
+            skipped += 1
+            errors.append(f"Row {idx}: could not be imported because it conflicts with an existing supplier.")
+            continue
 
     db.commit()
     return {"ok": True, "imported": imported, "skipped": skipped, "errors": errors[:20]}
 
 
 @router.get("/nominal-accounts", response_model=list[NominalAccountOut])
-def list_nominal_accounts(company_id: UUID | None = Query(default=None), tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
-    _get_company_or_400(db, tenant_id, company_id)
-    return (
-        db.query(TenantNominalAccount)
-        .filter(TenantNominalAccount.tenant_id == tenant_id, TenantNominalAccount.company_id == company_id)
-        .order_by(TenantNominalAccount.account_code.asc())
-        .all()
-    )
+def list_nominal_accounts(tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
+    return db.query(TenantNominalAccount).filter(TenantNominalAccount.tenant_id == tenant_id).order_by(TenantNominalAccount.account_code.asc()).all()
 
 
 @router.post("/nominal-accounts", response_model=NominalAccountOut)
 def create_nominal_account(payload: NominalAccountCreate, tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
-    _get_company_or_400(db, tenant_id, payload.company_id)
     account = TenantNominalAccount(tenant_id=tenant_id, **payload.model_dump())
     db.add(account)
     db.commit()
@@ -252,38 +282,55 @@ def update_nominal_account(account_id: int, payload: NominalAccountUpdate, tenan
 
 
 @router.post("/nominal-accounts/import")
-def import_nominal_accounts(file: UploadFile = File(...), company_id: UUID | None = Query(default=None), tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
-    _get_company_or_400(db, tenant_id, company_id)
+def import_nominal_accounts(file: UploadFile = File(...), tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
     header, data_rows = _read_csv_upload(file)
-    expected = ["nominal code", "nominal account name"]
-    if header != expected:
-        raise HTTPException(status_code=400, detail="Nominal CSV header must be exactly: nominal code, nominal account name")
+    aliases = {
+        "nominal code": ["account code", "code", "nominal", "gl code", "gl account"],
+        "nominal account name": ["account name", "name", "description", "nominal name", "gl name"],
+    }
+    columns = _pick_column_map(header, aliases)
+    if "nominal code" not in columns or "nominal account name" not in columns:
+        raise HTTPException(
+            status_code=400,
+            detail="Nominal CSV must include columns for nominal code and nominal account name.",
+        )
 
     imported = 0
     skipped = 0
     errors: list[str] = []
+    seen_codes: set[str] = set()
 
     for idx, row in enumerate(data_rows, start=2):
-        values = [col.strip() if isinstance(col, str) else "" for col in row[:2]]
-        while len(values) < 2:
-            values.append("")
-        account_code, account_name = values
+        account_code = _csv_value(row, columns.get("nominal code"))
+        account_name = _csv_value(row, columns.get("nominal account name"))
+
         if not account_code and not account_name:
             continue
         if not account_code or not account_name:
             skipped += 1
             errors.append(f"Row {idx}: nominal code and nominal account name are required.")
             continue
+        if account_code.casefold() in seen_codes:
+            skipped += 1
+            errors.append(f"Row {idx}: duplicate nominal code found in the import file and was skipped.")
+            continue
+        seen_codes.add(account_code.casefold())
+
         existing = (
             db.query(TenantNominalAccount)
-            .filter(TenantNominalAccount.tenant_id == tenant_id, TenantNominalAccount.company_id == company_id, TenantNominalAccount.account_code == account_code)
+            .filter(TenantNominalAccount.tenant_id == tenant_id, TenantNominalAccount.account_code == account_code)
             .first()
         )
         if existing:
             existing.account_name = account_name
             existing.is_active = True
         else:
-            db.add(TenantNominalAccount(tenant_id=tenant_id, company_id=company_id, account_code=account_code, account_name=account_name, is_active=True))
+            db.add(TenantNominalAccount(
+                tenant_id=tenant_id,
+                account_code=account_code,
+                account_name=account_name,
+                is_active=True,
+            ))
         imported += 1
 
     db.commit()
@@ -314,6 +361,13 @@ def list_tenant_users(tenant_id=Depends(current_tenant_id), _user: User = Depend
         .all()
     )
     return [
-        {"user_id": str(user.id), "full_name": user.full_name, "email": user.email, "role": user.role, "tenant_role": link.tenant_role, "is_active": user.is_active}
+        {
+            "user_id": str(user.id),
+            "full_name": user.full_name,
+            "email": user.email,
+            "role": user.role,
+            "tenant_role": link.tenant_role,
+            "is_active": user.is_active,
+        }
         for user, link in rows
     ]
