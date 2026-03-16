@@ -88,12 +88,13 @@ class Company(Base):
 class TenantSupplier(Base):
     __tablename__ = "tenant_suppliers"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "supplier_name", name="uq_tenant_supplier_name"),
-        UniqueConstraint("tenant_id", "supplier_account_code", name="uq_tenant_supplier_account_code"),
+        UniqueConstraint("tenant_id", "company_id", "supplier_name", name="uq_tenant_company_supplier_name"),
+        UniqueConstraint("tenant_id", "company_id", "supplier_account_code", name="uq_tenant_company_supplier_account_code"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=False)
     supplier_account_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     supplier_name: Mapped[str] = mapped_column(String(255), nullable=False)
     default_nominal: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -105,10 +106,11 @@ class TenantSupplier(Base):
 
 class TenantNominalAccount(Base):
     __tablename__ = "tenant_nominal_accounts"
-    __table_args__ = (UniqueConstraint("tenant_id", "account_code", name="uq_tenant_nominal_account_code"),)
+    __table_args__ = (UniqueConstraint("tenant_id", "company_id", "account_code", name="uq_tenant_company_nominal_account_code"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=False)
     account_code: Mapped[str] = mapped_column(String(100), nullable=False)
     account_name: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -183,7 +185,6 @@ class InvoiceRow(Base):
     page_no: Mapped[int] = mapped_column(Integer, nullable=False)
     supplier_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     supplier_posting_account: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    customer_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     nominal_account_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     invoice_number: Mapped[str | None] = mapped_column(Text, nullable=True)
     invoice_date: Mapped[date | None] = mapped_column(Date, nullable=True)

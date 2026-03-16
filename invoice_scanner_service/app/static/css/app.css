@@ -647,47 +647,5 @@ tr:last-child td {
   }
 }
 
-
-.small-text { font-size: 13px; }
-.tenant-hero .hero-toolbar-right { margin-top: 18px; transform: translateY(6px); }
-.tenant-hero .hero-toolbar { padding-bottom: 10px; }
-
-.small-text {
-  font-size: 13px;
-}
-
-.align-center {
-  align-items: center;
-}
-
-.import-progress {
-  display: none;
-  margin-top: 8px;
-}
-
-.import-progress.active {
-  display: block;
-}
-
-.import-progress-track {
-  width: 100%;
-  height: 12px;
-  background: #e7f0fa;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  overflow: hidden;
-}
-
-.import-progress-bar {
-  width: 0;
-  height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #1f66b1 0%, #4ea7ea 100%);
-  transition: width 0.2s ease;
-}
-
-.import-progress-text {
-  margin-top: 6px;
-  color: var(--muted);
-  font-size: 13px;
-}
+#companySelector{min-width:280px;}
+#masterDataHint{margin:.35rem 0 .65rem 0;}

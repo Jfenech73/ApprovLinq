@@ -172,13 +172,13 @@ async function loadRows() {
   tbody.innerHTML = "";
 
   if (!state.selectedBatchId) {
-    tbody.innerHTML = '<tr><td colspan="10" class="muted">Select a batch first.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="muted">Select a batch first.</td></tr>';
     return;
   }
 
   const rows = await api(`/batches/${state.selectedBatchId}/rows`);
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="10" class="muted">No extracted rows yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="muted">No extracted rows yet.</td></tr>';
     return;
   }
 
@@ -186,13 +186,11 @@ async function loadRows() {
     const description = truncate(row.description || "-", 80);
     const supplier = truncate(row.supplier_name || "-", 60);
     const invoiceNo = truncate(row.invoice_number || "-", 40);
-    const customerCode = truncate(row.customer_code || "-", 30);
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${escapeHtml(row.source_filename || "-")}</td>
       <td>${row.page_no ?? "-"}</td>
       <td title="${escapeHtml(row.supplier_name || "")}">${escapeHtml(supplier)}</td>
-      <td title="${escapeHtml(row.customer_code || "")}">${escapeHtml(customerCode)}</td>
       <td title="${escapeHtml(row.invoice_number || "")}">${escapeHtml(invoiceNo)}</td>
       <td>${escapeHtml(row.invoice_date || "-")}</td>
       <td title="${escapeHtml(row.description || "")}">${escapeHtml(description)}</td>
@@ -279,8 +277,7 @@ $("processBtn").addEventListener("click", async () => {
 
   setInlineMessage(message, "Starting processing...");
   try {
-    const scanMode = $("scanMode")?.value || "summary";
-    await api(`/batches/${state.selectedBatchId}/process?scan_mode=${encodeURIComponent(scanMode)}`, { method: "POST" });
+    await api(`/batches/${state.selectedBatchId}/process`, { method: "POST" });
     setInlineMessage(message, "Batch processing started.", "success");
     await selectBatch(state.selectedBatchId);
     await loadBatches();
@@ -363,7 +360,7 @@ initPageHelp({
   sections: [
     { heading: "Tenant and company selection", items: ["Select the correct tenant first.", "Then select the company that should own the scanned invoices.", "Batches are company-specific, so changing company changes the batch list."] },
     { heading: "Create and upload", items: ["Create a new batch with a meaningful name.", "Upload one or more invoice PDFs into the selected batch.", "Review the uploaded files table for page counts and file status."] },
-    { heading: "Process and review", items: ["Choose Summary mode for one accounting row per invoice page.", "Choose Line mode to create one row per detected invoice line.", "In Line mode, rows are flagged for review when line totals do not reconcile to the invoice total.", "Use Process Batch to trigger extraction and then spot-check review flags."] },
+    { heading: "Process and review", items: ["Use Process Batch to trigger extraction.", "Watch status and notes while processing is running.", "Use Extracted Rows to spot-check supplier, invoice number, dates, totals and review flags."] },
     { heading: "Export", items: ["Use Export Excel after processing finishes.", "Check posting account and nominal account suggestions before posting into the ERP if your process requires review."] }
   ],
   quickChecks: ["Confirm the correct tenant and company before creating the batch.", "Use clear batch names such as month plus supplier or business purpose.", "Do not export until the batch status is no longer processing."]

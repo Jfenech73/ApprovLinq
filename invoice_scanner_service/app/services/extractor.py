@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import gc
 import json
-import logging
 import re
-import time
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -13,10 +10,8 @@ from typing import Any
 import fitz  # PyMuPDF
 import requests
 
-from app.config import settings
 from app.services.ocr import OCRSpaceBackend, PaddleOCRBackend
-
-logger = logging.getLogger("invoice_scanner.extractor")
+from app.config import settings
 
 
 def clean_text(text: str) -> str:
@@ -146,6 +141,7 @@ def bad_supplier_line(line: str) -> bool:
     if any(re.search(p, line_l, re.I) for p in skip_patterns):
         return True
 
+    # Skip numeric-heavy lines / addresses / VAT numbers
     digits = len(re.findall(r"\d", line_l))
     letters = len(re.findall(r"[a-zA-Z]", line_l))
     if digits > letters:
@@ -340,87 +336,6 @@ def summarise_line_items_rule_based(line_items_text: str) -> str:
     return "Invoice goods or services"
 
 
-
-
-def extract_structured_invoice_lines(text: str) -> list[dict[str, Any]]:
-    lines = [ln.strip() for ln in (text or '').splitlines() if ln.strip()]
-    results: list[dict[str, Any]] = []
-    seen: set[tuple[str, float]] = set()
-    skip_patterns = [
-        r"invoice\s*(no|number)", r"\bdate\b", r"\bvat\b", r"\btax\b", r"\btotal\b",
-        r"\bsubtotal\b", r"\bamount due\b", r"\bbalance due\b", r"\biban\b", r"\bbic\b",
-        r"\bpage\b", r"\bcustomer\b", r"\bsupplier\b", r"\baddress\b", r"\bemail\b",
-        r"\bphone\b", r"\bqty\b", r"\bquantity\b", r"\bunit price\b", r"\bdiscount\b",
-        r"\btotal excl\b", r"\btotal incl\b", r"\bnet amount\b"
-    ]
-    money_tail = re.compile(r"^(?P<desc>.*?)(?:\s{2,}|\s+)(?P<amount>-?(?:€|EUR)?\s*[0-9][0-9.,]*)$")
-    for line in lines:
-        lower = line.lower()
-        if len(line) < 6:
-            continue
-        if any(re.search(p, lower, re.I) for p in skip_patterns):
-            continue
-        m = money_tail.match(line)
-        if not m:
-            continue
-        desc = re.sub(r"\s+", " ", m.group('desc')).strip(' -:|')
-        amount = parse_amount(m.group('amount'))
-        if not desc or amount is None:
-            continue
-        if len(desc) < 3 or len(re.findall(r"[A-Za-z]", desc)) < 2:
-            continue
-        key = (desc.lower(), round(float(amount), 2))
-        if key in seen:
-            continue
-        seen.add(key)
-        results.append({
-            'description': limit_to_20_words(desc),
-            'line_total': float(amount),
-            'raw_line': line,
-        })
-    return results[:50]
-
-
-def build_line_mode_rows(base: dict[str, Any]) -> list[dict[str, Any]]:
-    line_items = extract_structured_invoice_lines(base.get('page_text_raw') or '')
-    if not line_items:
-        fallback = dict(base)
-        fallback['review_required'] = True
-        fallback['validation_status'] = 'review | no_structured_lines_found'
-        fallback['method_used'] = f"{base.get('method_used') or 'unknown'}+line_mode_fallback"
-        return [fallback]
-
-    invoice_total = base.get('total_amount')
-    line_sum = round(sum(float(item['line_total']) for item in line_items), 2)
-    diff = round(abs(line_sum - float(invoice_total)), 2) if invoice_total is not None else None
-    mismatch = diff is not None and diff > 0.05
-    rows: list[dict[str, Any]] = []
-    for item in line_items:
-        row = dict(base)
-        row['description'] = item['description']
-        row['line_items_raw'] = item['raw_line']
-        row['net_amount'] = None
-        row['vat_amount'] = None
-        row['total_amount'] = item['line_total']
-        row['method_used'] = f"{base.get('method_used') or 'unknown'}+line_mode"
-        row['review_required'] = bool(mismatch)
-        row['validation_status'] = 'review | line_total_mismatch' if mismatch else 'ok'
-        row['line_reconciliation_total'] = line_sum
-        row['line_reconciliation_difference'] = diff
-        rows.append(row)
-    return rows
-
-def _collect_response_text(data: dict[str, Any]) -> str:
-    text_parts: list[str] = []
-    for item in data.get("output", []):
-        for content in item.get("content", []):
-            if content.get("type") in ("output_text", "text"):
-                txt = content.get("text", "")
-                if txt:
-                    text_parts.append(txt)
-    return " ".join(text_parts).strip()
-
-
 def summarise_line_items_with_openai(
     line_items_text: str,
     api_key: str,
@@ -444,7 +359,6 @@ def summarise_line_items_with_openai(
     )
 
     try:
-        started = time.perf_counter()
         response = requests.post(
             "https://api.openai.com/v1/responses",
             headers={
@@ -456,20 +370,23 @@ def summarise_line_items_with_openai(
                 "input": prompt,
                 "max_output_tokens": 80,
             },
-            timeout=settings.openai_timeout_seconds,
+            timeout=30,
         )
         response.raise_for_status()
         data = response.json()
-        result = _collect_response_text(data)
-        logger.info(
-            "OpenAI description completed",
-            extra={"stage": "openai_description", "status": "ok", "duration_ms": int((time.perf_counter() - started) * 1000)},
-        )
+
+        text_parts = []
+        for item in data.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") in ("output_text", "text"):
+                    txt = content.get("text", "")
+                    if txt:
+                        text_parts.append(txt)
+
+        result = " ".join(text_parts).strip()
         if result:
             return limit_to_20_words(result)
-    except Exception as exc:
-        logger.warning("OpenAI description failed", extra={"stage": "openai_description", "status": "failed"})
-        logger.debug("OpenAI description exception: %s", exc)
+    except Exception:
         return None
 
     return None
@@ -557,7 +474,6 @@ def openai_extract_invoice_fields(
     )
 
     try:
-        started = time.perf_counter()
         response = requests.post(
             "https://api.openai.com/v1/responses",
             headers={
@@ -569,16 +485,20 @@ def openai_extract_invoice_fields(
                 "input": prompt,
                 "max_output_tokens": 300,
             },
-            timeout=settings.openai_timeout_seconds,
+            timeout=45,
         )
         response.raise_for_status()
         data = response.json()
-        raw = _collect_response_text(data)
-        logger.info(
-            "OpenAI fallback completed",
-            extra={"stage": "openai_fallback", "status": "ok", "duration_ms": int((time.perf_counter() - started) * 1000)},
-        )
 
+        text_parts = []
+        for item in data.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") in ("output_text", "text"):
+                    txt = content.get("text", "")
+                    if txt:
+                        text_parts.append(txt)
+
+        raw = " ".join(text_parts).strip()
         if not raw:
             return None
 
@@ -596,9 +516,7 @@ def openai_extract_invoice_fields(
             "currency": payload.get("currency"),
             "tax_code": payload.get("tax_code"),
         }
-    except Exception as exc:
-        logger.warning("OpenAI fallback failed", extra={"stage": "openai_fallback", "status": "failed"})
-        logger.debug("OpenAI fallback exception: %s", exc)
+    except Exception:
         return None
 
 
@@ -658,12 +576,8 @@ def process_pdf_page(
     pdf_path: str | Path,
     page_index: int,
     openai_api_key: str | None = None,
-    scan_mode: str = "summary",
 ) -> dict[str, Any]:
     pdf_path = Path(pdf_path)
-    page_no = page_index + 1
-    logger.info("Page processing started", extra={"file_name": pdf_path.name, "page_no": page_no, "stage": "page", "status": "started"})
-
     native_text = extract_native_pdf_page(pdf_path, page_index)
     ocr_backend = get_ocr_backend()
 
@@ -673,20 +587,14 @@ def process_pdf_page(
 
     if count_meaningful_chars(native_text) < 80 and ocr_backend is not None:
         try:
-            started = time.perf_counter()
             ocr_text = clean_text(
                 ocr_backend.extract_text_from_pdf_page(pdf_path, page_index, scale=1.8)
-            )
-            logger.info(
-                "OCR stage completed",
-                extra={"file_name": pdf_path.name, "page_no": page_no, "stage": "ocr", "status": "ok", "duration_ms": int((time.perf_counter() - started) * 1000)},
             )
             if count_meaningful_chars(ocr_text) > count_meaningful_chars(native_text):
                 final_text = ocr_text
                 method = f"ocr_{ocr_backend.name}"
         except Exception as e:
             ocr_error = str(e)
-            logger.warning("OCR stage failed", extra={"file_name": pdf_path.name, "page_no": page_no, "stage": "ocr", "status": "failed"})
 
     if count_meaningful_chars(final_text) == 0:
         final_text = f"OCR/NATIVE TEXT EMPTY. OCR_ERROR={ocr_error or 'none'}"
@@ -727,7 +635,7 @@ def process_pdf_page(
     confidence = round(min(confidence, 0.99), 2)
 
     extracted.update({
-        "page_no": page_no,
+        "page_no": page_index + 1,
         "method_used": method,
         "confidence_score": confidence,
         "validation_status": "ok" if confidence >= 0.70 else "review",
@@ -736,10 +644,6 @@ def process_pdf_page(
         "totals_raw": "\n".join(final_text.splitlines()[-10:]) if final_text else None,
         "page_text_raw": final_text[:20000],
     })
-    logger.info("Page processing completed", extra={"file_name": pdf_path.name, "page_no": page_no, "stage": "page", "status": extracted["validation_status"]})
-    final_text = None
-    native_text = None
-    gc.collect()
     return extracted
 
 

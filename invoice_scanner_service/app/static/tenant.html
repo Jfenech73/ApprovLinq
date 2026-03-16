@@ -8,11 +8,16 @@
 </head>
 <body>
   <div class="page-shell">
-       <header class="hero tenant-hero">
+        <header class="hero">
   <div class="hero-copy">
     <div class="hero-copy-top">
       <h1>Tenant Admin</h1>
       <div class="version-badge">v3.03</div>
+    </div>
+
+    <div class="hero-copy-bottom">
+      <select id="tenantSelector"></select>
+      <a class="btn btn-secondary" href="/static/scanner.html">Scanning Tool</a>
     </div>
   </div>
 
@@ -23,9 +28,8 @@
 
     <div class="hero-toolbar">
       <div class="hero-toolbar-left"></div>
+
       <div class="hero-toolbar-right">
-        <a id="platformAdminLink" class="btn btn-secondary hidden" href="/static/admin.html">Platform Admin</a>
-        <a class="btn btn-secondary" href="/static/scanner.html">Scanning Tool</a>
         <button id="logoutBtn" class="btn btn-secondary" type="button">Logout</button>
         <button id="helpBtn" class="btn btn-secondary help-btn" type="button">?</button>
       </div>
@@ -88,7 +92,8 @@
       </section>
 
       <section class="card">
-        <h2>Suppliers</h2>
+        <div class="section-head"><h2>Suppliers</h2><select id="companySelector"></select></div>
+        <div id="masterDataHint" class="muted small-text"></div>
         <form id="supplierForm" class="stack">
           <input id="supplierAccountCode" type="text" placeholder="Supplier account code" required />
           <input id="supplierName" type="text" placeholder="Supplier name" required />
@@ -101,11 +106,7 @@
             <input id="supplierImportFile" type="file" accept=".csv,text/csv" />
             <button id="supplierImportBtn" class="btn btn-secondary" type="button">Import Suppliers</button>
           </div>
-          <div class="muted small-text">Header should include supplier account code, supplier name and default nominal.</div>
-          <div id="supplierImportProgress" class="import-progress" aria-live="polite">
-            <div class="import-progress-track"><div id="supplierImportProgressBar" class="import-progress-bar"></div></div>
-            <div id="supplierImportProgressText" class="import-progress-text"></div>
-          </div>
+          <div class="muted small-text">Header must be: supplier account code, supplier name, default nominal</div>
         </div>
         <div id="supplierMessage" class="message"></div>
         <div class="table-wrap compact-table">
@@ -135,11 +136,7 @@
             <input id="nominalImportFile" type="file" accept=".csv,text/csv" />
             <button id="nominalImportBtn" class="btn btn-secondary" type="button">Import AP Nominal Codes</button>
           </div>
-          <div class="muted small-text">Header should include nominal code and nominal account name.</div>
-          <div id="nominalImportProgress" class="import-progress" aria-live="polite">
-            <div class="import-progress-track"><div id="nominalImportProgressBar" class="import-progress-bar"></div></div>
-            <div id="nominalImportProgressText" class="import-progress-text"></div>
-          </div>
+          <div class="muted small-text">Header must be: nominal code, nominal account name</div>
         </div>
         <div id="accountMessage" class="message"></div>
         <div class="table-wrap compact-table">
@@ -191,31 +188,5 @@
   </div>
   <script src="/static/js/common.js"></script>
   <script src="/static/js/tenant.js"></script>
-
-<script>
-  (async function () {
-    if (!ensureAuth()) return;
-
-    const logoutBtn = document.getElementById("logoutBtn");
-    if (logoutBtn) {
-      logoutBtn.addEventListener("click", logoutAndGo);
-    }
-
-    try {
-      const me = await getSessionInfo();
-      const platformAdminLink = document.getElementById("platformAdminLink");
-
-      if (me && String(me.role || "").toLowerCase() === "admin") {
-        platformAdminLink?.classList.remove("hidden");
-      } else {
-        platformAdminLink?.classList.add("hidden");
-      }
-    } catch (err) {
-      console.error("Failed to load session info", err);
-      const platformAdminLink = document.getElementById("platformAdminLink");
-      platformAdminLink?.classList.add("hidden");
-    }
-  })();
-</script>
 </body>
 </html>

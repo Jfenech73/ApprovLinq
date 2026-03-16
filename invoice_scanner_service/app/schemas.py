@@ -121,6 +121,7 @@ class CompanyOut(BaseModel):
 
 
 class SupplierCreate(BaseModel):
+    company_id: UUID
     supplier_account_code: str = Field(min_length=1, max_length=100)
     supplier_name: str = Field(min_length=1, max_length=255)
     default_nominal: str | None = Field(default=None, max_length=100)
@@ -139,6 +140,7 @@ class SupplierUpdate(BaseModel):
 class SupplierOut(BaseModel):
     id: int
     tenant_id: UUID
+    company_id: UUID
     supplier_account_code: str | None = None
     supplier_name: str
     default_nominal: str | None = None
@@ -151,6 +153,7 @@ class SupplierOut(BaseModel):
 
 
 class NominalAccountCreate(BaseModel):
+    company_id: UUID
     account_code: str = Field(min_length=1, max_length=100)
     account_name: str = Field(min_length=1, max_length=255)
     is_active: bool = True
@@ -165,6 +168,7 @@ class NominalAccountUpdate(BaseModel):
 class NominalAccountOut(BaseModel):
     id: int
     tenant_id: UUID
+    company_id: UUID
     account_code: str
     account_name: str
     is_active: bool
@@ -269,7 +273,6 @@ class InvoiceRowOut(BaseModel):
     page_no: int
     supplier_name: str | None = None
     supplier_posting_account: str | None = None
-    customer_code: str | None = None
     nominal_account_code: str | None = None
     invoice_number: str | None = None
     invoice_date: date | None = None

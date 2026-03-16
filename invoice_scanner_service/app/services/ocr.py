@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import logging
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from io import BytesIO
 from pathlib import Path
 
@@ -9,8 +7,6 @@ import pypdfium2 as pdfium
 import requests
 
 from app.config import settings
-
-logger = logging.getLogger("invoice_scanner.ocr")
 
 
 class OCRBackend:
@@ -20,50 +16,24 @@ class OCRBackend:
         raise NotImplementedError
 
     @staticmethod
-    def _render_pdf_page(pdf_path: Path, page_index: int, scale: float = 1.8, quality: int = 65) -> bytes:
-        pdf = pdfium.PdfDocument(str(pdf_path))
-        page = None
-        image = None
-        try:
-            page = pdf.get_page(page_index)
-            image = page.render(scale=scale).to_pil()
-            buf = BytesIO()
-            image.convert("RGB").save(buf, format="JPEG", quality=quality, optimize=True)
-            return buf.getvalue()
-        finally:
-            try:
-                if image is not None:
-                    image.close()
-            except Exception:
-                pass
-            try:
-                if page is not None:
-                    page.close()
-            except Exception:
-                pass
-            try:
-                pdf.close()
-            except Exception:
-                pass
-
-    @classmethod
     def render_pdf_page_to_jpeg_bytes(
-        cls,
         pdf_path: Path,
         page_index: int,
         scale: float = 1.8,
         quality: int = 65,
     ) -> bytes:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(cls._render_pdf_page, pdf_path, page_index, scale, quality)
+        pdf = pdfium.PdfDocument(str(pdf_path))
+        try:
+            page = pdf.get_page(page_index)
             try:
-                return future.result(timeout=settings.page_render_timeout_seconds)
-            except FuturesTimeoutError as exc:
-                logger.warning(
-                    "PDF page render timed out",
-                    extra={"file_name": pdf_path.name, "page_no": page_index + 1, "stage": "pdf_render", "status": "timeout"},
-                )
-                raise TimeoutError(f"PDF page render exceeded {settings.page_render_timeout_seconds} seconds") from exc
+                image = page.render(scale=scale).to_pil()
+                buf = BytesIO()
+                image.convert("RGB").save(buf, format="JPEG", quality=quality, optimize=True)
+                return buf.getvalue()
+            finally:
+                page.close()
+        finally:
+            pdf.close()
 
 
 class OCRSpaceBackend(OCRBackend):
@@ -95,10 +65,6 @@ class OCRSpaceBackend(OCRBackend):
             "OCREngine": str(settings.ocr_space_ocr_engine),
         }
 
-        logger.info(
-            "OCR request started",
-            extra={"file_name": pdf_path.name, "page_no": page_index + 1, "stage": "ocr", "status": "started"},
-        )
         resp = requests.post(
             settings.ocr_space_endpoint,
             files=files,
@@ -120,10 +86,6 @@ class OCRSpaceBackend(OCRBackend):
             if text:
                 lines.append(text)
 
-        logger.info(
-            "OCR request completed",
-            extra={"file_name": pdf_path.name, "page_no": page_index + 1, "stage": "ocr", "status": "ok"},
-        )
         return "\n".join(lines).strip()
 
 

@@ -106,7 +106,6 @@ alter table invoice_rows
     add column if not exists tenant_id uuid,
     add column if not exists company_id uuid,
     add column if not exists supplier_posting_account text,
-    add column if not exists customer_code text,
     add column if not exists nominal_account_code text;
 
 do $$
