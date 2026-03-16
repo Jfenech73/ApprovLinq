@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from app.db.models import User, UserSession, UserTenant, Tenant
 from app.db.session import get_db
@@ -95,52 +95,55 @@ def current_tenant_id(
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     try:
         user = db.query(User).filter(User.email == payload.email.lower().strip()).first()
-    except OperationalError:
-        db.rollback()
-        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
-    if not user or not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="User inactive")
 
-    token, token_hash, expires_at = new_session_token()
-    session_row = UserSession(user_id=user.id, token_hash=token_hash, expires_at=expires_at)
-    db.add(session_row)
-    try:
+        if not user or not verify_password(payload.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        if not user.is_active:
+            raise HTTPException(status_code=403, detail="User inactive")
+
+        token, token_hash, expires_at = new_session_token()
+        session_row = UserSession(user_id=user.id, token_hash=token_hash, expires_at=expires_at)
+        db.add(session_row)
         db.commit()
-    except OperationalError:
+
+        tenant_rows = (
+            db.query(UserTenant, Tenant)
+            .join(Tenant, Tenant.id == UserTenant.tenant_id)
+            .filter(UserTenant.user_id == user.id)
+            .order_by(UserTenant.is_default.desc(), Tenant.tenant_name.asc())
+            .all()
+        )
+        tenants = [
+            TenantBrief(
+                tenant_id=tenant.id,
+                tenant_name=tenant.tenant_name,
+                tenant_code=tenant.tenant_code,
+                tenant_role=link.tenant_role,
+                is_default=link.is_default,
+            )
+            for link, tenant in tenant_rows
+            if tenant.is_active
+        ]
+
+        landing_page = "/static/admin.html" if user.role == "admin" else "/static/tenant.html"
+        return LoginResponse(
+            access_token=token,
+            user_id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            role=user.role,
+            tenants=tenants,
+            landing_page=landing_page,
+        )
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
-
-    tenant_rows = (
-        db.query(UserTenant, Tenant)
-        .join(Tenant, Tenant.id == UserTenant.tenant_id)
-        .filter(UserTenant.user_id == user.id)
-        .order_by(UserTenant.is_default.desc(), Tenant.tenant_name.asc())
-        .all()
-    )
-    tenants = [
-        TenantBrief(
-            tenant_id=tenant.id,
-            tenant_name=tenant.tenant_name,
-            tenant_code=tenant.tenant_code,
-            tenant_role=link.tenant_role,
-            is_default=link.is_default,
-        )
-        for link, tenant in tenant_rows
-        if tenant.is_active
-    ]
-
-    landing_page = "/static/admin.html" if user.role == "admin" else "/static/tenant.html"
-    return LoginResponse(
-        access_token=token,
-        user_id=user.id,
-        email=user.email,
-        full_name=user.full_name,
-        role=user.role,
-        tenants=tenants,
-        landing_page=landing_page,
-    )
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Login failed due to an unexpected server error.")
 
 
 @router.get("/me")
