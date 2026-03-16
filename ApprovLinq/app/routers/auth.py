@@ -13,6 +13,10 @@ from app.utils.security import hash_password, new_session_token, session_token_h
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+def _db_unavailable() -> HTTPException:
+    return HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
+
+
 def _get_bearer_token(authorization: str | None) -> str:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing Bearer token")
@@ -35,7 +39,7 @@ def current_session(
         result = db.execute(stmt).first()
     except (OperationalError, SQLAlchemyError):
         db.rollback()
-        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
+        raise _db_unavailable()
     if not result:
         raise HTTPException(status_code=401, detail="Invalid session")
     session_row, user = result
@@ -91,7 +95,7 @@ def current_tenant_id(
         raise
     except (OperationalError, SQLAlchemyError):
         db.rollback()
-        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
+        raise _db_unavailable()
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -104,10 +108,12 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         if not user.is_active:
             raise HTTPException(status_code=403, detail="User inactive")
 
+        # Read everything needed for the response before committing the new session.
         user_id = user.id
+        full_name = user.full_name
+        role = user.role
         user_email = user.email
-        user_full_name = user.full_name
-        user_role = user.role
+        landing_page = "/static/admin.html" if role == "admin" else "/static/tenant.html"
 
         tenant_rows = (
             db.query(UserTenant, Tenant)
@@ -133,13 +139,12 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         db.add(session_row)
         db.commit()
 
-        landing_page = "/static/admin.html" if user_role == "admin" else "/static/tenant.html"
         return LoginResponse(
             access_token=token,
             user_id=user_id,
             email=user_email,
-            full_name=user_full_name,
-            role=user_role,
+            full_name=full_name,
+            role=role,
             tenants=tenants,
             landing_page=landing_page,
         )
@@ -148,7 +153,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         raise
     except (OperationalError, SQLAlchemyError):
         db.rollback()
-        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
+        raise _db_unavailable()
     except Exception:
         db.rollback()
         raise HTTPException(status_code=500, detail="Something went wrong on the server. Please try again.")
@@ -183,7 +188,7 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
         }
     except (OperationalError, SQLAlchemyError):
         db.rollback()
-        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
+        raise _db_unavailable()
 
 
 @router.post("/change-password")
@@ -204,7 +209,7 @@ def change_password(
         raise
     except (OperationalError, SQLAlchemyError):
         db.rollback()
-        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
+        raise _db_unavailable()
 
 
 @router.post("/logout")
@@ -216,4 +221,4 @@ def logout(auth=Depends(current_session), db: Session = Depends(get_db)):
         return {"ok": True}
     except (OperationalError, SQLAlchemyError):
         db.rollback()
-        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
+        raise _db_unavailable()

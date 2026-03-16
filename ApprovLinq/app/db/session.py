@@ -18,9 +18,13 @@ url = make_url(db_url)
 engine_kwargs = {"future": True}
 
 if url.get_backend_name().startswith("postgresql"):
-    # Managed pooler endpoints such as Neon are more reliable here with fresh
-    # connections per request instead of a long-lived local SQLAlchemy pool.
+    # Managed pooler endpoints are safest with fresh connections and without
+    # psycopg prepared statements.
     engine_kwargs["poolclass"] = NullPool
+    engine_kwargs["connect_args"] = {
+        "connect_timeout": 10,
+        "prepare_threshold": None,
+    }
 else:
     engine_kwargs.update({
         "pool_pre_ping": True,
@@ -31,7 +35,13 @@ else:
     })
 
 engine = create_engine(db_url, **engine_kwargs)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+    future=True,
+    expire_on_commit=False,
+)
 
 def get_db():
     db = SessionLocal()
