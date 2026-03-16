@@ -4,6 +4,7 @@ const state = {
   progressTimer: null,
   companies: [],
   tenants: [],
+  selectedCompanyId: "",
 };
 
 function $(id) {
@@ -44,6 +45,37 @@ function stopProgressPolling() {
 
 async function api(path, options = {}) {
   return apiFetch(path, options);
+}
+
+
+function getStoredCompanyId(tenantId) {
+  if (!tenantId) return "";
+  return localStorage.getItem(`approvlinq_company_id_${tenantId}`) || "";
+}
+
+function setStoredCompanyId(tenantId, companyId) {
+  if (!tenantId) return;
+  if (companyId) {
+    localStorage.setItem(`approvlinq_company_id_${tenantId}`, companyId);
+  } else {
+    localStorage.removeItem(`approvlinq_company_id_${tenantId}`);
+  }
+}
+
+function resetSelectedBatchUi() {
+  state.selectedBatchId = null;
+  stopProgressPolling();
+  $("selectedBatchPanel").classList.add("hidden");
+  $("selectedBatchEmpty").classList.remove("hidden");
+  $("selectedBatchId").textContent = "";
+  $("selectedBatchName").textContent = "";
+  $("selectedBatchStatus").textContent = "";
+  $("selectedBatchNotes").textContent = "-";
+  renderFiles([]);
+  const rowsBody = $("rowsTableBody");
+  if (rowsBody) {
+    rowsBody.innerHTML = '<tr><td colspan="9" class="muted">Select a batch first.</td></tr>';
+  }
 }
 
 function setWorkspaceLink(role) {
@@ -92,15 +124,32 @@ async function loadTenantOptions() {
 async function loadCompanies() {
   state.companies = await api("/tenant/companies");
   const select = $("companySelector");
+  const tenantId = getTenantId();
+
   if (!state.companies.length) {
+    state.selectedCompanyId = "";
+    setStoredCompanyId(tenantId, "");
     select.innerHTML = '<option value="">No companies available</option>';
+    select.disabled = true;
     return;
   }
 
+  const storedCompanyId = getStoredCompanyId(tenantId);
+  const existingSelection = select.value || state.selectedCompanyId;
+  const selectedCompany = state.companies.find((company) => company.id === storedCompanyId)
+    || state.companies.find((company) => company.id === existingSelection)
+    || state.companies[0];
+
   select.innerHTML = state.companies
-    .map((company) => `<option value="${company.id}">${escapeHtml(company.company_name)} (${escapeHtml(company.company_code)})</option>`)
+    .map((company) => `<option value="${company.id}" ${selectedCompany && company.id === selectedCompany.id ? "selected" : ""}>${escapeHtml(company.company_name)} (${escapeHtml(company.company_code)})</option>`)
     .join("");
+
+  select.disabled = false;
+  state.selectedCompanyId = selectedCompany?.id || "";
+  select.value = state.selectedCompanyId;
+  setStoredCompanyId(tenantId, state.selectedCompanyId);
 }
+
 
 async function loadBatches() {
   const companyId = $("companySelector")?.value;
@@ -324,18 +373,20 @@ if (logoutBtn) {
   logoutBtn.addEventListener("click", logoutAndGo);
 }
 $("refreshBatchesBtn").addEventListener("click", loadBatches);
-$("companySelector").addEventListener("change", async () => {
-  state.selectedBatchId = null;
-  $("selectedBatchPanel").classList.add("hidden");
-  $("selectedBatchEmpty").classList.remove("hidden");
-  await loadBatches();
+$("companySelector").addEventListener("change", async (event) => {
+  state.selectedCompanyId = event.target.value || "";
+  setStoredCompanyId(getTenantId(), state.selectedCompanyId);
+  resetSelectedBatchUi();
+  try {
+    await loadBatches();
+  } catch (error) {
+    setInlineMessage($("createBatchMessage"), normalizeUiErrorMessage(error.message), "server-error");
+  }
 });
 
 $("tenantSelector").addEventListener("change", async (event) => {
   setTenantId(event.target.value);
-  state.selectedBatchId = null;
-  $("selectedBatchPanel").classList.add("hidden");
-  $("selectedBatchEmpty").classList.remove("hidden");
+  resetSelectedBatchUi();
   try {
     await loadCompanies();
     await loadBatches();
@@ -351,6 +402,7 @@ async function initScannerPage() {
     setWorkspaceLink(session.role);
     await loadTenantOptions();
     await loadCompanies();
+    resetSelectedBatchUi();
     await loadBatches();
   } catch (error) {
     setInlineMessage($("createBatchMessage"), normalizeUiErrorMessage(error.message), "server-error");
