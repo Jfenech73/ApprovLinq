@@ -5,6 +5,7 @@ import io
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import Tenant, User, Company, TenantSupplier, TenantNominalAccount, IssueLog, UserTenant
@@ -227,47 +228,24 @@ def import_suppliers(file: UploadFile = File(...), company_id: UUID | None = Que
 
         code_key = supplier_account_code.casefold()
         name_key = supplier_name.casefold()
-        if code_key in seen_codes:
+        if code_key in seen_codes or name_key in seen_names:
             skipped += 1
-            errors.append(f"Row {idx}: duplicate supplier account code found in the import file and was skipped.")
-            continue
-        if name_key in seen_names:
-            skipped += 1
-            errors.append(f"Row {idx}: duplicate supplier name found in the import file and was skipped.")
+            errors.append(f"Row {idx}: duplicate supplier found in the import file and was skipped.")
             continue
         seen_codes.add(code_key)
         seen_names.add(name_key)
 
-        by_code = (
+        existing = (
             db.query(TenantSupplier)
-            .filter(
-                TenantSupplier.tenant_id == tenant_id,
-                TenantSupplier.company_id == company_id,
-                TenantSupplier.supplier_account_code == supplier_account_code,
-            )
+            .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.company_id == company_id, TenantSupplier.supplier_account_code == supplier_account_code)
             .first()
         )
-        by_name = (
-            db.query(TenantSupplier)
-            .filter(
-                TenantSupplier.tenant_id == tenant_id,
-                TenantSupplier.company_id == company_id,
-                TenantSupplier.supplier_name.ilike(supplier_name),
+        if not existing:
+            existing = (
+                db.query(TenantSupplier)
+                .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.company_id == company_id, TenantSupplier.supplier_name.ilike(supplier_name))
+                .first()
             )
-            .first()
-        )
-
-        existing = None
-        if by_code and by_name and by_code.id != by_name.id:
-            skipped += 1
-            errors.append(
-                f"Row {idx}: supplier code matches one record and supplier name matches another record in the selected company. Review that company master data first."
-            )
-            continue
-        if by_code:
-            existing = by_code
-        elif by_name:
-            existing = by_name
 
         try:
             with db.begin_nested():
@@ -277,6 +255,7 @@ def import_suppliers(file: UploadFile = File(...), company_id: UUID | None = Que
                     existing.default_nominal = default_nominal or None
                     existing.posting_account = supplier_account_code
                     existing.is_active = True
+                    db.flush()
                     updated += 1
                 else:
                     db.add(TenantSupplier(
@@ -288,12 +267,15 @@ def import_suppliers(file: UploadFile = File(...), company_id: UUID | None = Que
                         posting_account=supplier_account_code,
                         is_active=True,
                     ))
+                    db.flush()
                     imported += 1
-                db.flush()
-        except Exception:
-            db.rollback()
+        except IntegrityError:
             skipped += 1
-            errors.append(f"Row {idx}: could not be imported because it conflicts with another supplier in the selected company.")
+            errors.append(f"Row {idx}: conflicts with another supplier already stored in this selected company.")
+            continue
+        except Exception:
+            skipped += 1
+            errors.append(f"Row {idx}: could not be imported due to an unexpected supplier import error.")
             continue
 
     db.commit()

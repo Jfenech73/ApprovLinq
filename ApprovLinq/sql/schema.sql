@@ -59,6 +59,7 @@ create table if not exists companies (
 create table if not exists tenant_suppliers (
     id bigserial primary key,
     tenant_id uuid not null references tenants(id) on delete cascade,
+    company_id uuid not null references companies(id) on delete cascade,
     supplier_account_code text,
     supplier_name text not null,
     default_nominal text,
@@ -66,18 +67,20 @@ create table if not exists tenant_suppliers (
     is_active boolean not null default true,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
-    constraint uq_tenant_supplier_name unique (tenant_id, supplier_name)
+    constraint uq_tenant_company_supplier_name unique (tenant_id, company_id, supplier_name),
+    constraint uq_tenant_company_supplier_account_code unique (tenant_id, company_id, supplier_account_code)
 );
 
 create table if not exists tenant_nominal_accounts (
     id bigserial primary key,
     tenant_id uuid not null references tenants(id) on delete cascade,
+    company_id uuid not null references companies(id) on delete cascade,
     account_code text not null,
     account_name text not null,
     is_active boolean not null default true,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
-    constraint uq_tenant_nominal_account_code unique (tenant_id, account_code)
+    constraint uq_tenant_company_nominal_account_code unique (tenant_id, company_id, account_code)
 );
 
 create table if not exists issue_logs (
@@ -196,6 +199,28 @@ update tenant_suppliers
 set supplier_account_code = coalesce(nullif(supplier_account_code, ''), posting_account)
 where supplier_account_code is null or supplier_account_code = '';
 
-create unique index if not exists ix_tenant_suppliers_tenant_account_code
-    on tenant_suppliers(tenant_id, supplier_account_code)
+alter table tenant_suppliers add column if not exists company_id uuid;
+alter table tenant_nominal_accounts add column if not exists company_id uuid;
+
+update tenant_suppliers ts
+set company_id = c.id
+from companies c
+where ts.company_id is null and c.tenant_id = ts.tenant_id;
+
+update tenant_nominal_accounts na
+set company_id = c.id
+from companies c
+where na.company_id is null and c.tenant_id = na.tenant_id;
+
+alter table tenant_suppliers drop constraint if exists uq_tenant_supplier_name;
+alter table tenant_nominal_accounts drop constraint if exists uq_tenant_nominal_account_code;
+drop index if exists ix_tenant_suppliers_tenant_account_code;
+drop index if exists ix_tenant_nominals_tenant_account_code;
+
+create unique index if not exists ix_tenant_suppliers_tenant_company_name
+    on tenant_suppliers(tenant_id, company_id, supplier_name);
+create unique index if not exists ix_tenant_suppliers_tenant_company_account_code
+    on tenant_suppliers(tenant_id, company_id, supplier_account_code)
     where supplier_account_code is not null;
+create unique index if not exists ix_tenant_nominals_tenant_company_account_code
+    on tenant_nominal_accounts(tenant_id, company_id, account_code);
