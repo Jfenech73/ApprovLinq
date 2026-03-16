@@ -7,7 +7,7 @@ db_url = settings.database_url.strip()
 if db_url.startswith("postgresql://") and "+psycopg" not in db_url:
     db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
 
-if db_url.startswith("postgresql+psycopg://") and "sslmode=" not in db_url and "neon.tech" in db_url:
+if db_url.startswith("postgresql+psycopg://") and "sslmode=" not in db_url:
     sep = "&" if "?" in db_url else "?"
     db_url = f"{db_url}{sep}sslmode=require"
 

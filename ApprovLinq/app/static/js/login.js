@@ -23,15 +23,20 @@ document.getElementById("loginForm").addEventListener("submit", async (event) =>
     }
 
     if (!response.ok) {
-      throw new Error(data?.detail || data?.message || "Login failed");
+      throw new Error(data?.detail || "Login failed");
     }
 
     localStorage.setItem("approvlinq_token", data.access_token);
-    const defaultTenant = (data.tenants || []).find(t => t.is_default) || (data.tenants || [])[0];
-    if (defaultTenant) localStorage.setItem("approvlinq_tenant_id", defaultTenant.tenant_id);
+    const defaultTenant = (data.tenants || []).find((t) => t.is_default) || (data.tenants || [])[0];
+    if (defaultTenant) {
+      localStorage.setItem("approvlinq_tenant_id", defaultTenant.tenant_id);
+    }
     window.location.href = data.landing_page;
   } catch (error) {
-    message.textContent = error.message || "Something went wrong on the server. Please try again.";
+    const text = String(error?.message || "Something went wrong on the server. Please try again.");
+    message.textContent = text.includes("Internal Server Error")
+      ? "Something went wrong on the server. Please try again."
+      : text;
   }
 });
 

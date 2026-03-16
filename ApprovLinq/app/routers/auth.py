@@ -36,7 +36,7 @@ def current_session(
         result = db.execute(stmt).first()
     except OperationalError:
         db.rollback()
-        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable")
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
     if not result:
         raise HTTPException(status_code=401, detail="Invalid session")
     session_row, user = result
@@ -97,7 +97,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         user = db.query(User).filter(User.email == payload.email.lower().strip()).first()
     except OperationalError:
         db.rollback()
-        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable")
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
@@ -110,19 +110,15 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         db.commit()
     except OperationalError:
         db.rollback()
-        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable")
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
 
-    try:
-        tenant_rows = (
+    tenant_rows = (
         db.query(UserTenant, Tenant)
         .join(Tenant, Tenant.id == UserTenant.tenant_id)
         .filter(UserTenant.user_id == user.id)
         .order_by(UserTenant.is_default.desc(), Tenant.tenant_name.asc())
         .all()
-        )
-    except OperationalError:
-        db.rollback()
-        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable")
+    )
     tenants = [
         TenantBrief(
             tenant_id=tenant.id,
@@ -155,10 +151,7 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
         .filter(UserTenant.user_id == user.id)
         .order_by(UserTenant.is_default.desc(), Tenant.tenant_name.asc())
         .all()
-        )
-    except OperationalError:
-        db.rollback()
-        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable")
+    )
     return {
         "user_id": str(user.id),
         "email": user.email,
