@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from app.db.models import User, UserSession, UserTenant, Tenant
 from app.db.session import get_db
@@ -19,28 +19,7 @@ def _get_bearer_token(authorization: str | None) -> str:
     return authorization.split(" ", 1)[1].strip()
 
 
-def _db_unavailable(db: Session, message: str = "Database connection temporarily unavailable. Please try again.") -> HTTPException:
-    try:
-        db.rollback()
-    except Exception:
-        pass
-    return HTTPException(status_code=503, detail=message)
-
-
-def _load_user_tenants(db: Session, user_id):
-    return (
-        db.query(UserTenant, Tenant)
-        .join(Tenant, Tenant.id == UserTenant.tenant_id)
-        .filter(UserTenant.user_id == user_id)
-        .order_by(UserTenant.is_default.desc(), Tenant.tenant_name.asc())
-        .all()
-    )
-
-
-def current_session(
-    authorization: str | None = Header(default=None),
-    db: Session = Depends(get_db),
-) -> tuple[User, UserSession]:
+def current_session(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> tuple[User, UserSession]:
     token = _get_bearer_token(authorization)
     token_hash = session_token_hash(token)
     stmt = (
@@ -51,8 +30,9 @@ def current_session(
     )
     try:
         result = db.execute(stmt).first()
-    except SQLAlchemyError:
-        raise _db_unavailable(db)
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
     if not result:
         raise HTTPException(status_code=401, detail="Invalid session")
     session_row, user = result
@@ -67,11 +47,7 @@ def current_user(payload=Depends(current_session)) -> User:
     return payload[0]
 
 
-def current_tenant_id(
-    user: User = Depends(current_user),
-    x_tenant_id: str | None = Header(default=None),
-    db: Session = Depends(get_db),
-):
+def current_tenant_id(user: User = Depends(current_user), x_tenant_id: str | None = Header(default=None), db: Session = Depends(get_db)):
     try:
         if user.role == "admin":
             if not x_tenant_id:
@@ -104,23 +80,27 @@ def current_tenant_id(
         if not tenant or not tenant.is_active or tenant.status != "active":
             raise HTTPException(status_code=403, detail="Selected tenant is inactive")
         return tenant.id
-    except HTTPException:
-        raise
-    except SQLAlchemyError:
-        raise _db_unavailable(db)
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
 
 
 @router.post("/login", response_model=LoginResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     try:
-        email = payload.email.lower().strip()
-        user = db.query(User).filter(User.email == email).first()
+        user = db.query(User).filter(User.email == payload.email.lower().strip()).first()
         if not user or not verify_password(payload.password, user.password_hash):
             raise HTTPException(status_code=401, detail="Invalid email or password")
         if not user.is_active:
             raise HTTPException(status_code=403, detail="User inactive")
 
-        tenant_rows = _load_user_tenants(db, user.id)
+        tenant_rows = (
+            db.query(UserTenant, Tenant)
+            .join(Tenant, Tenant.id == UserTenant.tenant_id)
+            .filter(UserTenant.user_id == user.id)
+            .order_by(UserTenant.is_default.desc(), Tenant.tenant_name.asc())
+            .all()
+        )
         tenants = [
             TenantBrief(
                 tenant_id=tenant.id,
@@ -134,40 +114,40 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         ]
 
         token, token_hash, expires_at = new_session_token()
-        db.add(UserSession(user_id=user.id, token_hash=token_hash, expires_at=expires_at))
+        session_row = UserSession(user_id=user.id, token_hash=token_hash, expires_at=expires_at)
+        db.add(session_row)
         db.commit()
 
         landing_page = "/static/admin.html" if user.role == "admin" else "/static/tenant.html"
-        return {
-            "access_token": token,
-            "user_id": str(user.id),
-            "email": user.email,
-            "full_name": user.full_name,
-            "role": user.role,
-            "tenants": [
-                {
-                    "tenant_id": str(t.tenant_id),
-                    "tenant_name": t.tenant_name,
-                    "tenant_code": t.tenant_code,
-                    "tenant_role": t.tenant_role,
-                    "is_default": bool(t.is_default),
-                }
-                for t in tenants
-            ],
-            "landing_page": landing_page,
-        }
+        return LoginResponse(
+            access_token=token,
+            user_id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            role=user.role,
+            tenants=tenants,
+            landing_page=landing_page,
+        )
     except HTTPException:
         raise
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
     except SQLAlchemyError:
-        raise _db_unavailable(db)
-    except Exception:
+        db.rollback()
         raise HTTPException(status_code=500, detail="Something went wrong on the server. Please try again.")
 
 
 @router.get("/me")
 def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
     try:
-        tenant_rows = _load_user_tenants(db, user.id)
+        tenant_rows = (
+            db.query(UserTenant, Tenant)
+            .join(Tenant, Tenant.id == UserTenant.tenant_id)
+            .filter(UserTenant.user_id == user.id)
+            .order_by(UserTenant.is_default.desc(), Tenant.tenant_name.asc())
+            .all()
+        )
         return {
             "user_id": str(user.id),
             "email": user.email,
@@ -185,16 +165,13 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
                 for link, tenant in tenant_rows
             ],
         }
-    except SQLAlchemyError:
-        raise _db_unavailable(db)
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
 
 
 @router.post("/change-password")
-def change_password(
-    payload: ChangePasswordRequest,
-    auth=Depends(current_session),
-    db: Session = Depends(get_db),
-):
+def change_password(payload: ChangePasswordRequest, auth=Depends(current_session), db: Session = Depends(get_db)):
     user, _session = auth
     try:
         if not verify_password(payload.current_password, user.password_hash):
@@ -202,10 +179,9 @@ def change_password(
         user.password_hash = hash_password(payload.new_password)
         db.commit()
         return {"ok": True}
-    except HTTPException:
-        raise
-    except SQLAlchemyError:
-        raise _db_unavailable(db)
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")
 
 
 @router.post("/logout")
@@ -215,5 +191,6 @@ def logout(auth=Depends(current_session), db: Session = Depends(get_db)):
         session_row.revoked_at = utcnow()
         db.commit()
         return {"ok": True}
-    except SQLAlchemyError:
-        raise _db_unavailable(db)
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable. Please try again.")

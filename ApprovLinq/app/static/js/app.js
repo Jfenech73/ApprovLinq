@@ -137,7 +137,7 @@ async function selectBatch(batchId, options = {}) {
   $("selectedBatchId").textContent = batch.id;
   $("selectedBatchName").textContent = batch.batch_name;
   $("selectedBatchStatus").textContent = batch.status;
-  $("selectedBatchNotes").textContent = batch.notes || "-";
+  $("selectedBatchNotes").textContent = `${batch.notes || "-"}${batch.scan_mode ? ` • Mode: ${batch.scan_mode}` : ""}`;
 
   renderFiles(batch.files || []);
   await loadRows();
@@ -236,7 +236,7 @@ $("createBatchForm").addEventListener("submit", async (event) => {
     const batch = await api("/batches", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ batch_name: input.value.trim(), company_id: companyId, scan_mode: $("scanMode").value || "summary" }),
+      body: JSON.stringify({ batch_name: input.value.trim(), company_id: companyId }),
     });
     input.value = "";
     setInlineMessage(message, `Batch created: ${batch.id}`, "success");

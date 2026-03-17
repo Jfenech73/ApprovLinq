@@ -15,7 +15,7 @@ from app.db.session import engine, get_db
 from app.routers.auth import current_tenant_id, current_user
 from app.schemas import BatchCreate, BatchDetailOut, BatchFileOut, BatchOut, InvoiceRowOut
 from app.services.exporter import workbook_from_rows
-from app.services.extractor import get_pdf_page_count, process_pdf_page
+from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
 
 router = APIRouter(prefix="/batches", tags=["batches"])
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -84,7 +84,6 @@ def _build_batch_detail(batch: InvoiceBatch, db: Session) -> BatchDetailOut:
         status=batch.status,
         page_count=batch.page_count,
         notes=batch.notes,
-        scan_mode=getattr(batch, "scan_mode", "summary") or "summary",
         created_at=batch.created_at,
         processed_at=batch.processed_at,
         uploaded_files=uploaded_files,
@@ -144,40 +143,43 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 page_count = invoice_file.page_count or 0
                 for page_index in range(page_count):
                     try:
-                        page_results = process_pdf_page(invoice_file.file_path, page_index=page_index, openai_api_key=settings.openai_api_key if settings.use_openai else None, scan_mode=(getattr(batch, "scan_mode", "summary") or "summary"))
-                        if not isinstance(page_results, list):
-                            page_results = [page_results]
-                        for r in page_results:
-                            row = InvoiceRow(
-                            batch_id=batch_id,
-                            tenant_id=batch.tenant_id,
-                            company_id=batch.company_id,
-                            source_file_id=invoice_file.id,
-                            source_filename=invoice_file.original_filename,
-                            page_no=r.get("page_no"),
-                            supplier_name=r.get("supplier_name"),
-                            invoice_number=r.get("invoice_number"),
-                            invoice_date=r.get("invoice_date"),
-                            description=r.get("description"),
-                            line_items_raw=r.get("line_items_raw"),
-                            net_amount=r.get("net_amount"),
-                            vat_amount=r.get("vat_amount"),
-                            total_amount=r.get("total_amount"),
-                            currency=r.get("currency"),
-                            tax_code=r.get("tax_code"),
-                            method_used=r.get("method_used"),
-                            confidence_score=r.get("confidence_score"),
-                            validation_status=r.get("validation_status"),
-                            review_required=r.get("review_required", False),
-                            header_raw=r.get("header_raw"),
-                            totals_raw=r.get("totals_raw"),
-                            page_text_raw=r.get("page_text_raw"),
+                        row_payloads = process_pdf_page_rows(
+                            invoice_file.file_path,
+                            page_index=page_index,
+                            scan_mode=batch.scan_mode or "summary",
+                            openai_api_key=settings.openai_api_key if settings.use_openai else None,
                         )
-                        _apply_account_suggestions(db, tenant_id, batch.company_id, row)
-                        db.add(row)
-                        db.commit()
-                        inserted_rows += 1
-                        total_rows += 1
+                        for r in row_payloads:
+                            row = InvoiceRow(
+                                batch_id=batch_id,
+                                tenant_id=batch.tenant_id,
+                                company_id=batch.company_id,
+                                source_file_id=invoice_file.id,
+                                source_filename=invoice_file.original_filename,
+                                page_no=r.get("page_no"),
+                                supplier_name=r.get("supplier_name"),
+                                invoice_number=r.get("invoice_number"),
+                                invoice_date=r.get("invoice_date"),
+                                description=r.get("description"),
+                                line_items_raw=r.get("line_items_raw"),
+                                net_amount=r.get("net_amount"),
+                                vat_amount=r.get("vat_amount"),
+                                total_amount=r.get("total_amount"),
+                                currency=r.get("currency"),
+                                tax_code=r.get("tax_code"),
+                                method_used=r.get("method_used"),
+                                confidence_score=r.get("confidence_score"),
+                                validation_status=r.get("validation_status"),
+                                review_required=r.get("review_required", False),
+                                header_raw=r.get("header_raw"),
+                                totals_raw=r.get("totals_raw"),
+                                page_text_raw=r.get("page_text_raw"),
+                            )
+                            _apply_account_suggestions(db, tenant_id, batch.company_id, row)
+                            db.add(row)
+                            db.commit()
+                            inserted_rows += 1
+                            total_rows += 1
                         processed_pages += 1
                         batch.page_count = processed_pages
                         batch.notes = f"Processing file {file_index}/{len(files)}: {invoice_file.original_filename} (page {page_index + 1}/{page_count})"
@@ -252,10 +254,7 @@ def create_batch(payload: BatchCreate, db: Session = Depends(get_db), tenant_id=
     company = db.get(Company, payload.company_id)
     if not company or company.tenant_id != tenant_id:
         raise HTTPException(status_code=400, detail="Selected company does not belong to tenant")
-    scan_mode = (payload.scan_mode or "summary").strip().lower()
-    if scan_mode not in {"summary", "lines"}:
-        scan_mode = "summary"
-    batch = InvoiceBatch(batch_name=payload.batch_name.strip(), company_id=payload.company_id, tenant_id=tenant_id, status="created", notes=f"Batch created ({scan_mode})", scan_mode=scan_mode)
+    batch = InvoiceBatch(batch_name=payload.batch_name.strip(), company_id=payload.company_id, tenant_id=tenant_id, status="created", notes="Batch created", scan_mode=(payload.scan_mode or "summary"))
     db.add(batch)
     db.commit()
     db.refresh(batch)

@@ -89,7 +89,6 @@ class Company(Base):
 class TenantSupplier(Base):
     __tablename__ = "tenant_suppliers"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "company_id", "supplier_name", name="uq_tenant_company_supplier_name"),
         UniqueConstraint("tenant_id", "company_id", "supplier_account_code", name="uq_tenant_company_supplier_account_code"),
     )
 

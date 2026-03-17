@@ -697,3 +697,27 @@ tr:last-child td {
     margin-top: 18px;
   }
 }
+
+
+.scan-mode-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.scan-mode-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #d7e3f2);
+  border-radius: 16px;
+  background: #fff;
+  min-width: 280px;
+}
+
+.scan-mode-card input[type="radio"] {
+  width: auto;
+  min-height: auto;
+  margin-top: 3px;
+}

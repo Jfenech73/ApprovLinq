@@ -221,7 +221,7 @@ class CapacityRow(BaseModel):
 class BatchCreate(BaseModel):
     batch_name: str = Field(min_length=1, max_length=255)
     company_id: UUID
-    scan_mode: str = Field(default="summary")
+    scan_mode: str = Field(default="summary", pattern="^(summary|lines)$")
 
 
 class BatchOut(BaseModel):
