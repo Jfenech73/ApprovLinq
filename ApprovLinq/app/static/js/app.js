@@ -233,10 +233,11 @@ $("createBatchForm").addEventListener("submit", async (event) => {
     const companyId = $("companySelector").value;
     if (!companyId) throw new Error("Select a company first.");
 
+    const scanMode = (document.querySelector('input[name="scanMode"]:checked') || {}).value || "summary";
     const batch = await api("/batches", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ batch_name: input.value.trim(), company_id: companyId }),
+      body: JSON.stringify({ batch_name: input.value.trim(), company_id: companyId, scan_mode: scanMode }),
     });
     input.value = "";
     setInlineMessage(message, `Batch created: ${batch.id}`, "success");
