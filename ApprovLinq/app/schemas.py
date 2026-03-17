@@ -224,6 +224,11 @@ class BatchCreate(BaseModel):
     scan_mode: str = Field(default="summary", pattern="^(summary|lines)$")
 
 
+class BatchUpdate(BaseModel):
+    scan_mode: str | None = Field(default=None, pattern="^(summary|lines)$")
+    batch_name: str | None = Field(default=None, min_length=1, max_length=255)
+
+
 class BatchOut(BaseModel):
     id: UUID
     tenant_id: UUID | None = None

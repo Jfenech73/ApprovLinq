@@ -14,7 +14,7 @@ from app.config import settings
 from app.db.models import Company, InvoiceBatch, InvoiceFile, InvoiceRow, TenantNominalAccount, TenantSupplier, User
 from app.db.session import engine, get_db
 from app.routers.auth import current_tenant_id, current_user
-from app.schemas import BatchCreate, BatchDetailOut, BatchFileOut, BatchOut, InvoiceRowOut
+from app.schemas import BatchCreate, BatchUpdate, BatchDetailOut, BatchFileOut, BatchOut, InvoiceRowOut
 from app.services.exporter import workbook_from_rows
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
 
@@ -158,6 +158,7 @@ def _build_batch_detail(batch: InvoiceBatch, db: Session) -> BatchDetailOut:
         status=batch.status,
         page_count=batch.page_count,
         notes=batch.notes,
+        scan_mode=batch.scan_mode or "summary",
         created_at=batch.created_at,
         processed_at=batch.processed_at,
         uploaded_files=uploaded_files,
@@ -350,17 +351,14 @@ def get_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(c
 
 
 @router.patch("/{batch_id}")
-def update_batch(batch_id: UUID, payload: dict, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
+def update_batch(batch_id: UUID, payload: BatchUpdate, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)
     if batch.status == "processing":
         raise HTTPException(status_code=409, detail="Cannot update a batch while it is processing")
-    if "scan_mode" in payload:
-        mode = payload["scan_mode"]
-        if mode not in ("summary", "lines"):
-            raise HTTPException(status_code=400, detail="scan_mode must be 'summary' or 'lines'")
-        batch.scan_mode = mode
-    if "batch_name" in payload and payload["batch_name"]:
-        batch.batch_name = str(payload["batch_name"]).strip()[:255]
+    if payload.scan_mode is not None:
+        batch.scan_mode = payload.scan_mode
+    if payload.batch_name is not None:
+        batch.batch_name = payload.batch_name.strip()
     db.commit()
     db.refresh(batch)
     return {"id": str(batch.id), "scan_mode": batch.scan_mode, "batch_name": batch.batch_name}
