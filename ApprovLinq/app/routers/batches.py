@@ -354,7 +354,7 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
     workbook_bytes = workbook_from_rows(rows)
     filename = f"{batch.batch_name.replace(' ', '_') or 'batch'}_{batch.id}.xlsx"
     return StreamingResponse(
-        iter([workbook_bytes]),
+        iter([workbook_bytes.getvalue()]),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

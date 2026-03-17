@@ -28,7 +28,9 @@ def count_meaningful_chars(text: str) -> int:
 def parse_amount(value: str | None) -> float | None:
     if not value:
         return None
-    raw = str(value).strip().replace("€", "").replace("EUR", "").replace(" ", "")
+    raw = str(value).strip()
+    for sym in ("€", "£", "EUR", "GBP", "USD", "$", " "):
+        raw = raw.replace(sym, "")
     if re.match(r"^\d{1,3}(\.\d{3})+,\d{2}$", raw):
         raw = raw.replace(".", "").replace(",", ".")
     elif re.match(r"^\d+,\d{2}$", raw):
@@ -222,10 +224,38 @@ def find_supplier_name(text: str) -> str | None:
     if not lines:
         return None
 
+    # Identify indices that belong to the customer/bill-to section so we never
+    # pick the recipient name as the supplier.
+    customer_section_indices: set[int] = set()
+    customer_label_patterns = [
+        r"^\s*bill\s+to\s*[:\-]?\s*$",
+        r"^\s*invoice\s+to\s*[:\-]?\s*$",
+        r"^\s*sold\s+to\s*[:\-]?\s*$",
+        r"^\s*ship\s+to\s*[:\-]?\s*$",
+        r"^\s*deliver(?:y)?\s+to\s*[:\-]?\s*$",
+        r"^\s*to\s*:\s*$",
+        r"^\s*attention\s*[:\-]?\s*$",
+        r"^\s*customer\s*[:\-]?\s*$",
+        r"^\s*client\s*[:\-]?\s*$",
+        r"bill\s+to\s*[:\-]",
+        r"invoice\s+to\s*[:\-]",
+        r"sold\s+to\s*[:\-]",
+        r"ship\s+to\s*[:\-]",
+    ]
+    for i, line in enumerate(lines):
+        for pat in customer_label_patterns:
+            if re.search(pat, line, re.I):
+                # Mark this line and the next 3 lines as customer section
+                for j in range(i, min(i + 4, len(lines))):
+                    customer_section_indices.add(j)
+                break
+
     header_lines = lines[:18]
     candidates: list[str] = []
 
-    for line in header_lines:
+    for i, line in enumerate(header_lines):
+        if i in customer_section_indices:
+            continue
         if bad_supplier_line(line):
             continue
         candidates.append(line)
@@ -405,14 +435,15 @@ def simple_extract(text: str, openai_api_key: str | None = None) -> dict[str, An
     ], text)
     invoice_date = parse_date(invoice_date_raw)
 
+    _curr = r"(?:EUR|GBP|USD|€|£|\$)?"
     net_raw = first_match([
-        r"(?:subtotal|sub total|net amount|amount excl(?:uding)? vat|taxable amount)\s*[:\-]?\s*(?:EUR|€)?\s*([0-9.,]+)"
+        rf"(?:subtotal|sub total|net amount|amount excl(?:uding)? vat|taxable amount)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)"
     ], text)
     vat_raw = first_match([
-        r"(?:vat|tax|iva)\s*[:\-]?\s*(?:EUR|€)?\s*([0-9.,]+)"
+        rf"(?:vat|tax|iva)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)"
     ], text)
     total_raw = first_match([
-        r"(?:amount due|balance due|grand total|total due|total amount|total)\s*[:\-]?\s*(?:EUR|€)?\s*([0-9.,]+)"
+        rf"(?:amount due|balance due|grand total|total due|total amount|total)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)"
     ], text)
 
     net_amount = parse_amount(net_raw)
@@ -446,7 +477,12 @@ def simple_extract(text: str, openai_api_key: str | None = None) -> dict[str, An
         "net_amount": net_amount,
         "vat_amount": vat_amount,
         "total_amount": total_amount,
-        "currency": "EUR" if ("€" in text or "eur" in text.lower()) else None,
+        "currency": (
+            "GBP" if ("£" in text or "gbp" in text.lower()) else
+            "EUR" if ("€" in text or "eur" in text.lower()) else
+            "USD" if ("$" in text or "usd" in text.lower()) else
+            None
+        ),
         "tax_code": None,
     }
 
@@ -465,11 +501,14 @@ def openai_extract_invoice_fields(
         "supplier_name, invoice_number, invoice_date, description, "
         "net_amount, vat_amount, total_amount, currency, tax_code.\n"
         "Rules:\n"
+        "- supplier_name is the company ISSUING the invoice (the seller/vendor whose letterhead or logo appears at the top). "
+        "It is NOT the customer, buyer, or recipient. The buyer often appears after labels like 'Bill To:', 'Invoice To:', 'To:', or 'Sold To:' — do NOT use that name as supplier_name.\n"
         "- Use null when unknown.\n"
         "- Do not guess.\n"
         "- invoice_date should be DD/MM/YYYY when present.\n"
-        "- amounts should be plain numbers.\n"
-        "- description max 20 words.\n\n"
+        "- amounts should be plain numbers with no currency symbols.\n"
+        "- currency should be the ISO code e.g. GBP, EUR, USD.\n"
+        "- description max 20 words summarising the goods or services purchased.\n\n"
         f"PAGE TEXT:\n{page_text[:12000]}"
     )
 

@@ -26,7 +26,7 @@ function setInlineMessage(element, text, kind = "") {
 }
 
 function confidenceDisplay(value) {
-  return value == null ? "-" : `${Number(value).toFixed(0)}%`;
+  return value == null ? "-" : `${(Number(value) * 100).toFixed(0)}%`;
 }
 
 function reviewBadge(row) {
