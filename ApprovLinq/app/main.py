@@ -14,7 +14,6 @@ models.Base.metadata.create_all(bind=engine)
 
 
 def ensure_runtime_schema() -> None:
-    "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS scan_mode VARCHAR(20) NOT NULL DEFAULT 'summary'",
     statements: list[str] = []
     dialect = engine.dialect.name
 
