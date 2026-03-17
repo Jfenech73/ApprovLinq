@@ -18,8 +18,5 @@ requests==2.32.3
 urllib3==2.2.3
 charset-normalizer==3.4.0
 
-# PaddleOCR support
-paddlepaddle==3.2.0
-paddleocr==3.2.0
-numpy==1.26.4
-opencv-python-headless==4.10.0.84
+#
+numpy==1.26
