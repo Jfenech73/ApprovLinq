@@ -3,9 +3,15 @@ from io import BytesIO
 import pandas as pd
 
 
+def _row_to_dict(row) -> dict:
+    if isinstance(row, dict):
+        return row
+    return {col: getattr(row, col) for col in row.__table__.columns.keys()}
 
-def workbook_from_rows(rows: list[dict]) -> BytesIO:
-    df = pd.DataFrame(rows)
+
+def workbook_from_rows(rows) -> BytesIO:
+    row_dicts = [_row_to_dict(r) for r in rows]
+    df = pd.DataFrame(row_dicts)
 
     if df.empty:
         df = pd.DataFrame(columns=[
