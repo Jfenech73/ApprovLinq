@@ -26,7 +26,7 @@ def _row_to_dict(row) -> dict:
     return {col: _safe_value(getattr(row, col)) for col in row.__table__.columns.keys()}
 
 
-def workbook_from_rows(rows) -> BytesIO:
+def workbook_from_rows(rows, batch_metadata: dict | None = None) -> BytesIO:
     row_dicts = [_row_to_dict(r) for r in rows]
     df = pd.DataFrame(row_dicts)
 
@@ -74,7 +74,6 @@ def workbook_from_rows(rows) -> BytesIO:
         "page_text_raw",
     ]
 
-    # Internal/system columns that are not useful in an export
     skip_cols = {"id", "batch_id", "tenant_id", "company_id", "source_file_id", "created_at"}
 
     existing_preferred = [c for c in preferred_order if c in df.columns]
@@ -87,7 +86,11 @@ def workbook_from_rows(rows) -> BytesIO:
         else df.iloc[0:0].copy()
     )
 
+    meta = batch_metadata or {}
     summary = {
+        "batch_name": [meta.get("batch_name", "")],
+        "batch_id": [meta.get("batch_id", "")],
+        "scan_mode": [meta.get("scan_mode", "")],
         "total_rows": [len(df)],
         "needs_review": [len(review_df)],
         "sum_net_amount": [float(df["net_amount"].fillna(0).sum()) if "net_amount" in df.columns else 0],

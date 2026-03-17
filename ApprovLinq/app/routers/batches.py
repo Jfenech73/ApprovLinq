@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import re
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -17,6 +19,11 @@ from app.routers.auth import current_tenant_id, current_user
 from app.schemas import BatchCreate, BatchUpdate, BatchDetailOut, BatchFileOut, BatchOut, InvoiceRowOut
 from app.services.exporter import workbook_from_rows
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
+
+logger = logging.getLogger(__name__)
+
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+_PDF_MAGIC = b"%PDF"
 
 router = APIRouter(prefix="/batches", tags=["batches"])
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -231,7 +238,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 company_id=batch.company_id,
                                 source_file_id=invoice_file.id,
                                 source_filename=invoice_file.original_filename,
-                                page_no=r.get("page_no"),
+                                page_no=r.get("page_no") or (page_index + 1),
                                 supplier_name=r.get("supplier_name"),
                                 invoice_number=r.get("invoice_number"),
                                 invoice_date=r.get("invoice_date"),
@@ -252,7 +259,6 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             )
                             _apply_account_suggestions(db, tenant_id, batch.company_id, row)
                             db.add(row)
-                            db.commit()
                             inserted_rows += 1
                             total_rows += 1
                         processed_pages += 1
@@ -367,13 +373,33 @@ def update_batch(batch_id: UUID, payload: BatchUpdate, db: Session = Depends(get
 @router.post("/{batch_id}/files")
 def upload_files(batch_id: UUID, files: list[UploadFile] = File(...), db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)
+    if batch.status == "processing":
+        raise HTTPException(status_code=409, detail="Cannot upload files while the batch is processing")
+
+    warning = None
+    if batch.status in ("processed", "partial"):
+        warning = "This batch has already been processed. Re-process after uploading to update results."
+
     folder = _batch_folder(batch_id)
     saved = []
     for upload in files:
+        content = upload.file.read()
+
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File '{upload.filename}' exceeds the 50 MB upload limit ({len(content) // (1024*1024)} MB).",
+            )
+
+        if not content.startswith(_PDF_MAGIC):
+            raise HTTPException(
+                status_code=400,
+                detail=f"File '{upload.filename}' does not appear to be a valid PDF.",
+            )
+
         suffix = Path(upload.filename).suffix or ".pdf"
         stored_filename = f"{uuid4().hex}{suffix}"
         file_path = folder / stored_filename
-        content = upload.file.read()
         file_path.write_bytes(content)
         invoice_file = InvoiceFile(
             batch_id=batch.id,
@@ -389,7 +415,7 @@ def upload_files(batch_id: UUID, files: list[UploadFile] = File(...), db: Sessio
         db.add(invoice_file)
         saved.append(upload.filename)
     db.commit()
-    return {"saved": saved}
+    return {"saved": saved, "warning": warning}
 
 
 @router.post("/{batch_id}/process")
@@ -440,10 +466,17 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
     rows = db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch_id).order_by(InvoiceRow.id.asc()).all()
     if not rows:
         raise HTTPException(status_code=400, detail="No rows available to export")
-    workbook_bytes = workbook_from_rows(rows)
-    filename = f"{(batch.batch_name or 'batch').replace(' ', '_')}_{batch.id}.xlsx"
+    batch_metadata = {
+        "batch_name": batch.batch_name or "",
+        "batch_id": str(batch.id),
+        "scan_mode": batch.scan_mode or "summary",
+    }
+    workbook_bytes = workbook_from_rows(rows, batch_metadata=batch_metadata)
+    safe_name = re.sub(r"[^\w\-. ]", "_", batch.batch_name or "batch").strip()
+    filename = f"{safe_name}_{batch.id}.xlsx"
+    encoded = urllib.parse.quote(filename, safe="")
     return StreamingResponse(
         iter([workbook_bytes.getvalue()]),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
     )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -12,6 +13,8 @@ import requests
 
 from app.services.ocr import OCRSpaceBackend, PaddleOCRBackend
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def clean_text(text: str) -> str:
@@ -53,6 +56,12 @@ def parse_date(value: str | None):
         "%d.%m.%Y",
         "%d/%m/%y",
         "%d-%m-%y",
+        "%d %B %Y",
+        "%d %b %Y",
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%B %d %Y",
+        "%b %d %Y",
     ]
     for fmt in patterns:
         try:
@@ -416,7 +425,8 @@ def summarise_line_items_with_openai(
         result = " ".join(text_parts).strip()
         if result:
             return limit_to_20_words(result)
-    except Exception:
+    except Exception as exc:
+        logger.warning("summarise_line_items_with_openai failed: %s", exc)
         return None
 
     return None
@@ -555,24 +565,9 @@ def openai_extract_invoice_fields(
             "currency": payload.get("currency"),
             "tax_code": payload.get("tax_code"),
         }
-    except Exception:
+    except Exception as exc:
+        logger.warning("openai_extract_invoice_fields failed: %s", exc)
         return None
-
-
-def needs_ai_fallback(extracted: dict[str, Any], text: str) -> bool:
-    if count_meaningful_chars(text) < 20:
-        return False
-
-    if suspicious_supplier_name(extracted.get("supplier_name")):
-        return True
-    if suspicious_invoice_number(extracted.get("invoice_number")):
-        return True
-    if extracted.get("invoice_date") is None:
-        return True
-    if extracted.get("total_amount") is None:
-        return True
-
-    return False
 
 
 def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str, Any]:
@@ -801,7 +796,8 @@ def openai_extract_line_items(
         items = json.loads(m.group(0) if m else raw)
         if isinstance(items, list) and items:
             return items
-    except Exception:
+    except Exception as exc:
+        logger.warning("openai_extract_line_items failed: %s", exc)
         return None
 
     return None

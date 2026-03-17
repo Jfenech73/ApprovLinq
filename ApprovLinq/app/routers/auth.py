@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+import logging
+import threading
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
@@ -10,7 +15,35 @@ from app.db.session import get_db, SessionLocal
 from app.schemas import LoginRequest, LoginResponse, TenantBrief, ChangePasswordRequest
 from app.utils.security import hash_password, new_session_token, session_token_hash, utcnow, verify_password
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+_LOGIN_MAX_ATTEMPTS = 10
+_LOGIN_WINDOW_SECONDS = 300
+_login_attempts: dict[str, list[datetime]] = defaultdict(list)
+_login_lock = threading.Lock()
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _check_login_rate_limit(ip: str) -> None:
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=_LOGIN_WINDOW_SECONDS)
+    with _login_lock:
+        bucket = _login_attempts[ip]
+        bucket[:] = [t for t in bucket if t > cutoff]
+        if len(bucket) >= _LOGIN_MAX_ATTEMPTS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many login attempts. Please wait {_LOGIN_WINDOW_SECONDS // 60} minutes before trying again.",
+            )
+        bucket.append(now)
 
 
 def _get_bearer_token(authorization: str | None) -> str:
@@ -106,7 +139,9 @@ def current_tenant_id(user: User = Depends(current_user), x_tenant_id: str | Non
 
 
 @router.post("/login", response_model=LoginResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    _check_login_rate_limit(_client_ip(request))
+
     def _authenticate(session: Session):
         user = session.query(User).filter(User.email == payload.email.lower().strip()).first()
         if not user or not verify_password(payload.password, user.password_hash):

@@ -273,9 +273,10 @@ $("uploadBtn").addEventListener("click", async () => {
 
   setInlineMessage(message, "Uploading files...");
   try {
-    await api(`/batches/${state.selectedBatchId}/files`, { method: "POST", body: form });
+    const result = await api(`/batches/${state.selectedBatchId}/files`, { method: "POST", body: form });
     input.value = "";
-    setInlineMessage(message, "Files uploaded.", "success");
+    const msg = result.warning ? `Files uploaded. ${result.warning}` : "Files uploaded.";
+    setInlineMessage(message, msg, result.warning ? "" : "success");
     await selectBatch(state.selectedBatchId);
     await loadBatches();
   } catch (error) {

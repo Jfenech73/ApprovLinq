@@ -1,10 +1,12 @@
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from sqlalchemy import text
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 
 from app.config import settings
 from app.db import models
@@ -68,7 +70,40 @@ app = FastAPI(title=settings.app_name)
 base_dir = Path(__file__).resolve().parent
 static_dir = base_dir / "static"
 _version_file = base_dir.parent / "VERSION"
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Tenant-Id"],
+)
+
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+
+@app.on_event("startup")
+async def recover_stuck_batches() -> None:
+    from app.db.session import SessionLocal
+    from app.db.models import InvoiceBatch
+    db = SessionLocal()
+    try:
+        stuck = db.query(InvoiceBatch).filter(InvoiceBatch.status == "processing").all()
+        for batch in stuck:
+            batch.status = "partial"
+            batch.notes = "Processing was interrupted by a server restart. Re-process to complete."
+            batch.processed_at = datetime.now(timezone.utc)
+        if stuck:
+            db.commit()
+            logger.info("Recovered %d stuck batch(es) from 'processing' status on startup", len(stuck))
+    except Exception as exc:
+        logger.warning("Failed to recover stuck batches on startup: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        db.close()
 
 
 @app.get("/version")
