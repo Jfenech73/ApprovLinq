@@ -581,8 +581,13 @@ def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str
 
     merged = dict(base)
 
-    if suspicious_supplier_name(merged.get("supplier_name")) and ai.get("supplier_name"):
-        merged["supplier_name"] = ai.get("supplier_name")
+    # Always prefer AI supplier_name when AI returns a valid one — the rule-based
+    # heuristic cannot reliably distinguish the supplier (invoice sender) from the
+    # customer (invoice recipient) when both look like legitimate company names.
+    if ai.get("supplier_name") and not suspicious_supplier_name(ai.get("supplier_name")):
+        merged["supplier_name"] = ai["supplier_name"]
+    elif suspicious_supplier_name(merged.get("supplier_name")) and ai.get("supplier_name"):
+        merged["supplier_name"] = ai["supplier_name"]
 
     if suspicious_invoice_number(merged.get("invoice_number")) and ai.get("invoice_number"):
         merged["invoice_number"] = ai.get("invoice_number")
@@ -641,14 +646,17 @@ def process_pdf_page(
 
     extracted = simple_extract(final_text, openai_api_key=openai_api_key)
 
-    if settings.use_openai and openai_api_key and needs_ai_fallback(extracted, final_text):
+    if settings.use_openai and openai_api_key and count_meaningful_chars(final_text) >= 20:
+        # Always call OpenAI when enabled — the rule-based heuristic cannot
+        # reliably tell supplier from customer, so we always defer to the AI
+        # for supplier_name and fill in any other missing fields.
         ai_fields = openai_extract_invoice_fields(
             final_text,
             openai_api_key,
             model=settings.openai_model,
         )
         extracted = merge_ai_fields(extracted, ai_fields)
-        method = f"{method}+openai_fallback"
+        method = f"{method}+openai"
 
     confidence = 0.0
     if extracted.get("supplier_name"):
