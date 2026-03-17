@@ -352,7 +352,7 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
     if not rows:
         raise HTTPException(status_code=400, detail="No rows available to export")
     workbook_bytes = workbook_from_rows(rows)
-    filename = f"{batch.batch_name.replace(' ', '_') or 'batch'}_{batch.id}.xlsx"
+    filename = f"{(batch.batch_name or 'batch').replace(' ', '_')}_{batch.id}.xlsx"
     return StreamingResponse(
         iter([workbook_bytes.getvalue()]),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
