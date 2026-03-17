@@ -739,6 +739,131 @@ def split_line_item_rows(page_result: dict[str, Any], tolerance: float = 0.05) -
     return rows
 
 
+def openai_extract_line_items(
+    page_text: str,
+    api_key: str,
+    model: str = "gpt-4.1-mini",
+) -> list[dict[str, Any]] | None:
+    """Ask OpenAI to return individual invoice line items as a JSON array.
+
+    Each element: {description, quantity, unit_price, amount}
+    Totals, VAT, subtotal rows are excluded by instruction.
+    """
+    if not api_key or not page_text.strip():
+        return None
+
+    prompt = (
+        "Extract every individual line item from this invoice page.\n"
+        "Return a JSON array only — no other text. Each element must have:\n"
+        '  "description": what the item or service is (max 15 words, plain English)\n'
+        '  "quantity": numeric quantity or null if not shown\n'
+        '  "unit_price": price per unit as a plain number or null if not shown\n'
+        '  "amount": this line\'s total as a plain number (no currency symbols)\n'
+        "Rules:\n"
+        "- Exclude totals, subtotals, VAT, tax, discount summary rows, and shipping/handling rows\n"
+        "- Only include actual goods or service lines\n"
+        "- If quantity or unit_price are absent from the invoice, use null\n"
+        "- Return [] if no line items can be identified\n"
+        "- Return the JSON array only, nothing else\n\n"
+        f"PAGE TEXT:\n{page_text[:12000]}"
+    )
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "input": prompt,
+                "max_output_tokens": 600,
+            },
+            timeout=45,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        text_parts = []
+        for item in data.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") in ("output_text", "text"):
+                    txt = content.get("text", "")
+                    if txt:
+                        text_parts.append(txt)
+
+        raw = " ".join(text_parts).strip()
+        if not raw:
+            return None
+
+        m = re.search(r"\[.*\]", raw, re.S)
+        items = json.loads(m.group(0) if m else raw)
+        if isinstance(items, list) and items:
+            return items
+    except Exception:
+        return None
+
+    return None
+
+
+def _build_rows_from_ai_items(
+    page_result: dict[str, Any],
+    ai_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build one InvoiceRow dict per AI-extracted line item.
+
+    Flags for review if the sum of line amounts diverges from the invoice total.
+    """
+    rows: list[dict[str, Any]] = []
+    summed = 0.0
+
+    for idx, item in enumerate(ai_items, start=1):
+        row = dict(page_result)
+
+        desc = (item.get("description") or "").strip()
+        row["description"] = limit_to_20_words(desc) or page_result.get("description") or "Invoice line"
+
+        # Build a readable line_items_raw from the structured item
+        parts = [row["description"]]
+        if item.get("quantity") is not None:
+            parts.append(f"Qty: {item['quantity']}")
+        if item.get("unit_price") is not None:
+            parts.append(f"@ {item['unit_price']}")
+        if item.get("amount") is not None:
+            parts.append(f"= {item['amount']}")
+        row["line_items_raw"] = "  ".join(parts)
+
+        amount = None
+        raw_amt = item.get("amount")
+        if raw_amt is not None:
+            try:
+                amount = float(raw_amt)
+            except (TypeError, ValueError):
+                amount = parse_amount(str(raw_amt))
+
+        if amount is not None:
+            summed += amount
+            row["total_amount"] = amount
+            row["net_amount"] = amount
+            row["vat_amount"] = 0.0
+
+        row["line_no"] = idx
+        rows.append(row)
+
+    if not rows:
+        return [page_result]
+
+    # Cross-check against the invoice-level total
+    invoice_total = page_result.get("total_amount")
+    if invoice_total is not None and abs(float(invoice_total) - summed) > 0.10:
+        for row in rows:
+            row["review_required"] = True
+            row["validation_status"] = "review"
+
+    return rows
+
+
 def process_pdf_page_rows(
     pdf_path: str | Path,
     page_index: int,
@@ -746,8 +871,16 @@ def process_pdf_page_rows(
     openai_api_key: str | None = None,
 ) -> list[dict[str, Any]]:
     page_result = process_pdf_page(pdf_path, page_index=page_index, openai_api_key=openai_api_key)
+
     if (scan_mode or "summary").lower() == "lines":
+        # Prefer AI-structured line items; fall back to rule-based splitter
+        if settings.use_openai and openai_api_key:
+            page_text = page_result.get("page_text_raw") or ""
+            ai_items = openai_extract_line_items(page_text, openai_api_key, model=settings.openai_model)
+            if ai_items:
+                return _build_rows_from_ai_items(page_result, ai_items)
         return split_line_item_rows(page_result)
+
     return [page_result]
 
 

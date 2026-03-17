@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -43,16 +44,89 @@ def _clear_active(batch_id: UUID) -> None:
         _ACTIVE_BATCHES.discard(str(batch_id))
 
 
-def _apply_account_suggestions(db: Session, tenant_id, company_id, row: InvoiceRow):
-    if row.supplier_name and not row.supplier_posting_account:
-        supplier = (
-            db.query(TenantSupplier)
-            .filter(TenantSupplier.tenant_id == tenant_id, TenantSupplier.company_id == company_id, TenantSupplier.is_active.is_(True))
-            .filter(TenantSupplier.supplier_name.ilike(row.supplier_name.strip()))
-            .first()
+_STOP_WORDS = {"the", "and", "of", "for", "a", "an", "in", "on", "at", "to", "by"}
+_LEGAL_SUFFIXES = re.compile(
+    r"\b(ltd|limited|plc|llc|inc|corp|co|group|trading|holdings|services|solutions)\b",
+    re.I,
+)
+
+
+def _normalise_supplier(name: str) -> str:
+    """Lowercase, strip legal suffixes and punctuation for loose comparison."""
+    n = _LEGAL_SUFFIXES.sub("", (name or "").lower())
+    n = re.sub(r"[^a-z0-9 ]", " ", n)
+    return re.sub(r"\s+", " ", n).strip()
+
+
+def _word_overlap(a: str, b: str) -> float:
+    """Jaccard word-overlap score between two normalised supplier name strings."""
+    wa = set(_normalise_supplier(a).split()) - _STOP_WORDS
+    wb = set(_normalise_supplier(b).split()) - _STOP_WORDS
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / max(len(wa), len(wb))
+
+
+def _match_supplier_fuzzy(
+    db: Session, tenant_id, company_id, supplier_name: str
+) -> TenantSupplier | None:
+    """Return the best-matching active supplier, or None if no good match exists.
+
+    Strategy (in order):
+    1. Exact case-insensitive match.
+    2. Normalised containment — one name's core words fully contained in the other.
+    3. Word-overlap ≥ 0.5 — majority of meaningful words in common.
+    """
+    if not supplier_name:
+        return None
+
+    name = supplier_name.strip()
+    base_q = (
+        db.query(TenantSupplier)
+        .filter(
+            TenantSupplier.tenant_id == tenant_id,
+            TenantSupplier.company_id == company_id,
+            TenantSupplier.is_active.is_(True),
         )
+    )
+
+    # 1. Exact ilike
+    exact = base_q.filter(TenantSupplier.supplier_name.ilike(name)).first()
+    if exact:
+        return exact
+
+    # 2 & 3. Fuzzy — load all active suppliers and score
+    all_suppliers = base_q.all()
+    if not all_suppliers:
+        return None
+
+    name_norm = _normalise_supplier(name)
+    best, best_score = None, 0.0
+
+    for s in all_suppliers:
+        sname_norm = _normalise_supplier(s.supplier_name)
+
+        # Containment check
+        if name_norm and sname_norm and (name_norm in sname_norm or sname_norm in name_norm):
+            score = 0.85
+        else:
+            score = _word_overlap(name, s.supplier_name)
+
+        if score > best_score:
+            best_score = score
+            best = s
+
+    return best if best_score >= 0.50 else None
+
+
+def _apply_account_suggestions(db: Session, tenant_id, company_id, row: InvoiceRow):
+    if row.supplier_name:
+        supplier = _match_supplier_fuzzy(db, tenant_id, company_id, row.supplier_name)
         if supplier:
-            row.supplier_posting_account = supplier.supplier_account_code or supplier.posting_account
+            # Canonicalise the name to the list entry so downstream is consistent
+            row.supplier_name = supplier.supplier_name
+            if not row.supplier_posting_account:
+                row.supplier_posting_account = supplier.supplier_account_code or supplier.posting_account
             if not row.nominal_account_code and supplier.default_nominal:
                 row.nominal_account_code = supplier.default_nominal
 
