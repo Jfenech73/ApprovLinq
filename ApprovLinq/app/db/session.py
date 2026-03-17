@@ -1,9 +1,9 @@
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
 from app.config import settings
+
 
 db_url = settings.database_url.strip()
 
@@ -15,15 +15,10 @@ if db_url.startswith("postgresql+psycopg://") and "sslmode=" not in db_url:
     db_url = f"{db_url}{sep}sslmode=require"
 
 url = make_url(db_url)
-engine_kwargs = {"future": True}
+engine_kwargs = {"future": True, "pool_pre_ping": True}
 
 if url.get_backend_name().startswith("postgresql"):
-    # Managed pooler endpoints such as Neon are more reliable here with fresh
-    # connections per request instead of a long-lived local SQLAlchemy pool.
-    engine_kwargs["poolclass"] = NullPool
-else:
     engine_kwargs.update({
-        "pool_pre_ping": True,
         "pool_recycle": 180,
         "pool_size": 5,
         "max_overflow": 10,
@@ -31,7 +26,8 @@ else:
     })
 
 engine = create_engine(db_url, **engine_kwargs)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True, expire_on_commit=False)
+
 
 def get_db():
     db = SessionLocal()
