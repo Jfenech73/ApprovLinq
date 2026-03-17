@@ -241,7 +241,7 @@ $("createBatchForm").addEventListener("submit", async (event) => {
     const companyId = $("companySelector").value;
     if (!companyId) throw new Error("Select a company first.");
 
-    const scanMode = (document.querySelector('input[name="scanMode"]:checked') || {}).value || "summary";
+    const scanMode = "summary";
     const batch = await api("/batches", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
