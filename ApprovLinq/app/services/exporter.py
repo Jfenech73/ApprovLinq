@@ -1,12 +1,29 @@
 from __future__ import annotations
+import decimal
+import uuid
+from datetime import date, datetime
 from io import BytesIO
+
 import pandas as pd
+
+
+def _safe_value(v):
+    """Convert types that openpyxl cannot write into Excel-safe equivalents."""
+    if v is None:
+        return None
+    if isinstance(v, uuid.UUID):
+        return str(v)
+    if isinstance(v, decimal.Decimal):
+        return float(v)
+    if isinstance(v, (datetime, date)):
+        return v
+    return v
 
 
 def _row_to_dict(row) -> dict:
     if isinstance(row, dict):
-        return row
-    return {col: getattr(row, col) for col in row.__table__.columns.keys()}
+        return {k: _safe_value(v) for k, v in row.items()}
+    return {col: _safe_value(getattr(row, col)) for col in row.__table__.columns.keys()}
 
 
 def workbook_from_rows(rows) -> BytesIO:
@@ -37,6 +54,8 @@ def workbook_from_rows(rows) -> BytesIO:
         "source_filename",
         "page_no",
         "supplier_name",
+        "supplier_posting_account",
+        "nominal_account_code",
         "invoice_number",
         "invoice_date",
         "description",
@@ -55,9 +74,12 @@ def workbook_from_rows(rows) -> BytesIO:
         "page_text_raw",
     ]
 
-    existing_cols = [c for c in preferred_order if c in df.columns]
-    other_cols = [c for c in df.columns if c not in existing_cols]
-    df = df[existing_cols + other_cols]
+    # Internal/system columns that are not useful in an export
+    skip_cols = {"id", "batch_id", "tenant_id", "company_id", "source_file_id", "created_at"}
+
+    existing_preferred = [c for c in preferred_order if c in df.columns]
+    other_cols = [c for c in df.columns if c not in existing_preferred and c not in skip_cols]
+    df = df[existing_preferred + other_cols]
 
     review_df = (
         df[df["review_required"] == True].copy()
