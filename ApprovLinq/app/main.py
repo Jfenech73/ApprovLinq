@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from sqlalchemy import text
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
@@ -67,7 +67,14 @@ except Exception as exc:
 app = FastAPI(title=settings.app_name)
 base_dir = Path(__file__).resolve().parent
 static_dir = base_dir / "static"
+_version_file = base_dir.parent / "VERSION"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+
+@app.get("/version")
+def get_version():
+    version = _version_file.read_text().strip() if _version_file.exists() else "0.0.0"
+    return JSONResponse({"version": version})
 
 
 @app.get("/")

@@ -1,5 +1,17 @@
 let approvlinqSessionCache = null;
 
+(async function injectVersion() {
+  try {
+    const resp = await fetch("/version");
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const label = `v${data.version}`;
+    document.querySelectorAll(".version-badge").forEach((el) => {
+      el.textContent = label;
+    });
+  } catch (_) {}
+})();
+
 function getToken() {
   return localStorage.getItem("approvlinq_token") || "";
 }
