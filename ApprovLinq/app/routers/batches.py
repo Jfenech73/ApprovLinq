@@ -349,6 +349,23 @@ def get_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(c
     return _build_batch_detail(batch, db)
 
 
+@router.patch("/{batch_id}")
+def update_batch(batch_id: UUID, payload: dict, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
+    batch = _get_batch_for_tenant(db, batch_id, tenant_id)
+    if batch.status == "processing":
+        raise HTTPException(status_code=409, detail="Cannot update a batch while it is processing")
+    if "scan_mode" in payload:
+        mode = payload["scan_mode"]
+        if mode not in ("summary", "lines"):
+            raise HTTPException(status_code=400, detail="scan_mode must be 'summary' or 'lines'")
+        batch.scan_mode = mode
+    if "batch_name" in payload and payload["batch_name"]:
+        batch.batch_name = str(payload["batch_name"]).strip()[:255]
+    db.commit()
+    db.refresh(batch)
+    return {"id": str(batch.id), "scan_mode": batch.scan_mode, "batch_name": batch.batch_name}
+
+
 @router.post("/{batch_id}/files")
 def upload_files(batch_id: UUID, files: list[UploadFile] = File(...), db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)

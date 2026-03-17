@@ -88,6 +88,27 @@
             </div>
 
             <div class="stack">
+              <label>Scan mode</label>
+              <div class="scan-mode-group" id="batchScanModeGroup">
+                <label class="scan-mode-card">
+                  <input type="radio" name="batchScanMode" value="summary" />
+                  <div>
+                    <strong>Total invoice</strong>
+                    <div class="muted">One row per page with a summary description.</div>
+                  </div>
+                </label>
+                <label class="scan-mode-card">
+                  <input type="radio" name="batchScanMode" value="lines" />
+                  <div>
+                    <strong>Separate line items</strong>
+                    <div class="muted">One row per line item with mismatch review.</div>
+                  </div>
+                </label>
+              </div>
+              <div id="scanModeMessage" class="message"></div>
+            </div>
+
+            <div class="stack">
               <label for="pdfFiles">Upload PDF files</label>
               <input id="pdfFiles" type="file" accept=".pdf,application/pdf" multiple />
               <div class="row gap-sm wrap">

@@ -137,7 +137,15 @@ async function selectBatch(batchId, options = {}) {
   $("selectedBatchId").textContent = batch.id;
   $("selectedBatchName").textContent = batch.batch_name;
   $("selectedBatchStatus").textContent = batch.status;
-  $("selectedBatchNotes").textContent = `${batch.notes || "-"}${batch.scan_mode ? ` • Mode: ${batch.scan_mode}` : ""}`;
+  $("selectedBatchNotes").textContent = batch.notes || "-";
+
+  // Sync the scan mode radio buttons to the batch's stored mode
+  const currentMode = batch.scan_mode || "summary";
+  document.querySelectorAll('input[name="batchScanMode"]').forEach((radio) => {
+    radio.checked = radio.value === currentMode;
+    radio.disabled = batch.status === "processing";
+  });
+  setInlineMessage($("scanModeMessage"), "");
 
   renderFiles(batch.files || []);
   await loadRows();
@@ -343,6 +351,23 @@ $("tenantSelector").addEventListener("change", async (event) => {
   } catch (error) {
     setInlineMessage($("createBatchMessage"), normalizeUiErrorMessage(error.message), "server-error");
   }
+});
+
+document.querySelectorAll('input[name="batchScanMode"]').forEach((radio) => {
+  radio.addEventListener("change", async () => {
+    if (!state.selectedBatchId) return;
+    const msg = $("scanModeMessage");
+    try {
+      await api(`/batches/${state.selectedBatchId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scan_mode: radio.value }),
+      });
+      setInlineMessage(msg, `Mode set to: ${radio.value === "lines" ? "Separate line items" : "Total invoice"}`, "success");
+    } catch (error) {
+      setInlineMessage(msg, normalizeUiErrorMessage(error.message), "server-error");
+    }
+  });
 });
 
 async function initScannerPage() {
