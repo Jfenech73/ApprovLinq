@@ -150,6 +150,155 @@ def _apply_account_suggestions(db: Session, tenant_id, company_id, row: InvoiceR
                 break
 
 
+_PATTERN_STOP_WORDS: frozenset[str] = frozenset({
+    "the", "and", "of", "for", "a", "an", "in", "on", "at", "to", "by", "is",
+    "are", "was", "with", "from", "that", "this", "ltd", "limited", "plc",
+    "invoice", "date", "page", "number", "vat", "tax", "total", "amount",
+    "description", "quantity", "price", "unit", "subtotal", "balance", "ref",
+    "your", "our", "due", "paid", "name", "address", "account",
+})
+
+
+def _extract_pattern_keywords(text: str) -> set[str]:
+    """Return a set of meaningful lowercase words from invoice header text."""
+    words = re.findall(r"[a-zA-Z]{4,}", (text or "").lower())
+    return {w for w in words if w not in _PATTERN_STOP_WORDS}
+
+
+def _match_supplier_by_pattern(
+    db: Session, tenant_id, company_id, header_text: str
+) -> TenantSupplier | None:
+    """Check stored keyword fingerprints for a confident supplier identification.
+
+    Returns a TenantSupplier if at least 3 keywords overlap with a stored pattern
+    and the overlap covers at least 50 % of the pattern's keyword set.
+    """
+    if not header_text:
+        return None
+    from app.db.models import SupplierPattern
+
+    keywords = _extract_pattern_keywords(header_text)
+    if len(keywords) < 3:
+        return None
+
+    patterns = (
+        db.query(SupplierPattern)
+        .filter(
+            SupplierPattern.tenant_id == tenant_id,
+            SupplierPattern.company_id == company_id,
+        )
+        .all()
+    )
+
+    best_supplier: TenantSupplier | None = None
+    best_score = 0.0
+
+    for pattern in patterns:
+        if not pattern.keywords:
+            continue
+        pattern_kws = set(pattern.keywords.split())
+        if len(pattern_kws) < 3:
+            continue
+        overlap = keywords & pattern_kws
+        if len(overlap) < 3:
+            continue
+        score = len(overlap) / max(len(pattern_kws), 1)
+        if score >= 0.50 and score > best_score:
+            supplier = (
+                db.query(TenantSupplier)
+                .filter(
+                    TenantSupplier.id == pattern.supplier_id,
+                    TenantSupplier.is_active.is_(True),
+                )
+                .first()
+            )
+            if supplier:
+                best_score = score
+                best_supplier = supplier
+
+    return best_supplier
+
+
+def _learn_supplier_patterns(
+    batch_id: UUID, tenant_id, company_id, db: Session
+) -> None:
+    """Extract keyword fingerprints from successfully matched rows and save them
+    so that future invoices from the same supplier can be recognised quickly."""
+    from app.db.models import SupplierPattern
+    from datetime import timezone as _tz
+
+    rows = (
+        db.query(InvoiceRow)
+        .filter(
+            InvoiceRow.batch_id == batch_id,
+            InvoiceRow.supplier_name.isnot(None),
+            InvoiceRow.supplier_posting_account.isnot(None),
+            InvoiceRow.header_raw.isnot(None),
+        )
+        .all()
+    )
+
+    if not rows:
+        return
+
+    for row in rows:
+        supplier = (
+            db.query(TenantSupplier)
+            .filter(
+                TenantSupplier.tenant_id == tenant_id,
+                TenantSupplier.company_id == company_id,
+                TenantSupplier.supplier_name == row.supplier_name,
+                TenantSupplier.is_active.is_(True),
+            )
+            .first()
+        )
+        if not supplier:
+            continue
+
+        keywords = _extract_pattern_keywords(row.header_raw)
+        if len(keywords) < 3:
+            continue
+
+        now = datetime.now(_tz.utc)
+        existing = (
+            db.query(SupplierPattern)
+            .filter(
+                SupplierPattern.tenant_id == tenant_id,
+                SupplierPattern.company_id == company_id,
+                SupplierPattern.supplier_id == supplier.id,
+            )
+            .first()
+        )
+
+        if existing:
+            existing_kws = set(existing.keywords.split()) if existing.keywords else set()
+            merged = existing_kws | keywords
+            existing.keywords = " ".join(sorted(merged)[:60])
+            existing.hit_count += 1
+            existing.last_seen_at = now
+        else:
+            db.add(
+                SupplierPattern(
+                    tenant_id=tenant_id,
+                    company_id=company_id,
+                    supplier_id=supplier.id,
+                    keywords=" ".join(sorted(keywords)[:60]),
+                    hit_count=1,
+                    last_seen_at=now,
+                )
+            )
+
+    try:
+        db.commit()
+        logger.info("Supplier pattern learning completed for batch %s", batch_id)
+    except Exception as exc:
+        logger.warning("Pattern learning commit failed for batch %s: %s", batch_id, exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def _build_batch_detail(batch: InvoiceBatch, db: Session) -> BatchDetailOut:
     files = db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch.id).order_by(InvoiceFile.uploaded_at.asc(), InvoiceFile.id.asc()).all()
     rows_count = db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch.id).count()
@@ -232,6 +381,25 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             openai_api_key=settings.openai_api_key if settings.use_openai else None,
                         )
                         for r in row_payloads:
+                            # --- Pattern-based supplier pre-fill ---------
+                            # Before fuzzy matching, check whether we have a
+                            # stored keyword fingerprint for this invoice's
+                            # header. If we get a confident match, override the
+                            # AI/rule-based supplier_name so that
+                            # _apply_account_suggestions can do an exact lookup.
+                            header_text = r.get("header_raw") or ""
+                            pattern_supplier = _match_supplier_by_pattern(
+                                db, tenant_id, batch.company_id, header_text
+                            )
+                            supplier_name = r.get("supplier_name")
+                            if pattern_supplier:
+                                supplier_name = pattern_supplier.supplier_name
+                                logger.debug(
+                                    "Pattern match: '%s' for page %s",
+                                    supplier_name,
+                                    r.get("page_no"),
+                                )
+                            # ----------------------------------------------
                             row = InvoiceRow(
                                 batch_id=batch_id,
                                 tenant_id=batch.tenant_id,
@@ -239,7 +407,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 source_file_id=invoice_file.id,
                                 source_filename=invoice_file.original_filename,
                                 page_no=r.get("page_no") or (page_index + 1),
-                                supplier_name=r.get("supplier_name"),
+                                supplier_name=supplier_name,
                                 invoice_number=r.get("invoice_number"),
                                 invoice_date=r.get("invoice_date"),
                                 description=r.get("description"),
@@ -325,6 +493,9 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
             batch.status = "failed"
             batch.notes = "Processing failed for all files"
         db.commit()
+
+        # Learn supplier patterns from this batch's successfully matched rows
+        _learn_supplier_patterns(batch_id, tenant_id, batch.company_id, db)
     finally:
         db.close()
         _clear_active(batch_id)

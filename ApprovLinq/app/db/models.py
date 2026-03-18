@@ -212,3 +212,33 @@ class InvoiceRow(Base):
 
     batch: Mapped["InvoiceBatch"] = relationship(back_populates="rows")
     source_file: Mapped["InvoiceFile | None"] = relationship(back_populates="rows")
+
+
+class SupplierPattern(Base):
+    """Stores keyword fingerprints extracted from successfully matched invoices so
+    that future invoices from the same supplier can be identified without relying
+    solely on fuzzy name matching."""
+
+    __tablename__ = "supplier_patterns"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "company_id", "supplier_id", name="uq_supplier_pattern"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    supplier_id: Mapped[int] = mapped_column(
+        ForeignKey("tenant_suppliers.id", ondelete="CASCADE"), nullable=False
+    )
+    keywords: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hit_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )

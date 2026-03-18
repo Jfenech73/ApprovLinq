@@ -11,7 +11,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.db import models
 from app.db.session import engine
-from app.routers import auth, admin, batches, health, tenant
+from app.routers import analytics, auth, admin, batches, health, tenant
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,19 @@ def ensure_runtime_schema() -> None:
             "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS scan_mode VARCHAR(20) DEFAULT 'summary'",
             "UPDATE invoice_batches SET scan_mode = COALESCE(NULLIF(scan_mode, ''), 'summary')",
             "ALTER TABLE invoice_rows ALTER COLUMN method_used TYPE VARCHAR(200)",
+            (
+                "CREATE TABLE IF NOT EXISTS supplier_patterns ("
+                "id SERIAL PRIMARY KEY,"
+                "tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,"
+                "company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,"
+                "supplier_id INTEGER NOT NULL REFERENCES tenant_suppliers(id) ON DELETE CASCADE,"
+                "keywords TEXT,"
+                "hit_count INTEGER NOT NULL DEFAULT 1,"
+                "last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+                "CONSTRAINT uq_supplier_pattern UNIQUE (tenant_id, company_id, supplier_id)"
+                ")"
+            ),
         ]
 
     if not statements:
@@ -125,3 +138,4 @@ app.include_router(auth.router)
 app.include_router(batches.router)
 app.include_router(admin.router)
 app.include_router(tenant.router)
+app.include_router(analytics.router)

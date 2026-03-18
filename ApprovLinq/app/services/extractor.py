@@ -260,22 +260,31 @@ def find_supplier_name(text: str) -> str | None:
                 break
 
     header_lines = lines[:18]
-    candidates: list[str] = []
+    candidates: list[tuple[int, str]] = []  # (original_position, line)
 
     for i, line in enumerate(header_lines):
         if i in customer_section_indices:
             continue
         if bad_supplier_line(line):
             continue
-        candidates.append(line)
+        candidates.append((i, line))
 
     if not candidates:
         return None
 
     scored: list[tuple[int, str]] = []
 
-    for line in candidates:
+    for pos, line in candidates:
         score = 0
+
+        # Lines near the very top of the document are far more likely to be the
+        # supplier letterhead than lines further down.
+        if pos == 0:
+            score += 5
+        elif pos <= 2:
+            score += 3
+        elif pos <= 5:
+            score += 1
 
         if re.fullmatch(r"[A-Z0-9 &().,\-'/]+", line) and len(line) >= 4:
             score += 3
@@ -507,18 +516,24 @@ def openai_extract_invoice_fields(
 
     prompt = (
         "Extract invoice fields from this ONE invoice page.\n"
-        "Return strict JSON only with keys:\n"
+        "Return strict JSON only with these keys:\n"
         "supplier_name, invoice_number, invoice_date, description, "
-        "net_amount, vat_amount, total_amount, currency, tax_code.\n"
-        "Rules:\n"
-        "- supplier_name is the company ISSUING the invoice (the seller/vendor whose letterhead or logo appears at the top). "
-        "It is NOT the customer, buyer, or recipient. The buyer often appears after labels like 'Bill To:', 'Invoice To:', 'To:', or 'Sold To:' — do NOT use that name as supplier_name.\n"
-        "- Use null when unknown.\n"
-        "- Do not guess.\n"
-        "- invoice_date should be DD/MM/YYYY when present.\n"
-        "- amounts should be plain numbers with no currency symbols.\n"
-        "- currency should be the ISO code e.g. GBP, EUR, USD.\n"
-        "- description max 20 words summarising the goods or services purchased.\n\n"
+        "net_amount, vat_amount, total_amount, currency, tax_code.\n\n"
+        "RULES:\n"
+        "- supplier_name: The legal name of the company that ISSUED this invoice — the SELLER or VENDOR.\n"
+        "  * Their name appears at the very TOP of the document, typically in large text as part of a letterhead or header.\n"
+        "  * NEVER use any name that appears after these buyer/recipient labels:\n"
+        "    'Bill To:', 'Invoice To:', 'Invoiced To:', 'Sold To:', 'Ship To:', 'Deliver To:',\n"
+        "    'To:', 'Customer:', 'Client:', 'Attention:', 'Account Name:'\n"
+        "    — those labels always introduce the BUYER, never the seller.\n"
+        "  * If you see two company names: the one NOT preceded by any of the above buyer labels is the supplier.\n"
+        "  * If you can only find a company name after a buyer label and no other company name is visible, output null.\n"
+        "  * When uncertain, output null — do NOT guess.\n"
+        "- invoice_date: output as DD/MM/YYYY.\n"
+        "- amounts: plain numbers, no currency symbols or commas.\n"
+        "- currency: ISO code only (EUR, GBP, USD, etc.).\n"
+        "- description: max 20 words summarising the goods or services.\n"
+        "- Use null for any field you cannot determine with confidence.\n\n"
         f"PAGE TEXT:\n{page_text[:12000]}"
     )
 
