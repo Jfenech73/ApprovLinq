@@ -235,25 +235,140 @@ def suspicious_supplier_name(value: str | None) -> bool:
     return False
 
 
-def find_supplier_name(text: str) -> str | None:
+_GENERIC_CORP_WORDS = frozenset({
+    "LTD", "LIMITED", "PLC", "LLC", "INC", "CO", "CORP", "COMPANY",
+    "THE", "AND", "OF", "FOR", "A", "PRIVATE", "PUBLIC", "GROUP",
+})
+
+
+def _build_account_tokens(company_name: str | None) -> frozenset[str]:
+    """Return uppercase word tokens from the company name that are long and
+    distinctive enough to uniquely identify the account holder.  Used as a
+    hard blacklist: any supplier candidate that contains one of these tokens
+    is rejected — it is the customer, not the supplier.
+    """
+    if not company_name:
+        return frozenset()
+    tokens: set[str] = set()
+    for word in re.findall(r"[A-Za-z]+", company_name):
+        w = word.upper()
+        if len(w) >= 4 and w not in _GENERIC_CORP_WORDS:
+            tokens.add(w)
+    return frozenset(tokens)
+
+
+def _find_supplier_from_contact_block(
+    lines: list[str],
+    account_tokens: frozenset[str],
+) -> str | None:
+    """Anchor the supplier name using the letterhead contact block.
+
+    Real suppliers always publish their Tel/Fax/Email/VAT with actual *values*
+    (not just labels) in consecutive lines.  The last non-address company-like
+    line before that block is the supplier.
+
+    This is especially effective for two-column OCR layouts where the customer
+    name appears at the top and the supplier's contact block appears lower.
+    """
+    # Patterns that contain actual values (phone digits, @ sign, MT+digits…)
+    contact_value_patterns = [
+        r"(?:tel|fax|phone)\s*[:\+]?\s*[\+\(]?\d{5,}",
+        r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
+        r"\bvat\s+(?:no\.?|number|reg(?:\.|\s)?no\.?)\s*[:\-]?\s*[A-Z]{2}\d",
+        r"\bvat\s*no\s*[:\-]?\s*[A-Z]{2}\d",
+        r"\bvat\s*reg(?:\.|\s+)no\s*[:\-]?\s*[A-Z]",
+        r"MT\d{6,}",               # Malta VAT number format
+        r"IE\d{6,}[A-Z]",          # Irish VAT
+        r"\bBCRS\b",               # Malta BCRS registration
+        r"\bEXO\s+\d{4}",         # EXO number (Malta)
+    ]
+
+    # Address lines to skip when walking backward — deliberately strict to
+    # avoid false-positives on company names that contain city words (e.g.
+    # "Azzopardi Gzira Fish Shop").  Only short pure-city lines or lines that
+    # start with a street number are excluded here.
+    address_patterns = [
+        r"\bstreet\b", r"\broad\b", r"\bave(?:nue)?\b", r"\bfloor\b",
+        r"\bsuite\b", r"\bbuilding\b", r"\bindustrial\s+park\b",
+        r"^\d+[,/\s]",              # starts with street number
+        r"^[A-Z]{2,3}\s?\d{4,}$",  # postcode-only lines like "SLM 1856"
+        r"\b[A-Z]{2,3}\d{4,}\b",   # inline postcode like "STJ1017", "SLM1856"
+    ]
+
+    def _is_plausible_company(candidate: str) -> bool:
+        """Return True only if the line looks like a real company name."""
+        if not candidate or len(candidate) < 4:
+            return False
+        if bad_supplier_line(candidate):
+            return False
+        if suspicious_supplier_name(candidate):
+            return False
+        if any(re.search(p, candidate, re.I) for p in address_patterns):
+            return False
+        stripped = candidate.strip()
+        words = stripped.split()
+        # Reject short 1-2 word lines that look like a city or town name
+        if len(words) <= 2 and len(stripped) <= 18:
+            if not re.search(
+                r"\b(shop|store|market|imports?|exports?|foods?|supplies|ltd|limited"
+                r"|brothers?|group|corp|company|services|trading|fish|wine|spirits|meats?)\b",
+                stripped, re.I,
+            ):
+                return False
+        # Reject account name tokens
+        if account_tokens:
+            line_words = set(re.findall(r"[A-Z]{4,}", candidate.upper()))
+            if line_words & account_tokens:
+                return False
+        return True
+
+    # Find ALL lines with actual contact values (not just the first).
+    # We try each one in order and return the first backward-scan result that
+    # produces a plausible company name — this lets us skip customer address
+    # blocks that happen to contain a VAT/phone number before the supplier block.
+    contact_indices: list[int] = []
+    for i, line in enumerate(lines):
+        if any(re.search(p, line, re.I) for p in contact_value_patterns):
+            contact_indices.append(i)
+            if len(contact_indices) >= 4:
+                break
+
+    for contact_idx in contact_indices:
+        if contact_idx < 1:
+            continue
+        # Walk backward up to 10 lines looking for a plausible company name
+        for i in range(contact_idx - 1, max(-1, contact_idx - 10), -1):
+            candidate = lines[i]
+            if _is_plausible_company(candidate):
+                return candidate
+        # If backward scan from this contact block found nothing, try the next block
+
+    return None
+
+
+def find_supplier_name(
+    text: str,
+    account_tokens: frozenset[str] = frozenset(),
+) -> str | None:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if not lines:
         return None
 
     # ------------------------------------------------------------------ #
     # Step 1: Pre-scan the ENTIRE text to discover customer company names. #
-    # Any name found in "Account X", "CUSTOMER COPY" context, etc. will   #
-    # be penalised if it appears as a candidate.                           #
+    # Combines the caller-supplied account tokens with any tokens found    #
+    # in "Account X" / "Account Name: X" patterns inside the document.    #
     # ------------------------------------------------------------------ #
-    customer_name_tokens: set[str] = set()
+    customer_name_tokens: set[str] = set(account_tokens)
     # "Account NAAR" / "Account Name: NAAR LTD" patterns
     for m in re.finditer(r"\bAccount\s+([A-Z][A-Za-z0-9]+)", text):
         customer_name_tokens.add(m.group(1).strip().upper())
     # "Account Name: NAAR LTD"
     for m in re.finditer(r"\bAccount\s+Name\s*[:\-]\s*([A-Z][A-Za-z0-9 ]+)", text, re.I):
         for tok in m.group(1).strip().upper().split():
-            if len(tok) >= 3:
+            if len(tok) >= 4:
                 customer_name_tokens.add(tok)
+    frozen_customer_tokens: frozenset[str] = frozenset(customer_name_tokens)
 
     # ------------------------------------------------------------------ #
     # Step 2: Identify customer/bill-to section by explicit labels.        #
@@ -300,23 +415,38 @@ def find_supplier_name(text: str) -> str | None:
         if skip_next:
             skip_next = False
             continue
+        next_line = header_lines[i + 1] if i + 1 < len(header_lines) else ""
         # Try to join with the next line if both are short and look like name tokens
+        # Do NOT join if the next line looks like an address or a standalone city/town.
+        next_is_address = bool(
+            re.search(r"\bstreet\b|\broad\b|\bave(?:nue)?\b|\bfloor\b|\bsuite\b", next_line, re.I)
+            or re.match(r"^\d+[,/\s]", next_line)
+        )
         if (
             i + 1 < len(header_lines)
             and i not in customer_section_indices
             and (i + 1) not in customer_section_indices
             and len(line) <= 20
-            and len(header_lines[i + 1]) <= 20
+            and len(next_line) <= 20
             and not bad_supplier_line(line)
-            and not bad_supplier_line(header_lines[i + 1])
+            and not bad_supplier_line(next_line)
+            and not next_is_address
             and re.fullmatch(r"[A-Za-z0-9 &().,\-'/]+", line)
-            and re.fullmatch(r"[A-Za-z0-9 &().,\-'/]+", header_lines[i + 1])
+            and re.fullmatch(r"[A-Za-z0-9 &().,\-'/]+", next_line)
         ):
             combined = f"{line} {header_lines[i + 1]}"
             effective_lines.append((i, combined))
             skip_next = True
         else:
             effective_lines.append((i, line))
+
+    # ------------------------------------------------------------------ #
+    # Step 3b: Contact-block anchor — find the supplier by anchoring to  #
+    # the first actual Tel/Fax/Email/VAT VALUE line and looking backward. #
+    # This is the strongest signal and overrides heuristic scoring when   #
+    # it returns a result that doesn't match the account name.            #
+    # ------------------------------------------------------------------ #
+    contact_anchor = _find_supplier_from_contact_block(lines, frozen_customer_tokens)
 
     candidates: list[tuple[int, str]] = []
     for pos, line in effective_lines:
@@ -326,13 +456,20 @@ def find_supplier_name(text: str) -> str | None:
             continue
         candidates.append((pos, line))
 
-    if not candidates:
+    if not candidates and contact_anchor is None:
         return None
 
     scored: list[tuple[int, str]] = []
 
     for pos, line in candidates:
         score = 0
+
+        # Hard-reject any candidate that shares a distinctive token with the
+        # known account company name — this covers all NAAR / NAAR LTD /
+        # NAAR RESTOBAR / NAAR RESTAURANT variants in one shot.
+        line_words = set(re.findall(r"[A-Za-z]{4,}", line.upper()))
+        if line_words & frozen_customer_tokens:
+            continue  # Hard exclusion — never the supplier
 
         # Strong positional bias: top of the document is the supplier letterhead.
         if pos == 0:
@@ -347,13 +484,13 @@ def find_supplier_name(text: str) -> str | None:
             score += 3
 
         # Corporate entity suffix — broad set including food/trade terms
-        corp_suffix = re.search(
+        if re.search(
             r"\b(ltd|limited|plc|llc|inc|co\.?|company|services|trading|holdings|group"
-            r"|foods?|supplies|distribution|imports?|exports?|catering|enterprises?|corp)\b",
+            r"|foods?|supplies|distribution|imports?|exports?|catering|enterprises?|corp"
+            r"|brothers?|sisters?|partners?|associates?)\b",
             line, re.I,
-        )
-        if corp_suffix:
-            score += 2  # Reduced from 3 — corporate suffix alone shouldn't dominate
+        ):
+            score += 2
 
         if 4 <= len(line) <= 60:
             score += 2
@@ -361,16 +498,39 @@ def find_supplier_name(text: str) -> str | None:
         if not suspicious_supplier_name(line):
             score += 3
 
-        # Heavy penalty if this candidate contains any token that appeared in
-        # an "Account X" pattern (i.e. it is the customer account name).
-        line_upper = line.upper()
-        if any(tok in line_upper for tok in customer_name_tokens):
-            score -= 10
-
         scored.append((score, line))
 
+    if not scored and contact_anchor is None:
+        return None
+
+    # Pick the best heuristic candidate
     scored.sort(key=lambda x: x[0], reverse=True)
-    best = scored[0][1] if scored else None
+    heuristic_best = scored[0][1] if scored else None
+
+    # If the contact-block anchor found a name, prefer it over the heuristic
+    # result UNLESS the heuristic found something with a much higher score
+    # (i.e. a clear letterhead name at position 0).
+    if contact_anchor:
+        contact_words = set(re.findall(r"[A-Za-z]{4,}", contact_anchor.upper()))
+        # Discard the anchor if it still matches the account name
+        if contact_words & frozen_customer_tokens:
+            contact_anchor = None
+
+    if contact_anchor and heuristic_best:
+        # If they agree (one is a substring of the other), use the longer one
+        if (contact_anchor.upper() in heuristic_best.upper() or
+                heuristic_best.upper() in contact_anchor.upper()):
+            best = heuristic_best if len(heuristic_best) >= len(contact_anchor) else contact_anchor
+        else:
+            # They disagree — prefer the heuristic result ONLY if it has
+            # a very high score (position 0 with ≥12 points)
+            top_score = scored[0][0] if scored else 0
+            best = heuristic_best if top_score >= 12 else contact_anchor
+    elif contact_anchor:
+        best = contact_anchor
+    else:
+        best = heuristic_best
+
     return best[:200] if best else None
 
 
@@ -510,7 +670,13 @@ def summarise_line_items_with_openai(
     return None
 
 
-def simple_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any]:
+def simple_extract(
+    text: str,
+    openai_api_key: str | None = None,
+    account_company_name: str | None = None,
+) -> dict[str, Any]:
+    account_tokens = _build_account_tokens(account_company_name)
+
     invoice_number = first_match([
         # Standard label patterns — allow period before colon ("No.: 45005")
         r"invoice\s*(?:no\.?|number|#|nr\.?)\s*[.:\-]*\s*([A-Z0-9][A-Z0-9\/\-_]*[0-9][A-Z0-9\/\-_]*)",
@@ -547,7 +713,7 @@ def simple_extract(text: str, openai_api_key: str | None = None) -> dict[str, An
     vat_amount = parse_amount(vat_raw)
     total_amount = parse_amount(total_raw)
 
-    supplier_name = find_supplier_name(text)
+    supplier_name = find_supplier_name(text, account_tokens=account_tokens)
     line_items_raw = extract_candidate_line_items(text)
 
     description = None
@@ -588,9 +754,18 @@ def openai_extract_invoice_fields(
     page_text: str,
     api_key: str,
     model: str = "gpt-4.1-mini",
+    account_company_name: str | None = None,
 ) -> dict[str, Any] | None:
     if not api_key or not page_text.strip():
         return None
+
+    account_rule = ""
+    if account_company_name:
+        account_rule = (
+            f"  * CRITICAL: The company scanning these invoices is '{account_company_name}' — this is the BUYER.\n"
+            f"    Any variant of '{account_company_name}' (abbreviated, with different suffixes, or with OCR typos)\n"
+            f"    is ALWAYS the buyer/customer. NEVER use it as the supplier_name.\n"
+        )
 
     prompt = (
         "Extract invoice fields from this ONE invoice page.\n"
@@ -602,11 +777,15 @@ def openai_extract_invoice_fields(
         "  * Their name appears at the very TOP of the document, typically in large text as part of a letterhead or header.\n"
         "  * NEVER use any name that appears after these buyer/recipient labels:\n"
         "    'Bill To:', 'Invoice To:', 'Invoiced To:', 'Sold To:', 'Ship To:', 'Deliver To:',\n"
-        "    'To:', 'Customer:', 'Client:', 'Attention:', 'Account Name:'\n"
+        "    'To:', 'Customer:', 'Client:', 'Attention:', 'Account Name:', 'Account Ref:'\n"
         "    — those labels always introduce the BUYER, never the seller.\n"
-        "  * If you see two company names: the one NOT preceded by any of the above buyer labels is the supplier.\n"
+        f"{account_rule}"
+        "  * The supplier is the company whose Tel/Fax/Email/VAT number block appears in the letterhead.\n"
+        "  * If you see two company names: the one NOT preceded by any buyer label AND closest to the contact details is the supplier.\n"
         "  * If you can only find a company name after a buyer label and no other company name is visible, output null.\n"
         "  * When uncertain, output null — do NOT guess.\n"
+        "- invoice_number: a code that uniquely identifies this invoice (must contain at least one digit).\n"
+        "  * Reject pure words like 'Invoice', 'Details', 'Copy' — those are not invoice numbers.\n"
         "- invoice_date: output as DD/MM/YYYY.\n"
         "- amounts: plain numbers, no currency symbols or commas.\n"
         "- currency: ISO code only (EUR, GBP, USD, etc.).\n"
@@ -708,6 +887,7 @@ def process_pdf_page(
     pdf_path: str | Path,
     page_index: int,
     openai_api_key: str | None = None,
+    account_company_name: str | None = None,
 ) -> dict[str, Any]:
     pdf_path = Path(pdf_path)
     native_text = extract_native_pdf_page(pdf_path, page_index)
@@ -732,7 +912,11 @@ def process_pdf_page(
         final_text = f"OCR/NATIVE TEXT EMPTY. OCR_ERROR={ocr_error or 'none'}"
         method = f"{method}_empty"
 
-    extracted = simple_extract(final_text, openai_api_key=openai_api_key)
+    extracted = simple_extract(
+        final_text,
+        openai_api_key=openai_api_key,
+        account_company_name=account_company_name,
+    )
 
     if settings.use_openai and openai_api_key and count_meaningful_chars(final_text) >= 20:
         # Always call OpenAI when enabled — the rule-based heuristic cannot
@@ -742,6 +926,7 @@ def process_pdf_page(
             final_text,
             openai_api_key,
             model=settings.openai_model,
+            account_company_name=account_company_name,
         )
         extracted = merge_ai_fields(extracted, ai_fields)
         method = f"{method}+openai"
@@ -958,8 +1143,14 @@ def process_pdf_page_rows(
     page_index: int,
     scan_mode: str = "summary",
     openai_api_key: str | None = None,
+    account_company_name: str | None = None,
 ) -> list[dict[str, Any]]:
-    page_result = process_pdf_page(pdf_path, page_index=page_index, openai_api_key=openai_api_key)
+    page_result = process_pdf_page(
+        pdf_path,
+        page_index=page_index,
+        openai_api_key=openai_api_key,
+        account_company_name=account_company_name,
+    )
 
     if (scan_mode or "summary").lower() == "lines":
         # Prefer AI-structured line items; fall back to rule-based splitter

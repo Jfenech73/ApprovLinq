@@ -363,6 +363,11 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         batch.notes = f"Queued {len(files)} file(s), {total_target_pages} page(s)"
         db.commit()
 
+        # Look up the company name so the extractor can hard-block it as the
+        # customer name and never return it as a supplier.
+        company = db.get(Company, batch.company_id) if batch.company_id else None
+        account_company_name: str | None = company.company_name if company else None
+
         processed_pages = processed_files = partial_files = failed_files = total_rows = 0
         for file_index, invoice_file in enumerate(files, start=1):
             inserted_rows = 0
@@ -379,6 +384,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             page_index=page_index,
                             scan_mode=batch.scan_mode or "summary",
                             openai_api_key=settings.openai_api_key if settings.use_openai else None,
+                            account_company_name=account_company_name,
                         )
                         for r in row_payloads:
                             # --- Pattern-based supplier pre-fill ---------
