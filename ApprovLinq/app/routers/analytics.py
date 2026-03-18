@@ -4,7 +4,7 @@ from datetime import date, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from app.db.models import Company, InvoiceRow, User
@@ -81,9 +81,15 @@ def get_monthly(
     _check_company(db, tenant_id, company_id)
     cutoff = date.today().replace(day=1) - timedelta(days=months * 31)
 
+    # Use date_trunc to group by month — stored in a single Python variable so
+    # SQLAlchemy emits the same SQL expression in SELECT and GROUP BY, avoiding
+    # the "must appear in GROUP BY" error that arises from repeated to_char calls
+    # with separate parameter placeholders.
+    month_expr = func.date_trunc("month", InvoiceRow.invoice_date)
+
     rows = (
         db.query(
-            func.to_char(InvoiceRow.invoice_date, "YYYY-MM").label("month"),
+            month_expr.label("month"),
             func.coalesce(func.sum(InvoiceRow.net_amount), 0).label("net"),
             func.coalesce(func.sum(InvoiceRow.vat_amount), 0).label("vat"),
             func.coalesce(func.sum(InvoiceRow.total_amount), 0).label("total"),
@@ -95,14 +101,14 @@ def get_monthly(
             InvoiceRow.invoice_date.isnot(None),
             InvoiceRow.invoice_date >= cutoff,
         )
-        .group_by(func.to_char(InvoiceRow.invoice_date, "YYYY-MM"))
-        .order_by(func.to_char(InvoiceRow.invoice_date, "YYYY-MM"))
+        .group_by(text("1"))
+        .order_by(text("1"))
         .all()
     )
 
     return [
         {
-            "month": r.month,
+            "month": r.month.strftime("%Y-%m") if r.month else None,
             "net": float(r.net),
             "vat": float(r.vat),
             "total": float(r.total),
