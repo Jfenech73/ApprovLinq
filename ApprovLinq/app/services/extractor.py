@@ -112,10 +112,17 @@ def suspicious_invoice_number(value: str | None) -> bool:
     if not value:
         return True
     v = str(value).strip().lower()
-    bad = {"to", "from", "date", "invoice", "invoice no", "invoice number", "page"}
+    bad = {
+        "to", "from", "date", "invoice", "invoice no", "invoice number", "page",
+        "details", "copy", "original", "number", "no", "ref", "reference",
+        "involce", "invoce", "invoiice",
+    }
     if v in bad:
         return True
     if len(v) < 3:
+        return True
+    # Pure-letter strings (no digits) are never real invoice numbers
+    if re.match(r"^[A-Za-z\s]+$", v):
         return True
     return False
 
@@ -233,8 +240,24 @@ def find_supplier_name(text: str) -> str | None:
     if not lines:
         return None
 
-    # Identify indices that belong to the customer/bill-to section so we never
-    # pick the recipient name as the supplier.
+    # ------------------------------------------------------------------ #
+    # Step 1: Pre-scan the ENTIRE text to discover customer company names. #
+    # Any name found in "Account X", "CUSTOMER COPY" context, etc. will   #
+    # be penalised if it appears as a candidate.                           #
+    # ------------------------------------------------------------------ #
+    customer_name_tokens: set[str] = set()
+    # "Account NAAR" / "Account Name: NAAR LTD" patterns
+    for m in re.finditer(r"\bAccount\s+([A-Z][A-Za-z0-9]+)", text):
+        customer_name_tokens.add(m.group(1).strip().upper())
+    # "Account Name: NAAR LTD"
+    for m in re.finditer(r"\bAccount\s+Name\s*[:\-]\s*([A-Z][A-Za-z0-9 ]+)", text, re.I):
+        for tok in m.group(1).strip().upper().split():
+            if len(tok) >= 3:
+                customer_name_tokens.add(tok)
+
+    # ------------------------------------------------------------------ #
+    # Step 2: Identify customer/bill-to section by explicit labels.        #
+    # ------------------------------------------------------------------ #
     customer_section_indices: set[int] = set()
     customer_label_patterns = [
         r"^\s*bill\s+to\s*[:\-]?\s*$",
@@ -250,24 +273,58 @@ def find_supplier_name(text: str) -> str | None:
         r"invoice\s+to\s*[:\-]",
         r"sold\s+to\s*[:\-]",
         r"ship\s+to\s*[:\-]",
+        # Receipt/POS-style markers
+        r"client\s+details",
+        r"client\s+code\s*[:\-]",
+        r"cashier\s*[:\-]",
     ]
     for i, line in enumerate(lines):
         for pat in customer_label_patterns:
             if re.search(pat, line, re.I):
-                # Mark this line and the next 3 lines as customer section
-                for j in range(i, min(i + 4, len(lines))):
+                # Mark this line and the next 4 lines as customer section
+                for j in range(i, min(i + 5, len(lines))):
                     customer_section_indices.add(j)
                 break
 
+    # ------------------------------------------------------------------ #
+    # Step 3: Combine adjacent short lines at the very top.               #
+    # OCR of two-column layouts often reads the supplier letterhead as    #
+    # two short lines ("Apple Cores" / "FOODS") that together form one    #
+    # company name.  Join them so they can be scored as a unit.          #
+    # ------------------------------------------------------------------ #
     header_lines = lines[:18]
-    candidates: list[tuple[int, str]] = []  # (original_position, line)
+    effective_lines: list[tuple[int, str]] = []  # (first_original_pos, text)
 
+    skip_next = False
     for i, line in enumerate(header_lines):
-        if i in customer_section_indices:
+        if skip_next:
+            skip_next = False
+            continue
+        # Try to join with the next line if both are short and look like name tokens
+        if (
+            i + 1 < len(header_lines)
+            and i not in customer_section_indices
+            and (i + 1) not in customer_section_indices
+            and len(line) <= 20
+            and len(header_lines[i + 1]) <= 20
+            and not bad_supplier_line(line)
+            and not bad_supplier_line(header_lines[i + 1])
+            and re.fullmatch(r"[A-Za-z0-9 &().,\-'/]+", line)
+            and re.fullmatch(r"[A-Za-z0-9 &().,\-'/]+", header_lines[i + 1])
+        ):
+            combined = f"{line} {header_lines[i + 1]}"
+            effective_lines.append((i, combined))
+            skip_next = True
+        else:
+            effective_lines.append((i, line))
+
+    candidates: list[tuple[int, str]] = []
+    for pos, line in effective_lines:
+        if pos in customer_section_indices:
             continue
         if bad_supplier_line(line):
             continue
-        candidates.append((i, line))
+        candidates.append((pos, line))
 
     if not candidates:
         return None
@@ -277,26 +334,38 @@ def find_supplier_name(text: str) -> str | None:
     for pos, line in candidates:
         score = 0
 
-        # Lines near the very top of the document are far more likely to be the
-        # supplier letterhead than lines further down.
+        # Strong positional bias: top of the document is the supplier letterhead.
         if pos == 0:
-            score += 5
+            score += 8
         elif pos <= 2:
-            score += 3
+            score += 4
         elif pos <= 5:
-            score += 1
+            score += 2
 
+        # All-caps company name bonus
         if re.fullmatch(r"[A-Z0-9 &().,\-'/]+", line) and len(line) >= 4:
             score += 3
 
-        if re.search(r"\b(ltd|limited|plc|llc|inc|co\.?|company|services|trading|holdings|group)\b", line, re.I):
-            score += 3
+        # Corporate entity suffix — broad set including food/trade terms
+        corp_suffix = re.search(
+            r"\b(ltd|limited|plc|llc|inc|co\.?|company|services|trading|holdings|group"
+            r"|foods?|supplies|distribution|imports?|exports?|catering|enterprises?|corp)\b",
+            line, re.I,
+        )
+        if corp_suffix:
+            score += 2  # Reduced from 3 — corporate suffix alone shouldn't dominate
 
-        if 4 <= len(line) <= 45:
+        if 4 <= len(line) <= 60:
             score += 2
 
         if not suspicious_supplier_name(line):
             score += 3
+
+        # Heavy penalty if this candidate contains any token that appeared in
+        # an "Account X" pattern (i.e. it is the customer account name).
+        line_upper = line.upper()
+        if any(tok in line_upper for tok in customer_name_tokens):
+            score -= 10
 
         scored.append((score, line))
 
@@ -443,10 +512,19 @@ def summarise_line_items_with_openai(
 
 def simple_extract(text: str, openai_api_key: str | None = None) -> dict[str, Any]:
     invoice_number = first_match([
-        r"invoice\s*(?:no|number|#)\s*[:\-]?\s*([A-Z0-9\/\-_]+)",
-        r"\binv(?:oice)?\s*[:\-]?\s*([A-Z0-9\/\-_]+)",
-        r"\bdocument\s*(?:no|number)\s*[:\-]?\s*([A-Z0-9\/\-_]+)",
+        # Standard label patterns — allow period before colon ("No.: 45005")
+        r"invoice\s*(?:no\.?|number|#|nr\.?)\s*[.:\-]*\s*([A-Z0-9][A-Z0-9\/\-_]*[0-9][A-Z0-9\/\-_]*)",
+        r"invoice\s*(?:no\.?|number|#|nr\.?)\s*[.:\-]*\s*([0-9][A-Z0-9\/\-_]*)",
+        # "INV" prefix followed immediately by digits
+        r"\bINV[.\-_]?([0-9][A-Z0-9\/\-_]*)",
+        # Generic document number
+        r"\bdocument\s*(?:no\.?|number|nr\.?)\s*[.:\-]*\s*([A-Z0-9\/\-_]*[0-9][A-Z0-9\/\-_]*)",
+        # Fallback: "inv" word-boundary only when followed by colon/dash then a number
+        r"\binv(?:oice|oiice|oice)?\s*[.:\-]+\s*([A-Z0-9\/\-_]*[0-9][A-Z0-9\/\-_]*)",
     ], text)
+    # Reject anything that looks like a word rather than a number
+    if suspicious_invoice_number(invoice_number):
+        invoice_number = None
 
     invoice_date_raw = first_match([
         r"invoice\s*date\s*[:\-]?\s*([0-9]{1,2}[\/\-.][0-9]{1,2}[\/\-.][0-9]{2,4})",
