@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-_LOGIN_MAX_ATTEMPTS = 10
+_LOGIN_MAX_ATTEMPTS = 3
 _LOGIN_WINDOW_SECONDS = 300
 _login_attempts: dict[str, list[datetime]] = defaultdict(list)
 _login_lock = threading.Lock()
