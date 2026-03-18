@@ -290,9 +290,12 @@ def _find_supplier_from_contact_block(
     address_patterns = [
         r"\bstreet\b", r"\broad\b", r"\bave(?:nue)?\b", r"\bfloor\b",
         r"\bsuite\b", r"\bbuilding\b", r"\bindustrial\s+park\b",
+        r"\btriq\b",                # Maltese word for "street"
+        r"\bdistrict\b",            # e.g. "Central Business District"
+        r"\bzone\s+\d",             # e.g. "Zone 3"
         r"^\d+[,/\s]",              # starts with street number
         r"^[A-Z]{2,3}\s?\d{4,}$",  # postcode-only lines like "SLM 1856"
-        r"\b[A-Z]{2,3}\d{4,}\b",   # inline postcode like "STJ1017", "SLM1856"
+        r"\b[A-Z]{2,3}\s?\d{4,}\b",# inline postcode like "STJ1017", "SLM 1856", "SLM1856"
     ]
 
     def _is_plausible_company(candidate: str) -> bool:
@@ -419,8 +422,13 @@ def find_supplier_name(
         # Try to join with the next line if both are short and look like name tokens
         # Do NOT join if the next line looks like an address or a standalone city/town.
         next_is_address = bool(
-            re.search(r"\bstreet\b|\broad\b|\bave(?:nue)?\b|\bfloor\b|\bsuite\b", next_line, re.I)
+            re.search(
+                r"\bstreet\b|\broad\b|\bave(?:nue)?\b|\bfloor\b|\bsuite\b"
+                r"|\btriq\b|\bdistrict\b|\bzone\s+\d",
+                next_line, re.I,
+            )
             or re.match(r"^\d+[,/\s]", next_line)
+            or re.search(r"\b[A-Z]{2,3}\s?\d{4,}\b", next_line)
         )
         if (
             i + 1 < len(header_lines)
