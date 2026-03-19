@@ -431,6 +431,18 @@ def find_supplier_name(
             or re.match(r"^\d+[,/\s]", next_line)
             or re.search(r"\b[A-Z]{2,3}\s?\d{4,}\b", next_line)
         )
+        # Single standalone common words (qualifiers, articles, taglines) must
+        # NOT be combined with the following line — they are not partial company
+        # name fragments.  E.g. "Only" + "Quality Foods" → wrong.
+        _common_single_words = {
+            "only", "the", "a", "an", "our", "your", "my", "its", "their",
+            "new", "old", "best", "fresh", "pure", "just", "top", "pro",
+            "by", "at", "in", "on", "for", "and", "or", "of", "with",
+        }
+        first_is_single_qualifier = (
+            len(line.split()) == 1
+            and line.strip().lower() in _common_single_words
+        )
         if (
             i + 1 < len(header_lines)
             and i not in customer_section_indices
@@ -440,6 +452,7 @@ def find_supplier_name(
             and not bad_supplier_line(line)
             and not bad_supplier_line(next_line)
             and not next_is_address
+            and not first_is_single_qualifier
             and re.fullmatch(r"[A-Za-z0-9 &().,\-'/]+", line)
             and re.fullmatch(r"[A-Za-z0-9 &().,\-'/]+", next_line)
         ):
@@ -866,6 +879,9 @@ def openai_extract_invoice_vision(
         "  * Usually large bold text, accompanied by address, phone, email, VAT number.\n"
         "  * NEVER follows buyer labels: 'Bill To', 'Invoice To', 'To:', 'Customer:',\n"
         "    'Client:', 'Attention:', 'Account Name:', 'Account Ref:', 'Sold To', 'Ship To'.\n"
+        "  * Extract ONLY the company trading name as printed. Do NOT prepend standalone\n"
+        "    qualifier/tagline words (e.g. 'Only', 'The', 'Our', 'Best', 'Fresh') that\n"
+        "    appear near the letterhead but are NOT part of the registered company name.\n"
         f"{account_rule}"
         "- Customer (recipient/buyer): typically in a labelled section below the letterhead.\n\n"
         "LINE ITEMS:\n"
@@ -1051,6 +1067,9 @@ def openai_extract_invoice_fields(
         "  * NEVER use a name that follows buyer labels: 'Bill To', 'Invoice To',\n"
         "    'To:', 'Customer:', 'Client:', 'Attention:', 'Account Name:', 'Account Ref:',\n"
         "    'Sold To', 'Ship To', 'Deliver To'.\n"
+        "  * Extract ONLY the company trading name as printed. Do NOT prepend standalone\n"
+        "    qualifier/tagline words (e.g. 'Only', 'The', 'Our', 'Best', 'Fresh') that\n"
+        "    appear near the letterhead but are NOT part of the registered company name.\n"
         f"{account_rule}"
         "- customer: the company that RECEIVED this invoice (buyer/purchaser).\n"
         "- invoice_header: invoice number (must contain ≥1 digit), date, due date, currency.\n"
