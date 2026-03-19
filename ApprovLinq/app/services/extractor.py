@@ -635,46 +635,15 @@ def summarise_line_items_with_openai(
         "Rules:\n"
         "- Maximum 20 words\n"
         "- Plain business English\n"
-        "- No supplier names\n"
-        "- No invoice numbers\n"
-        "- No amounts\n"
+        "- No supplier names, invoice numbers, or amounts\n"
         "- Summarise the goods or services purchased\n"
-        "- Return only the description text\n\n"
+        "- Return only the description text, nothing else\n\n"
         f"Invoice item lines:\n{line_items_text}"
     )
 
-    try:
-        response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "input": prompt,
-                "max_output_tokens": 80,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        text_parts = []
-        for item in data.get("output", []):
-            for content in item.get("content", []):
-                if content.get("type") in ("output_text", "text"):
-                    txt = content.get("text", "")
-                    if txt:
-                        text_parts.append(txt)
-
-        result = " ".join(text_parts).strip()
-        if result:
-            return limit_to_20_words(result)
-    except Exception as exc:
-        logger.warning("summarise_line_items_with_openai failed: %s", exc)
-        return None
-
+    raw = _call_openai(prompt, api_key, model, max_tokens=80, timeout=30)
+    if raw:
+        return limit_to_20_words(raw)
     return None
 
 
@@ -758,50 +727,8 @@ def simple_extract(
     }
 
 
-def openai_extract_invoice_fields(
-    page_text: str,
-    api_key: str,
-    model: str = "gpt-4.1-mini",
-    account_company_name: str | None = None,
-) -> dict[str, Any] | None:
-    if not api_key or not page_text.strip():
-        return None
-
-    account_rule = ""
-    if account_company_name:
-        account_rule = (
-            f"  * CRITICAL: The company scanning these invoices is '{account_company_name}' — this is the BUYER.\n"
-            f"    Any variant of '{account_company_name}' (abbreviated, with different suffixes, or with OCR typos)\n"
-            f"    is ALWAYS the buyer/customer. NEVER use it as the supplier_name.\n"
-        )
-
-    prompt = (
-        "Extract invoice fields from this ONE invoice page.\n"
-        "Return strict JSON only with these keys:\n"
-        "supplier_name, invoice_number, invoice_date, description, "
-        "net_amount, vat_amount, total_amount, currency, tax_code.\n\n"
-        "RULES:\n"
-        "- supplier_name: The legal name of the company that ISSUED this invoice — the SELLER or VENDOR.\n"
-        "  * Their name appears at the very TOP of the document, typically in large text as part of a letterhead or header.\n"
-        "  * NEVER use any name that appears after these buyer/recipient labels:\n"
-        "    'Bill To:', 'Invoice To:', 'Invoiced To:', 'Sold To:', 'Ship To:', 'Deliver To:',\n"
-        "    'To:', 'Customer:', 'Client:', 'Attention:', 'Account Name:', 'Account Ref:'\n"
-        "    — those labels always introduce the BUYER, never the seller.\n"
-        f"{account_rule}"
-        "  * The supplier is the company whose Tel/Fax/Email/VAT number block appears in the letterhead.\n"
-        "  * If you see two company names: the one NOT preceded by any buyer label AND closest to the contact details is the supplier.\n"
-        "  * If you can only find a company name after a buyer label and no other company name is visible, output null.\n"
-        "  * When uncertain, output null — do NOT guess.\n"
-        "- invoice_number: a code that uniquely identifies this invoice (must contain at least one digit).\n"
-        "  * Reject pure words like 'Invoice', 'Details', 'Copy' — those are not invoice numbers.\n"
-        "- invoice_date: output as DD/MM/YYYY.\n"
-        "- amounts: plain numbers, no currency symbols or commas.\n"
-        "- currency: ISO code only (EUR, GBP, USD, etc.).\n"
-        "- description: max 20 words summarising the goods or services.\n"
-        "- Use null for any field you cannot determine with confidence.\n\n"
-        f"PAGE TEXT:\n{page_text[:12000]}"
-    )
-
+def _call_openai(prompt: str, api_key: str, model: str, max_tokens: int, timeout: int = 45) -> str | None:
+    """Shared helper — POST to OpenAI Responses API and return raw text output."""
     try:
         response = requests.post(
             "https://api.openai.com/v1/responses",
@@ -809,84 +736,286 @@ def openai_extract_invoice_fields(
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": model,
-                "input": prompt,
-                "max_output_tokens": 300,
-            },
-            timeout=45,
+            json={"model": model, "input": prompt, "max_output_tokens": max_tokens},
+            timeout=timeout,
         )
         response.raise_for_status()
-        data = response.json()
-
-        text_parts = []
-        for item in data.get("output", []):
+        parts = []
+        for item in response.json().get("output", []):
             for content in item.get("content", []):
                 if content.get("type") in ("output_text", "text"):
                     txt = content.get("text", "")
                     if txt:
-                        text_parts.append(txt)
+                        parts.append(txt)
+        return " ".join(parts).strip() or None
+    except Exception as exc:
+        logger.warning("_call_openai failed: %s", exc)
+        return None
 
-        raw = " ".join(text_parts).strip()
-        if not raw:
-            return None
 
+def openai_extract_invoice_fields(
+    page_text: str,
+    api_key: str,
+    model: str = "gpt-4.1-mini",
+    account_company_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Stage 3 of the extraction pipeline — full-schema AI extraction.
+
+    Uses the Invoice AI Extraction Framework master prompt to return a
+    structured JSON payload covering supplier, customer, invoice header,
+    line items, totals, validation, and per-section confidence scores.
+
+    The returned dict maps all framework fields back to the legacy field names
+    used by merge_ai_fields / process_pdf_page so the rest of the pipeline
+    requires no changes.
+    """
+    if not api_key or not page_text.strip():
+        return None
+
+    account_rule = ""
+    if account_company_name:
+        account_rule = (
+            f"  * CRITICAL: '{account_company_name}' is the BUYER scanning these invoices.\n"
+            f"    Any variant (abbreviated, different suffix, OCR typo) is ALWAYS the customer.\n"
+            f"    NEVER assign '{account_company_name}' or any of its variants as supplier.name.\n"
+        )
+
+    prompt = (
+        "You are an expert invoice extraction engine.\n\n"
+        "OBJECTIVE:\n"
+        "Extract structured invoice data with maximum accuracy using labels, "
+        "layout positioning, table structure, and arithmetic validation.\n\n"
+        "RULES:\n"
+        "- Do not guess. Return null for any field you cannot determine with confidence.\n"
+        "- Preserve original text for names and identifiers.\n"
+        "- Normalize dates to YYYY-MM-DD.\n"
+        "- Normalize amounts as plain decimal numbers (no currency symbols or commas).\n"
+        "- Separate supplier vs customer STRICTLY — never confuse them.\n"
+        "- Never invent line items or amounts.\n\n"
+        "SEGMENT DEFINITIONS:\n"
+        "- supplier: the company that ISSUED this invoice (seller/vendor).\n"
+        "  * Their name is at the TOP of the document in the letterhead.\n"
+        "  * They own the Tel/Fax/Email/VAT contact block in the header.\n"
+        "  * NEVER use a name that follows buyer labels: 'Bill To', 'Invoice To',\n"
+        "    'To:', 'Customer:', 'Client:', 'Attention:', 'Account Name:', 'Account Ref:',\n"
+        "    'Sold To', 'Ship To', 'Deliver To'.\n"
+        f"{account_rule}"
+        "- customer: the company that RECEIVED this invoice (buyer/purchaser).\n"
+        "- invoice_header: invoice number (must contain ≥1 digit), date, due date, currency.\n"
+        "  * Reject words like 'Invoice', 'Details', 'Copy' as invoice_number.\n"
+        "- line_items: individual goods/service rows only — exclude totals/VAT summary rows.\n"
+        "- totals: subtotal (net), tax_total (VAT), gross_total (inc. tax), amount_due.\n"
+        "- validation.totals_reconcile: true if subtotal + tax_total ≈ gross_total.\n\n"
+        "CONFIDENCE: Score each section 0.0–1.0 based on clarity of source text.\n\n"
+        "OUTPUT — return strict JSON only, no other text:\n"
+        "{\n"
+        '  "document_type": "invoice|credit_note|unknown",\n'
+        '  "extraction_status": "complete|partial|review_required",\n'
+        '  "supplier": {"name":null,"address":null,"vat_number":null,"email":null,"phone":null,"confidence":0.0},\n'
+        '  "customer": {"name":null,"address":null,"vat_number":null,"confidence":0.0},\n'
+        '  "invoice_header": {"invoice_number":null,"invoice_date":null,"due_date":null,"currency":null},\n'
+        '  "line_items": [{"description":null,"quantity":null,"unit_price":null,"net_amount":null}],\n'
+        '  "totals": {"subtotal":null,"tax_total":null,"gross_total":null,"amount_due":null,"confidence":0.0},\n'
+        '  "validation": {"totals_reconcile":null,"issues":[]},\n'
+        '  "confidence": {"supplier":0.0,"customer":0.0,"lines":0.0,"totals":0.0}\n'
+        "}\n\n"
+        f"PAGE TEXT:\n{page_text[:12000]}"
+    )
+
+    raw = _call_openai(prompt, api_key, model, max_tokens=900)
+    if not raw:
+        return None
+
+    try:
         m = re.search(r"\{.*\}", raw, re.S)
         payload = json.loads(m.group(0) if m else raw)
+    except Exception as exc:
+        logger.warning("openai_extract_invoice_fields JSON parse failed: %s", exc)
+        return None
 
+    supplier = payload.get("supplier") or {}
+    customer = payload.get("customer") or {}
+    header = payload.get("invoice_header") or {}
+    totals = payload.get("totals") or {}
+    validation = payload.get("validation") or {}
+    confidence_sections = payload.get("confidence") or {}
+
+    def _safe_amount(val: Any) -> float | None:
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return parse_amount(str(val))
+
+    # Derive a single description from line_items if present
+    items = payload.get("line_items") or []
+    description = None
+    if items and isinstance(items, list):
+        descs = [str(it.get("description") or "").strip() for it in items if it.get("description")]
+        if descs:
+            description = limit_to_20_words("; ".join(descs))
+
+    # Map onto the legacy field names expected by merge_ai_fields
+    result: dict[str, Any] = {
+        # Core fields (legacy names)
+        "supplier_name": supplier.get("name"),
+        "invoice_number": header.get("invoice_number"),
+        "invoice_date": parse_date(header.get("invoice_date")) if header.get("invoice_date") else None,
+        "description": description,
+        "net_amount": _safe_amount(totals.get("subtotal")),
+        "vat_amount": _safe_amount(totals.get("tax_total")),
+        "total_amount": _safe_amount(totals.get("gross_total") or totals.get("amount_due")),
+        "currency": header.get("currency"),
+        "tax_code": None,
+        # Extended framework fields (stored in result dict, not persisted to DB)
+        "supplier_address": supplier.get("address"),
+        "supplier_vat": supplier.get("vat_number"),
+        "supplier_email": supplier.get("email"),
+        "supplier_phone": supplier.get("phone"),
+        "customer_name": customer.get("name"),
+        "customer_address": customer.get("address"),
+        "customer_vat": customer.get("vat_number"),
+        "due_date": parse_date(header.get("due_date")) if header.get("due_date") else None,
+        "document_type": payload.get("document_type"),
+        "extraction_status": payload.get("extraction_status"),
+        "totals_reconcile": validation.get("totals_reconcile"),
+        "ai_issues": validation.get("issues") or [],
+        "ai_confidence": {
+            "supplier": confidence_sections.get("supplier", 0.0),
+            "customer": confidence_sections.get("customer", 0.0),
+            "lines": confidence_sections.get("lines", 0.0),
+            "totals": confidence_sections.get("totals", 0.0),
+        },
+    }
+    return result
+
+
+def openai_validate_extraction(
+    page_text: str,
+    extracted: dict[str, Any],
+    api_key: str,
+    model: str = "gpt-4.1-mini",
+) -> dict[str, Any] | None:
+    """Stage 4 of the extraction pipeline — second-pass validation.
+
+    Checks supplier/customer correctness, invoice number vs PO confusion,
+    date correctness, and totals reconciliation.  Returns a small dict with
+    validated_status, issues, and fields_to_review.
+    """
+    if not api_key:
+        return None
+    # Only validate when we have enough data to be meaningful
+    has_supplier = bool(extracted.get("supplier_name"))
+    has_number = bool(extracted.get("invoice_number"))
+    has_amounts = extracted.get("total_amount") is not None
+    if not (has_supplier or has_number or has_amounts):
+        return None
+
+    extracted_summary = json.dumps({
+        "supplier_name": extracted.get("supplier_name"),
+        "customer_name": extracted.get("customer_name"),
+        "invoice_number": extracted.get("invoice_number"),
+        "invoice_date": str(extracted.get("invoice_date") or ""),
+        "due_date": str(extracted.get("due_date") or ""),
+        "net_amount": extracted.get("net_amount"),
+        "vat_amount": extracted.get("vat_amount"),
+        "total_amount": extracted.get("total_amount"),
+        "totals_reconcile": extracted.get("totals_reconcile"),
+        "ai_issues": extracted.get("ai_issues") or [],
+    }, default=str)
+
+    prompt = (
+        "You are an invoice data validator.\n\n"
+        "Given the original invoice text and extracted data, check:\n"
+        "1. Supplier vs customer assignment is correct (supplier issued, customer received).\n"
+        "2. Invoice number is not confused with a PO, delivery, or account reference number.\n"
+        "3. Invoice date and due date are not swapped.\n"
+        "4. Totals reconcile: net_amount + vat_amount ≈ total_amount (within 0.02).\n"
+        "5. VAT numbers are plausible (not confused with invoice numbers).\n\n"
+        "RULES:\n"
+        "- Do not assume. Flag inconsistencies only.\n"
+        "- Be concise. Each issue max 15 words.\n\n"
+        "OUTPUT — strict JSON only:\n"
+        '{"validated_status":"passed|passed_with_warnings|failed","issues":[],"fields_to_review":[]}\n\n'
+        f"EXTRACTED DATA:\n{extracted_summary}\n\n"
+        f"ORIGINAL TEXT (first 4000 chars):\n{page_text[:4000]}"
+    )
+
+    raw = _call_openai(prompt, api_key, model, max_tokens=250, timeout=30)
+    if not raw:
+        return None
+
+    try:
+        m = re.search(r"\{.*\}", raw, re.S)
+        result = json.loads(m.group(0) if m else raw)
         return {
-            "supplier_name": payload.get("supplier_name"),
-            "invoice_number": payload.get("invoice_number"),
-            "invoice_date": parse_date(payload.get("invoice_date")) if payload.get("invoice_date") else None,
-            "description": payload.get("description"),
-            "net_amount": parse_amount(payload.get("net_amount")) if payload.get("net_amount") is not None else None,
-            "vat_amount": parse_amount(payload.get("vat_amount")) if payload.get("vat_amount") is not None else None,
-            "total_amount": parse_amount(payload.get("total_amount")) if payload.get("total_amount") is not None else None,
-            "currency": payload.get("currency"),
-            "tax_code": payload.get("tax_code"),
+            "validated_status": result.get("validated_status", "passed"),
+            "issues": result.get("issues") or [],
+            "fields_to_review": result.get("fields_to_review") or [],
         }
     except Exception as exc:
-        logger.warning("openai_extract_invoice_fields failed: %s", exc)
+        logger.warning("openai_validate_extraction JSON parse failed: %s", exc)
         return None
 
 
 def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge AI-extracted fields into the rule-based base result.
+
+    Core fields follow a "trust AI unless obviously wrong" strategy.
+    Extended framework fields (supplier_address, customer_name, etc.) are
+    copied across directly — they don't exist in the rule-based result.
+    """
     if not ai:
         return base
 
     merged = dict(base)
 
-    # Always prefer AI supplier_name when AI returns a valid one — the rule-based
-    # heuristic cannot reliably distinguish the supplier (invoice sender) from the
-    # customer (invoice recipient) when both look like legitimate company names.
+    # -- Supplier name ---------------------------------------------------------
+    # Always prefer the AI supplier when it returns a valid one; the rule-based
+    # heuristic cannot reliably separate supplier from customer in two-column
+    # or inverted OCR layouts.
     if ai.get("supplier_name") and not suspicious_supplier_name(ai.get("supplier_name")):
         merged["supplier_name"] = ai["supplier_name"]
     elif suspicious_supplier_name(merged.get("supplier_name")) and ai.get("supplier_name"):
         merged["supplier_name"] = ai["supplier_name"]
 
+    # -- Invoice number --------------------------------------------------------
     if suspicious_invoice_number(merged.get("invoice_number")) and ai.get("invoice_number"):
         merged["invoice_number"] = ai.get("invoice_number")
 
+    # -- Date fields -----------------------------------------------------------
     if merged.get("invoice_date") is None and ai.get("invoice_date") is not None:
         merged["invoice_date"] = ai.get("invoice_date")
+    # Due date is new — copy from AI whenever present
+    if ai.get("due_date"):
+        merged["due_date"] = ai.get("due_date")
 
+    # -- Amounts ---------------------------------------------------------------
     if merged.get("net_amount") is None and ai.get("net_amount") is not None:
         merged["net_amount"] = ai.get("net_amount")
-
     if merged.get("vat_amount") is None and ai.get("vat_amount") is not None:
         merged["vat_amount"] = ai.get("vat_amount")
-
     if merged.get("total_amount") is None and ai.get("total_amount") is not None:
         merged["total_amount"] = ai.get("total_amount")
 
+    # -- Metadata --------------------------------------------------------------
     if not merged.get("currency") and ai.get("currency"):
         merged["currency"] = ai.get("currency")
-
     if not merged.get("tax_code") and ai.get("tax_code"):
         merged["tax_code"] = ai.get("tax_code")
-
     if merged.get("description") in (None, "", "Invoice extraction", "Invoice goods or services") and ai.get("description"):
         merged["description"] = ai.get("description")
+
+    # -- Extended framework fields (not in rule-based base) --------------------
+    for field in (
+        "supplier_address", "supplier_vat", "supplier_email", "supplier_phone",
+        "customer_name", "customer_address", "customer_vat",
+        "document_type", "extraction_status", "totals_reconcile",
+        "ai_issues", "ai_confidence",
+    ):
+        if ai.get(field) is not None:
+            merged[field] = ai[field]
 
     return merged
 
@@ -927,9 +1056,7 @@ def process_pdf_page(
     )
 
     if settings.use_openai and openai_api_key and count_meaningful_chars(final_text) >= 20:
-        # Always call OpenAI when enabled — the rule-based heuristic cannot
-        # reliably tell supplier from customer, so we always defer to the AI
-        # for supplier_name and fill in any other missing fields.
+        # Stage 3 — full-schema AI extraction (master prompt)
         ai_fields = openai_extract_invoice_fields(
             final_text,
             openai_api_key,
@@ -939,35 +1066,93 @@ def process_pdf_page(
         extracted = merge_ai_fields(extracted, ai_fields)
         method = f"{method}+openai"
 
-    confidence = 0.0
+        # Stage 4 — second-pass validation (only when we have meaningful data)
+        validation_result = openai_validate_extraction(
+            final_text,
+            extracted,
+            openai_api_key,
+            model=settings.openai_model,
+        )
+        if validation_result:
+            extracted["_validation_result"] = validation_result
+            method = f"{method}+validated"
+
+    # -------------------------------------------------------------------------
+    # Stage 5 — confidence scoring & business rule checks
+    # -------------------------------------------------------------------------
+    # Per-section scores from the AI response (0.0 if not available)
+    ai_conf = extracted.get("ai_confidence") or {}
+    supplier_conf = float(ai_conf.get("supplier", 0.0))
+    totals_conf = float(ai_conf.get("totals", 0.0))
+
+    # Rule-based component scores (always computed regardless of AI)
+    rule_score = 0.0
     if extracted.get("supplier_name"):
-        confidence += 0.15
+        rule_score += 0.20
     if not suspicious_invoice_number(extracted.get("invoice_number")):
-        confidence += 0.20
+        rule_score += 0.20
     if extracted.get("invoice_date"):
-        confidence += 0.20
+        rule_score += 0.20
     if extracted.get("total_amount") is not None:
-        confidence += 0.20
+        rule_score += 0.20
     if extracted.get("net_amount") is not None:
-        confidence += 0.10
+        rule_score += 0.10
     if extracted.get("vat_amount") is not None:
-        confidence += 0.10
+        rule_score += 0.10
+    # Arithmetic reconciliation bonus
     if (
         extracted.get("net_amount") is not None
         and extracted.get("vat_amount") is not None
         and extracted.get("total_amount") is not None
+        and round((extracted["net_amount"] + extracted["vat_amount"]) - extracted["total_amount"], 2) == 0
     ):
-        if round((extracted["net_amount"] + extracted["vat_amount"]) - extracted["total_amount"], 2) == 0:
-            confidence += 0.05
+        rule_score = min(rule_score + 0.05, 1.0)
 
-    confidence = round(min(confidence, 0.99), 2)
+    # Blend: when AI section scores are available, weight them alongside rules
+    if ai_conf:
+        ai_overall = (supplier_conf * 0.35 + totals_conf * 0.35
+                      + float(ai_conf.get("lines", 0.0)) * 0.15
+                      + float(ai_conf.get("customer", 0.0)) * 0.15)
+        confidence = round(min(rule_score * 0.50 + ai_overall * 0.50, 0.99), 2)
+    else:
+        confidence = round(min(rule_score, 0.99), 2)
+
+    # Validation pass can downgrade or confirm status
+    validation_result = extracted.pop("_validation_result", None)
+    val_status = validation_result.get("validated_status", "passed") if validation_result else None
+    val_issues = (validation_result.get("issues") or []) if validation_result else []
+
+    # Map validated_status → our internal status values
+    if val_status == "failed":
+        final_status = "review"
+        review_required = True
+    elif val_status == "passed_with_warnings":
+        final_status = "review" if confidence < 0.80 else "ok_with_warnings"
+        review_required = confidence < 0.80
+    else:
+        # Threshold upgraded to 0.80 per framework guidance (< 0.80 → review_required)
+        final_status = "ok" if confidence >= 0.80 else "review"
+        review_required = confidence < 0.80
+
+    # Merge any validation issues into ai_issues
+    all_issues = list(extracted.get("ai_issues") or []) + val_issues
+    if all_issues:
+        extracted["ai_issues"] = all_issues
+
+    # extraction_status from AI or derived
+    if not extracted.get("extraction_status"):
+        extracted["extraction_status"] = (
+            "complete" if confidence >= 0.80
+            else "partial" if confidence >= 0.50
+            else "review_required"
+        )
 
     extracted.update({
         "page_no": page_index + 1,
         "method_used": method,
         "confidence_score": confidence,
-        "validation_status": "ok" if confidence >= 0.70 else "review",
-        "review_required": confidence < 0.70,
+        "validation_status": final_status,
+        "review_required": review_required,
         "header_raw": "\n".join(final_text.splitlines()[:12]),
         "totals_raw": "\n".join(final_text.splitlines()[-10:]) if final_text else None,
         "page_text_raw": final_text[:20000],
@@ -1049,42 +1234,17 @@ def openai_extract_line_items(
         f"PAGE TEXT:\n{page_text[:12000]}"
     )
 
+    raw = _call_openai(prompt, api_key, model, max_tokens=600)
+    if not raw:
+        return None
+
     try:
-        response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "input": prompt,
-                "max_output_tokens": 600,
-            },
-            timeout=45,
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        text_parts = []
-        for item in data.get("output", []):
-            for content in item.get("content", []):
-                if content.get("type") in ("output_text", "text"):
-                    txt = content.get("text", "")
-                    if txt:
-                        text_parts.append(txt)
-
-        raw = " ".join(text_parts).strip()
-        if not raw:
-            return None
-
         m = re.search(r"\[.*\]", raw, re.S)
         items = json.loads(m.group(0) if m else raw)
         if isinstance(items, list) and items:
             return items
     except Exception as exc:
-        logger.warning("openai_extract_line_items failed: %s", exc)
-        return None
+        logger.warning("openai_extract_line_items JSON parse failed: %s", exc)
 
     return None
 
