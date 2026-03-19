@@ -595,6 +595,33 @@ def limit_to_20_words(text: str) -> str:
     return " ".join(words[:20]).strip()
 
 
+def normalise_company_name(name: str | None) -> str | None:
+    """Preserve the original casing when any uppercase letters exist.
+    If the entire name is lowercase (e.g. returned by vision AI reading a
+    stylised font), promote it to title case so it displays correctly.
+    Short words like 'and', 'of', 'for', 'the' stay lowercase mid-name.
+    """
+    if not name:
+        return name
+    name = name.strip()
+    if not name:
+        return name
+    # If ANY uppercase letter already present, trust the source.
+    if any(c.isupper() for c in name):
+        return name
+    # All-lowercase — apply title case with common small-word exceptions.
+    _lower_words = {"and", "or", "of", "for", "the", "a", "an", "in", "on",
+                    "at", "by", "to", "with", "from", "&"}
+    words = name.split()
+    result = []
+    for i, w in enumerate(words):
+        if i == 0 or w.lower() not in _lower_words:
+            result.append(w.capitalize())
+        else:
+            result.append(w.lower())
+    return " ".join(result)
+
+
 def summarise_line_items_rule_based(line_items_text: str) -> str:
     text = line_items_text.lower()
 
@@ -1209,6 +1236,8 @@ def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str
         merged["supplier_name"] = ai["supplier_name"]
     elif suspicious_supplier_name(merged.get("supplier_name")) and ai.get("supplier_name"):
         merged["supplier_name"] = ai["supplier_name"]
+    # Normalise casing: promote all-lowercase names to title case.
+    merged["supplier_name"] = normalise_company_name(merged.get("supplier_name"))
 
     # -- Invoice number --------------------------------------------------------
     if suspicious_invoice_number(merged.get("invoice_number")) and ai.get("invoice_number"):
@@ -1425,6 +1454,9 @@ def process_pdf_page(
             else "partial" if confidence >= 0.50
             else "review_required"
         )
+
+    # Ensure supplier name is never returned in all-lowercase
+    extracted["supplier_name"] = normalise_company_name(extracted.get("supplier_name"))
 
     extracted.update({
         "page_no": page_index + 1,
