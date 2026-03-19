@@ -1248,13 +1248,28 @@ def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str
     merged = dict(base)
 
     # -- Supplier name ---------------------------------------------------------
-    # Always prefer the AI supplier when it returns a valid one; the rule-based
-    # heuristic cannot reliably separate supplier from customer in two-column
-    # or inverted OCR layouts.
-    if ai.get("supplier_name") and not suspicious_supplier_name(ai.get("supplier_name")):
-        merged["supplier_name"] = ai["supplier_name"]
-    elif suspicious_supplier_name(merged.get("supplier_name")) and ai.get("supplier_name"):
-        merged["supplier_name"] = ai["supplier_name"]
+    # Strategy: trust the rule-based result when it found something plausible,
+    # because it anchors strictly to position-0 / letterhead text.
+    # Only override with the AI result when:
+    #   (a) the rule-based result is absent or suspicious, OR
+    #   (b) the AI has high confidence (≥ 0.85) — meaning the image clearly
+    #       confirms a different name than what the text scan found.
+    # This prevents the AI from substituting a customer name it read elsewhere
+    # on the invoice (e.g. "Food Solutions") for the actual supplier letterhead.
+    ai_supplier = ai.get("supplier_name")
+    ai_supplier_conf = float((ai.get("ai_confidence") or {}).get("supplier", 0.0))
+    rule_supplier_ok = bool(
+        merged.get("supplier_name")
+        and not suspicious_supplier_name(merged.get("supplier_name"))
+    )
+    if not rule_supplier_ok:
+        # Rule-based found nothing useful — take AI regardless of confidence
+        if ai_supplier and not suspicious_supplier_name(ai_supplier):
+            merged["supplier_name"] = ai_supplier
+    else:
+        # Rule-based found something — only upgrade to AI result if AI is confident
+        if ai_supplier and not suspicious_supplier_name(ai_supplier) and ai_supplier_conf >= 0.85:
+            merged["supplier_name"] = ai_supplier
     # Normalise casing: promote all-lowercase names to title case.
     merged["supplier_name"] = normalise_company_name(merged.get("supplier_name"))
 
