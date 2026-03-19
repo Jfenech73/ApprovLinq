@@ -857,11 +857,16 @@ def openai_extract_invoice_vision(
         '  "supplier": {"name":null,"address":null,"vat_number":null,"email":null,"phone":null,"confidence":0.0},\n'
         '  "customer": {"name":null,"address":null,"vat_number":null,"confidence":0.0},\n'
         '  "invoice_header": {"invoice_number":null,"invoice_date":null,"due_date":null,"currency":null},\n'
+        '  "description": null,\n'
         '  "line_items": [{"description":null,"quantity":null,"unit_price":null,"net_amount":null}],\n'
         '  "totals": {"subtotal":null,"tax_total":null,"gross_total":null,"amount_due":null,"confidence":0.0},\n'
         '  "validation": {"totals_reconcile":null,"issues":[]},\n'
         '  "confidence": {"supplier":0.0,"customer":0.0,"lines":0.0,"totals":0.0}\n'
-        "}\n"
+        "}\n\n"
+        'description: a plain-English summary (max 20 words) of what goods or services were purchased.\n'
+        '  * Do NOT include supplier name, invoice number, or amounts.\n'
+        '  * Example: "Fresh seafood, vegetables and dry goods" or "Monthly software licence fee"\n'
+        '  * If no goods/services are listed, summarise the invoice purpose from context.\n'
     )
 
     full_prompt = system_prompt + text_block
@@ -930,12 +935,17 @@ def openai_extract_invoice_vision(
         except (TypeError, ValueError):
             return parse_amount(str(val))
 
-    items = payload.get("line_items") or []
-    description = None
-    if items and isinstance(items, list):
-        descs = [str(it.get("description") or "").strip() for it in items if it.get("description")]
-        if descs:
-            description = limit_to_20_words("; ".join(descs))
+    # Description: use the top-level field first, fall back to line_items summary
+    description: str | None = None
+    top_desc = (payload.get("description") or "").strip()
+    if top_desc:
+        description = limit_to_20_words(top_desc)
+    else:
+        items = payload.get("line_items") or []
+        if items and isinstance(items, list):
+            descs = [str(it.get("description") or "").strip() for it in items if it.get("description")]
+            if descs:
+                description = limit_to_20_words("; ".join(descs))
 
     return {
         "supplier_name": supplier.get("name"),
@@ -1020,7 +1030,9 @@ def openai_extract_invoice_fields(
         "  * Reject words like 'Invoice', 'Details', 'Copy' as invoice_number.\n"
         "- line_items: individual goods/service rows only — exclude totals/VAT summary rows.\n"
         "- totals: subtotal (net), tax_total (VAT), gross_total (inc. tax), amount_due.\n"
-        "- validation.totals_reconcile: true if subtotal + tax_total ≈ gross_total.\n\n"
+        "- validation.totals_reconcile: true if subtotal + tax_total ≈ gross_total.\n"
+        "- description: a plain-English summary (max 20 words) of what was purchased.\n"
+        "  Do NOT include supplier name, invoice number, or amounts.\n\n"
         "CONFIDENCE: Score each section 0.0–1.0 based on clarity of source text.\n\n"
         "OUTPUT — return strict JSON only, no other text:\n"
         "{\n"
@@ -1029,6 +1041,7 @@ def openai_extract_invoice_fields(
         '  "supplier": {"name":null,"address":null,"vat_number":null,"email":null,"phone":null,"confidence":0.0},\n'
         '  "customer": {"name":null,"address":null,"vat_number":null,"confidence":0.0},\n'
         '  "invoice_header": {"invoice_number":null,"invoice_date":null,"due_date":null,"currency":null},\n'
+        '  "description": null,\n'
         '  "line_items": [{"description":null,"quantity":null,"unit_price":null,"net_amount":null}],\n'
         '  "totals": {"subtotal":null,"tax_total":null,"gross_total":null,"amount_due":null,"confidence":0.0},\n'
         '  "validation": {"totals_reconcile":null,"issues":[]},\n'
@@ -1063,13 +1076,15 @@ def openai_extract_invoice_fields(
         except (TypeError, ValueError):
             return parse_amount(str(val))
 
-    # Derive a single description from line_items if present
-    items = payload.get("line_items") or []
-    description = None
-    if items and isinstance(items, list):
+    # Description: use the top-level field first (explicit summary from AI),
+    # fall back to joining line item descriptions if the top-level is absent.
+    _top_desc = (payload.get("description") or "").strip()
+    if _top_desc:
+        description: str | None = limit_to_20_words(_top_desc)
+    else:
+        items = payload.get("line_items") or []
         descs = [str(it.get("description") or "").strip() for it in items if it.get("description")]
-        if descs:
-            description = limit_to_20_words("; ".join(descs))
+        description = limit_to_20_words("; ".join(descs)) if descs else None
 
     # Map onto the legacy field names expected by merge_ai_fields
     result: dict[str, Any] = {
@@ -1242,46 +1257,54 @@ def process_pdf_page(
     account_company_name: str | None = None,
 ) -> dict[str, Any]:
     pdf_path = Path(pdf_path)
+
+    # Stage 1 — Fast native text extraction (no API cost, always runs).
     native_text = extract_native_pdf_page(pdf_path, page_index)
-    ocr_backend = get_ocr_backend()
-
-    final_text = native_text
     method = "native_text"
-    ocr_error = None
 
-    if count_meaningful_chars(native_text) < 80 and ocr_backend is not None:
-        try:
-            ocr_text = clean_text(
-                ocr_backend.extract_text_from_pdf_page(pdf_path, page_index, scale=1.8)
-            )
-            if count_meaningful_chars(ocr_text) > count_meaningful_chars(native_text):
-                final_text = ocr_text
-                method = f"ocr_{ocr_backend.name}"
-        except Exception as e:
-            ocr_error = str(e)
+    # When OpenAI vision is available we send the rendered image directly to
+    # the AI, which reads the text from the image itself — so we do NOT need
+    # OCR.  OCR is only needed as a last resort when both vision and native
+    # text fail to produce enough content.
+    use_vision = bool(settings.use_openai and openai_api_key)
+
+    final_text = native_text  # used for rule-based pass and fallback
+
+    if not use_vision:
+        # No vision — run OCR if native text is thin
+        ocr_backend = get_ocr_backend()
+        if count_meaningful_chars(native_text) < 80 and ocr_backend is not None:
+            try:
+                ocr_text = clean_text(
+                    ocr_backend.extract_text_from_pdf_page(pdf_path, page_index, scale=1.8)
+                )
+                if count_meaningful_chars(ocr_text) > count_meaningful_chars(native_text):
+                    final_text = ocr_text
+                    method = f"ocr_{ocr_backend.name}"
+            except Exception as e:
+                logger.warning("OCR failed for page %d: %s", page_index, e)
 
     if count_meaningful_chars(final_text) == 0:
-        final_text = f"OCR/NATIVE TEXT EMPTY. OCR_ERROR={ocr_error or 'none'}"
+        final_text = "(page text unavailable)"
         method = f"{method}_empty"
 
+    # Stage 2 — Rule-based extraction from whatever text we have.
     extracted = simple_extract(
         final_text,
         openai_api_key=openai_api_key,
         account_company_name=account_company_name,
     )
 
-    if settings.use_openai and openai_api_key:
-        # Stage 2.5 — Render the page to a JPEG for visual understanding.
-        # Done unconditionally so even text-rich PDFs benefit from layout context.
+    if use_vision:
+        # Stage 3a — Render the page to a JPEG and send directly to the vision
+        # model.  The AI reads text straight from the image — far superior to
+        # OCR output on scanned / rotated / two-column documents.
         jpeg_b64 = render_page_for_vision(pdf_path, page_index)
 
         if jpeg_b64:
-            # Stage 3a — Vision path: AI sees the actual image + OCR text.
-            # This is far more reliable than text-only on scanned, two-column,
-            # or complex invoice layouts.
             ai_fields = openai_extract_invoice_vision(
                 jpeg_b64,
-                final_text,
+                native_text,          # native text as lightweight supplement only
                 openai_api_key,
                 model=settings.openai_model,
                 account_company_name=account_company_name,
@@ -1290,30 +1313,41 @@ def process_pdf_page(
                 extracted = merge_ai_fields(extracted, ai_fields)
                 method = f"{method}+vision"
             else:
-                # Stage 3b — Vision call failed; fall back to text-only extraction.
-                logger.info("Vision extraction failed for page %d — falling back to text-only", page_index)
+                # Vision API call failed — fall back to text-only AI
+                logger.info("Vision extraction failed p%d — text-only fallback", page_index)
+                _text_for_ai = final_text if count_meaningful_chars(final_text) >= 20 else native_text
                 ai_fields = openai_extract_invoice_fields(
-                    final_text,
-                    openai_api_key,
+                    _text_for_ai, openai_api_key,
                     model=settings.openai_model,
                     account_company_name=account_company_name,
                 )
                 extracted = merge_ai_fields(extracted, ai_fields)
                 method = f"{method}+openai_text"
-        elif count_meaningful_chars(final_text) >= 20:
-            # Stage 3b — Image rendering failed; use text-only extraction.
-            ai_fields = openai_extract_invoice_fields(
-                final_text,
-                openai_api_key,
-                model=settings.openai_model,
-                account_company_name=account_company_name,
-            )
-            extracted = merge_ai_fields(extracted, ai_fields)
-            method = f"{method}+openai_text"
+        else:
+            # Image render failed — run OCR then text-only AI as fallback
+            ocr_backend = get_ocr_backend()
+            if count_meaningful_chars(native_text) < 80 and ocr_backend is not None:
+                try:
+                    ocr_text = clean_text(
+                        ocr_backend.extract_text_from_pdf_page(pdf_path, page_index, scale=1.8)
+                    )
+                    if count_meaningful_chars(ocr_text) > count_meaningful_chars(native_text):
+                        final_text = ocr_text
+                        method = f"ocr_{ocr_backend.name}"
+                except Exception as e:
+                    logger.warning("OCR fallback failed p%d: %s", page_index, e)
+            if count_meaningful_chars(final_text) >= 20:
+                ai_fields = openai_extract_invoice_fields(
+                    final_text, openai_api_key,
+                    model=settings.openai_model,
+                    account_company_name=account_company_name,
+                )
+                extracted = merge_ai_fields(extracted, ai_fields)
+                method = f"{method}+openai_text"
 
-        # Stage 4 — Second-pass validation (runs regardless of which Stage 3 path was used)
+        # Stage 4 — Second-pass validation
         validation_result = openai_validate_extraction(
-            final_text,
+            native_text or final_text,
             extracted,
             openai_api_key,
             model=settings.openai_model,
