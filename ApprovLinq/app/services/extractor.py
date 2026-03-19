@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -11,7 +12,7 @@ from typing import Any
 import fitz  # PyMuPDF
 import requests
 
-from app.services.ocr import OCRSpaceBackend, PaddleOCRBackend
+from app.services.ocr import OCRBackend, OCRSpaceBackend, PaddleOCRBackend
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -753,6 +754,220 @@ def _call_openai(prompt: str, api_key: str, model: str, max_tokens: int, timeout
         return None
 
 
+def render_page_for_vision(
+    pdf_path: Path,
+    page_index: int,
+    scale: float = 1.5,
+    quality: int = 80,
+) -> str | None:
+    """Render a PDF page to a base64-encoded JPEG string for vision model input.
+
+    Returns None if rendering fails so the caller can fall back to text-only.
+    Uses pypdfium2 via the existing OCRBackend render helper.
+    """
+    try:
+        jpeg_bytes = OCRBackend.render_pdf_page_to_jpeg_bytes(
+            pdf_path, page_index, scale=scale, quality=quality
+        )
+        if not jpeg_bytes:
+            return None
+        # Hard cap: OpenAI refuses payloads > ~20 MB; keep well under that
+        if len(jpeg_bytes) > 4 * 1024 * 1024:
+            # Try again at lower quality
+            jpeg_bytes = OCRBackend.render_pdf_page_to_jpeg_bytes(
+                pdf_path, page_index, scale=1.0, quality=60
+            )
+        return base64.b64encode(jpeg_bytes).decode("ascii") if jpeg_bytes else None
+    except Exception as exc:
+        logger.warning("render_page_for_vision failed: %s", exc)
+        return None
+
+
+def openai_extract_invoice_vision(
+    jpeg_b64: str,
+    page_text: str,
+    api_key: str,
+    model: str = "gpt-4.1-mini",
+    account_company_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Stage 3 (vision path) — multimodal extraction using the page image.
+
+    Sends the rendered JPEG alongside the OCR text so the AI can use visual
+    layout cues (column positions, font sizes, letterhead vs body, table
+    borders) in addition to the raw text — far more reliable than text alone
+    on scanned, two-column, or complex invoice layouts.
+
+    The prompt and output schema are identical to openai_extract_invoice_fields
+    so the result slots directly into merge_ai_fields with no changes.
+    """
+    if not api_key or not jpeg_b64:
+        return None
+
+    account_rule = ""
+    if account_company_name:
+        account_rule = (
+            f"  * CRITICAL: '{account_company_name}' is the BUYER scanning these invoices.\n"
+            f"    Any variant (abbreviated, different suffix, OCR typo) is ALWAYS the customer.\n"
+            f"    NEVER assign '{account_company_name}' or any of its variants as supplier.name.\n"
+        )
+
+    text_block = (
+        f"OCR TEXT (may have noise):\n{page_text[:8000]}\n\n" if page_text.strip() else ""
+    )
+
+    system_prompt = (
+        "You are an expert invoice extraction engine with full document understanding.\n\n"
+        "You are given BOTH the visual image of the invoice page AND its OCR text.\n"
+        "Use the IMAGE as the primary source — it preserves layout, columns, font sizes,\n"
+        "table structure, and visual hierarchy. Use the OCR text to resolve any unclear\n"
+        "characters in the image.\n\n"
+        "OBJECTIVE:\n"
+        "Extract structured invoice data with maximum precision using:\n"
+        "- Visual layout: letterhead position, column separation, section borders\n"
+        "- Font hierarchy: larger/bolder text = company name / section headings\n"
+        "- Table structure: item rows, qty, price, subtotal/VAT/total rows\n"
+        "- Label–value pairing: 'Invoice No:', 'Date:', 'VAT No:', etc.\n\n"
+        "RULES:\n"
+        "- Do not guess. Return null for any field you cannot determine with confidence.\n"
+        "- Preserve original text for names and identifiers (no paraphrasing).\n"
+        "- Normalize dates to YYYY-MM-DD.\n"
+        "- Normalize amounts as plain decimal numbers (no symbols or commas).\n"
+        "- NEVER confuse supplier and customer.\n"
+        "- Never invent line items or amounts.\n\n"
+        "SUPPLIER vs CUSTOMER:\n"
+        "- Supplier (issuer/seller): name in the TOP SECTION / LETTERHEAD of the document.\n"
+        "  * Usually large bold text, accompanied by address, phone, email, VAT number.\n"
+        "  * NEVER follows buyer labels: 'Bill To', 'Invoice To', 'To:', 'Customer:',\n"
+        "    'Client:', 'Attention:', 'Account Name:', 'Account Ref:', 'Sold To', 'Ship To'.\n"
+        f"{account_rule}"
+        "- Customer (recipient/buyer): typically in a labelled section below the letterhead.\n\n"
+        "LINE ITEMS:\n"
+        "- Extract individual goods/service rows from the table only.\n"
+        "- Exclude totals, subtotals, VAT summary rows, and discounts.\n\n"
+        "TOTALS VALIDATION:\n"
+        "- Check: subtotal + tax_total ≈ gross_total.\n"
+        "- Set totals_reconcile = true/false accordingly.\n\n"
+        "CONFIDENCE: Rate each section 0.0–1.0 based on clarity in the image.\n"
+        "If a section is clearly printed and unambiguous → 0.9–1.0.\n"
+        "If OCR noise or partial obscuring → 0.5–0.8. If not found → 0.0.\n\n"
+        "OUTPUT — return strict JSON only, no other text:\n"
+        "{\n"
+        '  "document_type": "invoice|credit_note|unknown",\n'
+        '  "extraction_status": "complete|partial|review_required",\n'
+        '  "supplier": {"name":null,"address":null,"vat_number":null,"email":null,"phone":null,"confidence":0.0},\n'
+        '  "customer": {"name":null,"address":null,"vat_number":null,"confidence":0.0},\n'
+        '  "invoice_header": {"invoice_number":null,"invoice_date":null,"due_date":null,"currency":null},\n'
+        '  "line_items": [{"description":null,"quantity":null,"unit_price":null,"net_amount":null}],\n'
+        '  "totals": {"subtotal":null,"tax_total":null,"gross_total":null,"amount_due":null,"confidence":0.0},\n'
+        '  "validation": {"totals_reconcile":null,"issues":[]},\n'
+        '  "confidence": {"supplier":0.0,"customer":0.0,"lines":0.0,"totals":0.0}\n'
+        "}\n"
+    )
+
+    full_prompt = system_prompt + text_block
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": full_prompt},
+                            {
+                                "type": "input_image",
+                                "image_url": f"data:image/jpeg;base64,{jpeg_b64}",
+                            },
+                        ],
+                    }
+                ],
+                "max_output_tokens": 1200,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        parts = []
+        for item in response.json().get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") in ("output_text", "text"):
+                    txt = content.get("text", "")
+                    if txt:
+                        parts.append(txt)
+        raw = " ".join(parts).strip()
+    except Exception as exc:
+        logger.warning("openai_extract_invoice_vision API call failed: %s", exc)
+        return None
+
+    if not raw:
+        return None
+
+    try:
+        m = re.search(r"\{.*\}", raw, re.S)
+        payload = json.loads(m.group(0) if m else raw)
+    except Exception as exc:
+        logger.warning("openai_extract_invoice_vision JSON parse failed: %s", exc)
+        return None
+
+    # Parse identically to the text-only function — same schema, same field mapping
+    supplier = payload.get("supplier") or {}
+    customer = payload.get("customer") or {}
+    header = payload.get("invoice_header") or {}
+    totals = payload.get("totals") or {}
+    validation = payload.get("validation") or {}
+    confidence_sections = payload.get("confidence") or {}
+
+    def _safe_amount(val: Any) -> float | None:
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return parse_amount(str(val))
+
+    items = payload.get("line_items") or []
+    description = None
+    if items and isinstance(items, list):
+        descs = [str(it.get("description") or "").strip() for it in items if it.get("description")]
+        if descs:
+            description = limit_to_20_words("; ".join(descs))
+
+    return {
+        "supplier_name": supplier.get("name"),
+        "invoice_number": header.get("invoice_number"),
+        "invoice_date": parse_date(header.get("invoice_date")) if header.get("invoice_date") else None,
+        "description": description,
+        "net_amount": _safe_amount(totals.get("subtotal")),
+        "vat_amount": _safe_amount(totals.get("tax_total")),
+        "total_amount": _safe_amount(totals.get("gross_total") or totals.get("amount_due")),
+        "currency": header.get("currency"),
+        "tax_code": None,
+        "supplier_address": supplier.get("address"),
+        "supplier_vat": supplier.get("vat_number"),
+        "supplier_email": supplier.get("email"),
+        "supplier_phone": supplier.get("phone"),
+        "customer_name": customer.get("name"),
+        "customer_address": customer.get("address"),
+        "customer_vat": customer.get("vat_number"),
+        "due_date": parse_date(header.get("due_date")) if header.get("due_date") else None,
+        "document_type": payload.get("document_type"),
+        "extraction_status": payload.get("extraction_status"),
+        "totals_reconcile": validation.get("totals_reconcile"),
+        "ai_issues": validation.get("issues") or [],
+        "ai_confidence": {
+            "supplier": confidence_sections.get("supplier", 0.0),
+            "customer": confidence_sections.get("customer", 0.0),
+            "lines": confidence_sections.get("lines", 0.0),
+            "totals": confidence_sections.get("totals", 0.0),
+        },
+    }
+
+
 def openai_extract_invoice_fields(
     page_text: str,
     api_key: str,
@@ -1055,18 +1270,48 @@ def process_pdf_page(
         account_company_name=account_company_name,
     )
 
-    if settings.use_openai and openai_api_key and count_meaningful_chars(final_text) >= 20:
-        # Stage 3 — full-schema AI extraction (master prompt)
-        ai_fields = openai_extract_invoice_fields(
-            final_text,
-            openai_api_key,
-            model=settings.openai_model,
-            account_company_name=account_company_name,
-        )
-        extracted = merge_ai_fields(extracted, ai_fields)
-        method = f"{method}+openai"
+    if settings.use_openai and openai_api_key:
+        # Stage 2.5 — Render the page to a JPEG for visual understanding.
+        # Done unconditionally so even text-rich PDFs benefit from layout context.
+        jpeg_b64 = render_page_for_vision(pdf_path, page_index)
 
-        # Stage 4 — second-pass validation (only when we have meaningful data)
+        if jpeg_b64:
+            # Stage 3a — Vision path: AI sees the actual image + OCR text.
+            # This is far more reliable than text-only on scanned, two-column,
+            # or complex invoice layouts.
+            ai_fields = openai_extract_invoice_vision(
+                jpeg_b64,
+                final_text,
+                openai_api_key,
+                model=settings.openai_model,
+                account_company_name=account_company_name,
+            )
+            if ai_fields:
+                extracted = merge_ai_fields(extracted, ai_fields)
+                method = f"{method}+vision"
+            else:
+                # Stage 3b — Vision call failed; fall back to text-only extraction.
+                logger.info("Vision extraction failed for page %d — falling back to text-only", page_index)
+                ai_fields = openai_extract_invoice_fields(
+                    final_text,
+                    openai_api_key,
+                    model=settings.openai_model,
+                    account_company_name=account_company_name,
+                )
+                extracted = merge_ai_fields(extracted, ai_fields)
+                method = f"{method}+openai_text"
+        elif count_meaningful_chars(final_text) >= 20:
+            # Stage 3b — Image rendering failed; use text-only extraction.
+            ai_fields = openai_extract_invoice_fields(
+                final_text,
+                openai_api_key,
+                model=settings.openai_model,
+                account_company_name=account_company_name,
+            )
+            extracted = merge_ai_fields(extracted, ai_fields)
+            method = f"{method}+openai_text"
+
+        # Stage 4 — Second-pass validation (runs regardless of which Stage 3 path was used)
         validation_result = openai_validate_extraction(
             final_text,
             extracted,
