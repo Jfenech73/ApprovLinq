@@ -727,7 +727,12 @@ def simple_extract(
         rf"(?:vat|tax|iva)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)"
     ], text)
     total_raw = first_match([
-        rf"(?:amount due|balance due|grand total|total due|total amount|total)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)"
+        # Specific multi-word labels first (more precise)
+        rf"(?:amount due|balance due|grand total|total due|total amount|invoice total|total incl\.?\s*(?:vat|tax)?)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)",
+        # Generic "total" label
+        rf"(?:total)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)",
+        # Standalone "amount" as a last resort (common on subscription/SaaS invoices)
+        rf"(?<!\w)amount\s*[:\-]\s*{_curr}\s*([0-9.,]+)",
     ], text)
 
     net_amount = parse_amount(net_raw)
@@ -1512,17 +1517,32 @@ def merge_ai_fields(
     # customer block and mistakenly treats it as the vendor.
     # IMPORTANT: use whole-word matching (re.search with \b) — plain substring
     # matching causes false positives, e.g. "FOOD" matching inside "FOODS".
-    if ai_supplier and account_company_name:
-        _acct_tokens = _build_account_tokens(account_company_name)
-        if _acct_tokens and any(
-            re.search(r"\b" + re.escape(tok) + r"\b", ai_supplier, re.I)
-            for tok in _acct_tokens
-        ):
-            logger.info(
-                "merge_ai_fields: AI supplier '%s' matches account company '%s' — blocked",
-                ai_supplier, account_company_name,
-            )
-            ai_supplier = None
+    _acct_block_tokens: frozenset[str] = frozenset()
+    if account_company_name:
+        _acct_block_tokens = _build_account_tokens(account_company_name)
+
+    if ai_supplier and _acct_block_tokens and any(
+        re.search(r"\b" + re.escape(tok) + r"\b", ai_supplier, re.I)
+        for tok in _acct_block_tokens
+    ):
+        logger.info(
+            "merge_ai_fields: AI supplier '%s' matches account company '%s' — blocked",
+            ai_supplier, account_company_name,
+        )
+        ai_supplier = None
+
+    # Also apply the same hard-block to the rule-based result sitting in merged.
+    # find_supplier_name uses account_tokens internally but can still slip through
+    # on logo-only pages where the buyer name is the only readable text.
+    if merged.get("supplier_name") and _acct_block_tokens and any(
+        re.search(r"\b" + re.escape(tok) + r"\b", merged["supplier_name"], re.I)
+        for tok in _acct_block_tokens
+    ):
+        logger.info(
+            "merge_ai_fields: rule-based supplier '%s' matches account company '%s' — blocked",
+            merged["supplier_name"], account_company_name,
+        )
+        merged["supplier_name"] = None
 
     ai_supplier_conf = float((ai.get("ai_confidence") or {}).get("supplier", 0.0))
     is_azure_di = ai.get("extraction_source") == "azure_di"
@@ -1701,6 +1721,19 @@ def process_pdf_page(
             if validation_result:
                 extracted["_validation_result"] = validation_result
                 method = f"{method}+validated"
+
+    # ── Net → Total fallback ─────────────────────────────────────────────────
+    # On subscription / zero-VAT invoices (reverse charge, VAT-exempt, SaaS)
+    # the invoice often has only one amount with no explicit "Total" label.
+    # If we have a net_amount but total_amount is still null AND vat is absent
+    # or zero, treat net as the total — it's the only amount on the document.
+    if (
+        extracted.get("total_amount") is None
+        and extracted.get("net_amount") is not None
+        and not extracted.get("vat_amount")
+    ):
+        extracted["total_amount"] = extracted["net_amount"]
+        logger.debug("Net→Total fallback applied: total set to %.2f", extracted["net_amount"])
 
     # -------------------------------------------------------------------------
     # Stage 5 — confidence scoring & business rule checks
