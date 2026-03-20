@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
-from app.db.models import Company, InvoiceBatch, InvoiceFile, InvoiceRow, TenantNominalAccount, TenantSupplier, User
+from app.db.models import Company, InvoiceBatch, InvoiceFile, InvoiceRow, IssueLog, TenantNominalAccount, TenantSupplier, User
 from app.db.session import engine, get_db
 from app.routers.auth import current_tenant_id, current_user
 from app.schemas import BatchCreate, BatchUpdate, BatchDetailOut, BatchFileOut, BatchOut, InvoiceRowOut
@@ -232,7 +232,6 @@ def _learn_supplier_patterns(
         .filter(
             InvoiceRow.batch_id == batch_id,
             InvoiceRow.supplier_name.isnot(None),
-            InvoiceRow.supplier_posting_account.isnot(None),
             InvoiceRow.header_raw.isnot(None),
         )
         .all()
@@ -293,6 +292,73 @@ def _learn_supplier_patterns(
         logger.info("Supplier pattern learning completed for batch %s", batch_id)
     except Exception as exc:
         logger.warning("Pattern learning commit failed for batch %s: %s", batch_id, exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _create_batch_issue_logs(batch_id: UUID, tenant_id, db: Session) -> None:
+    """Auto-create IssueLog records for rows that need human attention after processing."""
+    rows = (
+        db.query(InvoiceRow)
+        .filter(InvoiceRow.batch_id == batch_id, InvoiceRow.tenant_id == tenant_id)
+        .all()
+    )
+
+    issues = []
+    for row in rows:
+        problems: list[str] = []
+        priority = "normal"
+
+        if not row.supplier_name:
+            problems.append("Supplier name could not be identified")
+            priority = "high"
+
+        if row.total_amount is None and row.net_amount is None:
+            problems.append("No amounts extracted (total and net both missing)")
+
+        if row.method_used == "page_error":
+            problems.append(f"Page processing error: {(row.description or '')[:120]}")
+            priority = "high"
+        elif row.confidence_score is not None and float(row.confidence_score) < 0.60:
+            problems.append(f"Low extraction confidence ({float(row.confidence_score):.0%})")
+
+        if not problems:
+            continue
+
+        title = f"Page {row.page_no}: {problems[0]}"[:255]
+        conf_str = f"{float(row.confidence_score):.2f}" if row.confidence_score is not None else "N/A"
+        description = (
+            f"Batch ID: {batch_id}\n"
+            f"File: {row.source_filename or 'unknown'}\n"
+            f"Page: {row.page_no}\n"
+            f"Method: {row.method_used or 'unknown'}\n"
+            f"Confidence: {conf_str}\n\n"
+            "Issues:\n" + "\n".join(f"- {p}" for p in problems)
+        )
+        issues.append(
+            IssueLog(
+                tenant_id=tenant_id,
+                created_by_user_id=None,
+                title=title,
+                description=description,
+                status="pending",
+                priority=priority,
+            )
+        )
+
+    if not issues:
+        logger.info("No issues to log for batch %s", batch_id)
+        return
+
+    try:
+        for issue in issues:
+            db.add(issue)
+        db.commit()
+        logger.info("Created %d issue log(s) for batch %s", len(issues), batch_id)
+    except Exception as exc:
+        logger.warning("Issue log creation failed for batch %s: %s", batch_id, exc)
         try:
             db.rollback()
         except Exception:
@@ -502,6 +568,8 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
 
         # Learn supplier patterns from this batch's successfully matched rows
         _learn_supplier_patterns(batch_id, tenant_id, batch.company_id, db)
+        # Auto-create issue logs for rows needing review
+        _create_batch_issue_logs(batch_id, tenant_id, db)
     finally:
         db.close()
         _clear_active(batch_id)
