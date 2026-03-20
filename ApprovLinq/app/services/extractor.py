@@ -1927,18 +1927,20 @@ def _build_rows_from_ai_items(
         desc = (item.get("description") or "").strip()
         row["description"] = limit_to_20_words(desc) or page_result.get("description") or "Invoice line"
 
-        # Build a readable line_items_raw from the structured item
+        # Build a readable line_items_raw from the structured item.
+        # Accept both "amount" (openai_extract_line_items) and "net_amount"
+        # (Azure DI / OpenAI vision line_items_structured).
+        raw_amt = item.get("amount") if item.get("amount") is not None else item.get("net_amount")
         parts = [row["description"]]
         if item.get("quantity") is not None:
             parts.append(f"Qty: {item['quantity']}")
         if item.get("unit_price") is not None:
             parts.append(f"@ {item['unit_price']}")
-        if item.get("amount") is not None:
-            parts.append(f"= {item['amount']}")
+        if raw_amt is not None:
+            parts.append(f"= {raw_amt}")
         row["line_items_raw"] = "  ".join(parts)
 
         amount = None
-        raw_amt = item.get("amount")
         if raw_amt is not None:
             try:
                 amount = float(raw_amt)
@@ -1982,12 +1984,21 @@ def process_pdf_page_rows(
     )
 
     if (scan_mode or "summary").lower() == "lines":
-        # Prefer AI-structured line items; fall back to rule-based splitter
+        # Priority 1: line_items_structured already extracted by vision (Azure DI or OpenAI).
+        # This is the most accurate source — reuse it rather than making a second AI call.
+        structured = page_result.get("line_items_structured")
+        if structured and isinstance(structured, list) and len(structured) > 0:
+            return _build_rows_from_ai_items(page_result, structured)
+
+        # Priority 2: Ask OpenAI to extract line items from the native page text.
+        # Works for text-layer PDFs; returns None for empty/scanned text.
         if settings.use_openai and openai_api_key:
             page_text = page_result.get("page_text_raw") or ""
             ai_items = openai_extract_line_items(page_text, openai_api_key, model=settings.openai_model)
             if ai_items:
                 return _build_rows_from_ai_items(page_result, ai_items)
+
+        # Priority 3: Rule-based splitter on the raw candidate lines.
         return split_line_item_rows(page_result)
 
     return [page_result]
