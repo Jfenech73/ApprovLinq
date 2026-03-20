@@ -1,0 +1,92 @@
+[proxy] POST /auth/login → sheer-lacy-axiomassure-d347bf2d.koyeb.app//auth/login failed: TypeError: Failed to parse URL from sheer-lacy-axiomassure-d347bf2d.koyeb.app//auth/login
+    at <unknown> (.next/server/chunks/638.js:2:27079)
+    at K (.next/server/chunks/638.js:2:68028)
+    at <unknown> (.next/server/chunks/638.js:2:71014)
+    at <unknown> (.next/server/chunks/638.js:13:9283)
+    at a.with (.next/server/chunks/638.js:2:34524)
+    at u.with (.next/server/chunks/638.js:2:28724)
+    at u.startActiveSpan (.next/server/chunks/638.js:2:43808)
+    at a.startActiveSpan (.next/server/chunks/638.js:2:44342)
+    at <unknown> (.next/server/chunks/638.js:13:8791) {
+  [cause]: TypeError: Invalid URL
+      at <unknown> (.next/server/chunks/638.js:2:27079)
+      at K (.next/server/chunks/638.js:2:68028)
+      at <unknown> (.next/server/chunks/638.js:2:71014)
+      at <unknown> (.next/server/chunks/638.js:13:9283)
+      at a.with (.next/server/chunks/638.js:2:34524)
+      at u.with (.next/server/chunks/638.js:2:28724)
+      at u.startActiveSpan (.next/server/chunks/638.js:2:43808)
+      at a.startActiveSpan (.next/server/chunks/638.js:2:44342) {
+    code: 'ERR_INVALID_URL',
+    input: 'sheer-lacy-axiomassure-d347bf2d.koyeb.app//auth/login'
+  }
+}
+[proxy] POST /auth/login → sheer-lacy-axiomassure-d347bf2d.koyeb.app//auth/login failed: TypeError: Failed to parse URL from sheer-lacy-axiomassure-d347bf2d.koyeb.app//auth/login
+    at <unknown> (.next/server/chunks/638.js:2:27079)
+    at K (.next/server/chunks/638.js:2:68028)
+    at <unknown> (.next/server/chunks/638.js:2:71014)
+    at <unknown> (.next/server/chunks/638.js:13:9283)
+    at a.with (.next/server/chunks/638.js:2:34524)
+    at u.with (.next/server/chunks/638.js:2:28724)
+    at u.startActiveSpan (.next/server/chunks/638.js:2:43808)
+    at a.startActiveSpan (.next/server/chunks/638.js:2:44342)
+    at <unknown> (.next/server/chunks/638.js:13:8791) {
+  [cause]: TypeError: Invalid URL
+      at <unknown> (.next/server/chunks/638.js:2:27079)
+      at K (.next/server/chunks/638.js:2:68028)
+      at <unknown> (.next/server/chunks/638.js:2:71014)
+      at <unknown> (.next/server/chunks/638.js:13:9283)
+      at a.with (.next/server/chunks/638.js:2:34524)
+      at u.with (.next/server/chunks/638.js:2:28724)
+      at u.startActiveSpan (.next/server/chunks/638.js:2:43808)
+      at a.startActiveSpan (.next/server/chunks/638.js:2:44342) {
+    code: 'ERR_INVALID_URL',
+    input: 'sheer-lacy-axiomassure-d347bf2d.koyeb.app//auth/login'
+  }
+}
+[proxy] POST /auth/login → sheer-lacy-axiomassure-d347bf2d.koyeb.app//auth/login failed: TypeError: Failed to parse URL from sheer-lacy-axiomassure-d347bf2d.koyeb.app//auth/login
+    at <unknown> (.next/server/chunks/638.js:2:27079)
+    at K (.next/server/chunks/638.js:2:68028)
+    at <unknown> (.next/server/chunks/638.js:2:71014)
+    at <unknown> (.next/server/chunks/638.js:13:9283)
+    at a.with (.next/server/chunks/638.js:2:34524)
+    at u.with (.next/server/chunks/638.js:2:28724)
+    at u.startActiveSpan (.next/server/chunks/638.js:2:43808)
+    at a.startActiveSpan (.next/server/chunks/638.js:2:44342)
+    at <unknown> (.next/server/chunks/638.js:13:8791) {
+  [cause]: TypeError: Invalid URL
+      at <unknown> (.next/server/chunks/638.js:2:27079)
+      at K (.next/server/chunks/638.js:2:68028)
+      at <unknown> (.next/server/chunks/638.js:2:71014)
+      at <unknown> (.next/server/chunks/638.js:13:9283)
+      at a.with (.next/server/chunks/638.js:2:34524)
+      at u.with (.next/server/chunks/638.js:2:28724)
+      at u.startActiveSpan (.next/server/chunks/638.js:2:43808)
+      at a.startActiveSpan (.next/server/chunks/638.js:2:44342) {
+    code: 'ERR_INVALID_URL',
+    input: 'sheer-lacy-axiomassure-d347bf2d.koyeb.app//auth/login'
+  }
+}
+[proxy] POST /auth/login → sheer-lacy-axiomassure-d347bf2d.koyeb.app//auth/login failed: TypeError: Failed to parse URL from sheer-lacy-axiomassure-d347bf2d.koyeb.app//auth/login
+    at <unknown> (.next/server/chunks/638.js:2:27079)
+    at K (.next/server/chunks/638.js:2:68028)
+    at <unknown> (.next/server/chunks/638.js:2:71014)
+    at <unknown> (.next/server/chunks/638.js:13:9283)
+    at a.with (.next/server/chunks/638.js:2:34524)
+    at u.with (.next/server/chunks/638.js:2:28724)
+    at u.startActiveSpan (.next/server/chunks/638.js:2:43808)
+    at a.startActiveSpan (.next/server/chunks/638.js:2:44342)
+    at <unknown> (.next/server/chunks/638.js:13:8791) {
+  [cause]: TypeError: Invalid URL
+      at <unknown> (.next/server/chunks/638.js:2:27079)
+      at K (.next/server/chunks/638.js:2:68028)
+      at <unknown> (.next/server/chunks/638.js:2:71014)
+      at <unknown> (.next/server/chunks/638.js:13:9283)
+      at a.with (.next/server/chunks/638.js:2:34524)
+      at u.with (.next/server/chunks/638.js:2:28724)
+      at u.startActiveSpan (.next/server/chunks/638.js:2:43808)
+      at a.startActiveSpan (.next/server/chunks/638.js:2:44342) {
+    code: 'ERR_INVALID_URL',
+    input: 'sheer-lacy-axiomassure-d347bf2d.koyeb.app//auth/login'
+  }
+}
