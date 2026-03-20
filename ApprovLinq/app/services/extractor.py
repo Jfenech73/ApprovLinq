@@ -200,11 +200,14 @@ def suspicious_supplier_name(value: str | None) -> bool:
     if vl in bad_exact:
         return True
 
-    if len(v) < 4:
+    # Length check: require at least 2 letters regardless of total length.
+    # This allows short but legitimate names like "M&Z", "A&P", "BP", "G4S"
+    # while still blocking single-char or digit-only strings.
+    letters = len(re.findall(r"[A-Za-z]", v))
+    if letters < 2:
         return True
 
     digits = len(re.findall(r"\d", v))
-    letters = len(re.findall(r"[A-Za-z]", v))
     if digits >= letters:
         return True
 
@@ -877,6 +880,10 @@ def openai_extract_invoice_vision(
         "SUPPLIER vs CUSTOMER:\n"
         "- Supplier (issuer/seller): name in the TOP SECTION / LETTERHEAD of the document.\n"
         "  * Usually large bold text, accompanied by address, phone, email, VAT number.\n"
+        "  * IMPORTANT: The supplier name is often displayed as a LOGO — a graphical image\n"
+        "    with stylised text or initials (e.g. 'M&Z', 'BP', 'A&P Foods'). READ THE LOGO.\n"
+        "    If the letterhead is a logo/image, extract the text visible inside it as the\n"
+        "    supplier name. Short abbreviated names (2-4 chars) are valid — do not skip them.\n"
         "  * NEVER follows buyer labels: 'Bill To', 'Invoice To', 'To:', 'Customer:',\n"
         "    'Client:', 'Attention:', 'Account Name:', 'Account Ref:', 'Sold To', 'Ship To'.\n"
         "  * Extract ONLY the company trading name as printed. Do NOT prepend standalone\n"
