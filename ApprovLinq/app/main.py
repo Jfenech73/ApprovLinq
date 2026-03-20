@@ -22,56 +22,83 @@ except Exception as exc:
 
 
 def ensure_runtime_schema() -> None:
-    statements: list[str] = []
-    dialect = engine.dialect.name
+    """Apply incremental schema migrations at startup.
 
-    if dialect == "postgresql":
-        statements = [
-            "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS scan_mode VARCHAR(20) NOT NULL DEFAULT 'summary'",
-            "ALTER TABLE tenant_suppliers ADD COLUMN IF NOT EXISTS supplier_account_code VARCHAR(100)",
-            "ALTER TABLE tenant_suppliers ADD COLUMN IF NOT EXISTS default_nominal VARCHAR(100)",
-            "ALTER TABLE tenant_suppliers ADD COLUMN IF NOT EXISTS company_id UUID",
-            "ALTER TABLE tenant_nominal_accounts ADD COLUMN IF NOT EXISTS company_id UUID",
-            "UPDATE tenant_suppliers SET supplier_account_code = COALESCE(NULLIF(supplier_account_code, ''), posting_account) WHERE supplier_account_code IS NULL OR supplier_account_code = ''",
-            "UPDATE tenant_suppliers ts SET company_id = c.id FROM companies c WHERE ts.company_id IS NULL AND c.tenant_id = ts.tenant_id",
-            "UPDATE tenant_nominal_accounts na SET company_id = c.id FROM companies c WHERE na.company_id IS NULL AND c.tenant_id = na.tenant_id",
-            "CREATE INDEX IF NOT EXISTS ix_tenant_suppliers_tenant_company_account_code ON tenant_suppliers (tenant_id, company_id, supplier_account_code)",
-            "CREATE INDEX IF NOT EXISTS ix_tenant_nominals_tenant_company_account_code ON tenant_nominal_accounts (tenant_id, company_id, account_code)",
-            "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS company_id UUID",
-            "ALTER TABLE invoice_files ADD COLUMN IF NOT EXISTS company_id UUID",
-            "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS company_id UUID",
-            "UPDATE invoice_files f SET company_id = b.company_id FROM invoice_batches b WHERE f.company_id IS NULL AND b.id = f.batch_id",
-            "UPDATE invoice_rows r SET company_id = b.company_id FROM invoice_batches b WHERE r.company_id IS NULL AND b.id = r.batch_id",
-            "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS scan_mode VARCHAR(20) DEFAULT 'summary'",
-            "UPDATE invoice_batches SET scan_mode = COALESCE(NULLIF(scan_mode, ''), 'summary')",
-            "ALTER TABLE invoice_rows ALTER COLUMN method_used TYPE VARCHAR(200)",
-            (
-                "CREATE TABLE IF NOT EXISTS supplier_patterns ("
-                "id SERIAL PRIMARY KEY,"
-                "tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,"
-                "company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,"
-                "supplier_id INTEGER NOT NULL REFERENCES tenant_suppliers(id) ON DELETE CASCADE,"
-                "keywords TEXT,"
-                "hit_count INTEGER NOT NULL DEFAULT 1,"
-                "last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
-                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
-                "CONSTRAINT uq_supplier_pattern UNIQUE (tenant_id, company_id, supplier_id)"
-                ")"
-            ),
-        ]
-
-    if not statements:
+    Each statement runs in its OWN connection and transaction so that one
+    failure (e.g. column already exists) never aborts the remaining
+    statements.  All statements are idempotent (IF NOT EXISTS / IF EXISTS).
+    """
+    if engine.dialect.name != "postgresql":
         return
 
-    try:
-        with engine.begin() as conn:
-            for statement in statements:
-                try:
-                    conn.execute(text(statement))
-                except Exception as stmt_exc:
-                    logger.debug("Schema migration statement skipped: %s", stmt_exc)
-    except Exception as conn_exc:
-        logger.warning("ensure_runtime_schema connection failed (non-fatal): %s", conn_exc)
+    statements: list[str] = [
+        # ── tenants ──────────────────────────────────────────────────────────
+        "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS scan_mode VARCHAR(20) NOT NULL DEFAULT 'summary'",
+
+        # ── tenant_suppliers ─────────────────────────────────────────────────
+        "ALTER TABLE tenant_suppliers ADD COLUMN IF NOT EXISTS company_id UUID",
+        "ALTER TABLE tenant_suppliers ADD COLUMN IF NOT EXISTS supplier_account_code VARCHAR(100)",
+        "ALTER TABLE tenant_suppliers ADD COLUMN IF NOT EXISTS default_nominal VARCHAR(100)",
+        # Back-fill supplier_account_code from posting_account where blank
+        "UPDATE tenant_suppliers SET supplier_account_code = COALESCE(NULLIF(supplier_account_code, ''), posting_account) WHERE supplier_account_code IS NULL OR supplier_account_code = ''",
+        # Back-fill company_id from the first company in the same tenant
+        "UPDATE tenant_suppliers AS ts SET company_id = c.id FROM companies AS c WHERE ts.company_id IS NULL AND c.tenant_id = ts.tenant_id",
+        "CREATE INDEX IF NOT EXISTS ix_tenant_suppliers_tenant_company_account_code ON tenant_suppliers (tenant_id, company_id, supplier_account_code)",
+
+        # ── tenant_nominal_accounts ──────────────────────────────────────────
+        "ALTER TABLE tenant_nominal_accounts ADD COLUMN IF NOT EXISTS company_id UUID",
+        "UPDATE tenant_nominal_accounts AS na SET company_id = c.id FROM companies AS c WHERE na.company_id IS NULL AND c.tenant_id = na.tenant_id",
+        "CREATE INDEX IF NOT EXISTS ix_tenant_nominals_tenant_company_account_code ON tenant_nominal_accounts (tenant_id, company_id, account_code)",
+
+        # ── invoice_batches ──────────────────────────────────────────────────
+        "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS tenant_id UUID",
+        "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS company_id UUID",
+        "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS scan_mode VARCHAR(20) DEFAULT 'summary'",
+        "UPDATE invoice_batches SET scan_mode = COALESCE(NULLIF(scan_mode, ''), 'summary')",
+
+        # ── invoice_files ────────────────────────────────────────────────────
+        "ALTER TABLE invoice_files ADD COLUMN IF NOT EXISTS tenant_id UUID",
+        "ALTER TABLE invoice_files ADD COLUMN IF NOT EXISTS company_id UUID",
+        "ALTER TABLE invoice_files ADD COLUMN IF NOT EXISTS file_size_bytes INTEGER",
+        "UPDATE invoice_files AS f SET company_id = b.company_id FROM invoice_batches AS b WHERE f.company_id IS NULL AND b.id = f.batch_id",
+
+        # ── invoice_rows ─────────────────────────────────────────────────────
+        "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS tenant_id UUID",
+        "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS company_id UUID",
+        "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS supplier_posting_account VARCHAR(100)",
+        "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS nominal_account_code VARCHAR(100)",
+        "ALTER TABLE invoice_rows ALTER COLUMN method_used TYPE VARCHAR(200)",
+        "UPDATE invoice_rows AS r SET company_id = b.company_id FROM invoice_batches AS b WHERE r.company_id IS NULL AND b.id = r.batch_id",
+
+        # ── supplier_patterns (new table) ────────────────────────────────────
+        (
+            "CREATE TABLE IF NOT EXISTS supplier_patterns ("
+            "id SERIAL PRIMARY KEY,"
+            "tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,"
+            "company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,"
+            "supplier_id INTEGER NOT NULL REFERENCES tenant_suppliers(id) ON DELETE CASCADE,"
+            "keywords TEXT,"
+            "hit_count INTEGER NOT NULL DEFAULT 1,"
+            "last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+            "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+            "CONSTRAINT uq_supplier_pattern UNIQUE (tenant_id, company_id, supplier_id)"
+            ")"
+        ),
+    ]
+
+    ok = skipped = 0
+    for stmt in statements:
+        # Each statement gets its own connection + transaction so that one
+        # failure never puts subsequent statements into an aborted transaction.
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(stmt))
+            ok += 1
+        except Exception as stmt_exc:
+            skipped += 1
+            logger.debug("Schema migration skipped (%s): %.120s", type(stmt_exc).__name__, stmt)
+
+    logger.info("ensure_runtime_schema: %d applied, %d already-present/skipped", ok, skipped)
 
 
 try:

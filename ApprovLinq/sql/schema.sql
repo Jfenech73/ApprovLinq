@@ -303,9 +303,9 @@ do $$ begin
 end $$;
 
 -- Back-fill tenant_id from the batch's company where not set
-update invoice_rows r
+update invoice_rows as r
 set    tenant_id = c.tenant_id
-from   companies c
+from   companies as c
 where  r.company_id = c.id
   and  r.tenant_id is null;
 

@@ -64,12 +64,14 @@ try:
             ")"
         ),
     ]
-    with engine.begin() as _conn:
-        for _stmt in _RUNTIME_STMTS:
-            try:
+    # Run each statement in its own connection so one failure never
+    # aborts the rest (PostgreSQL aborts the whole transaction on error).
+    for _stmt in _RUNTIME_STMTS:
+        try:
+            with engine.begin() as _conn:
                 _conn.execute(text(_stmt))
-            except Exception:
-                pass  # Statement already applied — safe to skip
+        except Exception:
+            pass  # Statement already applied or not applicable — safe to skip
 
     print("Database schema: OK")
 except Exception as _schema_err:
