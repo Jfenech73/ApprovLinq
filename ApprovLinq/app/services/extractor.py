@@ -1432,12 +1432,20 @@ def openai_validate_extraction(
         return None
 
 
-def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str, Any]:
+def merge_ai_fields(
+    base: dict[str, Any],
+    ai: dict[str, Any] | None,
+    account_company_name: str | None = None,
+) -> dict[str, Any]:
     """Merge AI-extracted fields into the rule-based base result.
 
     Core fields follow a "trust AI unless obviously wrong" strategy.
     Extended framework fields (supplier_address, customer_name, etc.) are
     copied across directly — they don't exist in the rule-based result.
+
+    account_company_name: the buyer's own company name.  Any AI-returned
+    supplier that matches this name is silently blocked — the same guard
+    the rule-based extractor already applies via account_tokens.
     """
     if not ai:
         return base
@@ -1452,14 +1460,33 @@ def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str
     #   (b) AI has sufficient confidence to confirm a better name.
     #
     # Threshold differs by source:
-    #   • Azure DI uses a dedicated VendorName field — vendor vs. customer
-    #     confusion is architecturally impossible, so a lower gate (≥ 0.5) is safe.
+    #   • Azure DI uses a dedicated VendorName field, so a moderate gate (≥ 0.6)
+    #     is used; the account-company hard-block above handles the main risk.
     #   • OpenAI vision/text reads free-form — keep the stricter ≥ 0.85 gate to
     #     prevent it from picking up a customer name printed elsewhere on the page.
     ai_supplier = ai.get("supplier_name")
+
+    # Hard-block: if AI returned the account holder's own name as supplier,
+    # discard it — same logic as the rule-based account_tokens guard.
+    # This catches cases where Azure DI or OpenAI reads a prominent "Bill To"
+    # customer block and mistakenly treats it as the vendor.
+    # IMPORTANT: use whole-word matching (re.search with \b) — plain substring
+    # matching causes false positives, e.g. "FOOD" matching inside "FOODS".
+    if ai_supplier and account_company_name:
+        _acct_tokens = _build_account_tokens(account_company_name)
+        if _acct_tokens and any(
+            re.search(r"\b" + re.escape(tok) + r"\b", ai_supplier, re.I)
+            for tok in _acct_tokens
+        ):
+            logger.info(
+                "merge_ai_fields: AI supplier '%s' matches account company '%s' — blocked",
+                ai_supplier, account_company_name,
+            )
+            ai_supplier = None
+
     ai_supplier_conf = float((ai.get("ai_confidence") or {}).get("supplier", 0.0))
     is_azure_di = ai.get("extraction_source") == "azure_di"
-    conf_threshold = 0.5 if is_azure_di else 0.85
+    conf_threshold = 0.6 if is_azure_di else 0.85
     rule_supplier_ok = bool(
         merged.get("supplier_name")
         and not suspicious_supplier_name(merged.get("supplier_name"))
@@ -1592,7 +1619,7 @@ def process_pdf_page(
                 settings.azure_di_key,
             )
             if ai_fields:
-                extracted = merge_ai_fields(extracted, ai_fields)
+                extracted = merge_ai_fields(extracted, ai_fields, account_company_name)
                 method = f"{method}+azure_di"
                 logger.info("Azure DI extraction succeeded for page %d", page_index)
 
@@ -1607,7 +1634,7 @@ def process_pdf_page(
                 account_company_name=account_company_name,
             )
             if ai_fields:
-                extracted = merge_ai_fields(extracted, ai_fields)
+                extracted = merge_ai_fields(extracted, ai_fields, account_company_name)
                 method = f"{method}+vision"
 
         # ── Stage 3c: Text-only AI (fallback when image unavailable) ────────────
@@ -1621,7 +1648,7 @@ def process_pdf_page(
                     account_company_name=account_company_name,
                 )
                 if ai_fields:
-                    extracted = merge_ai_fields(extracted, ai_fields)
+                    extracted = merge_ai_fields(extracted, ai_fields, account_company_name)
                     method = f"{method}+openai_text"
 
         # ── Stage 4: OpenAI validation pass (runs after Azure DI too if available)
