@@ -1021,6 +1021,24 @@ def openai_extract_invoice_vision(
     }
 
 
+# Circuit-breaker: set to a non-empty string (the error message) once Azure DI
+# hits a permanent failure (403 VNet, 401 bad key, etc.) so subsequent pages in
+# the same batch don't retry and waste time.
+_azure_di_error: str | None = None
+
+
+def azure_di_available() -> tuple[bool, str | None]:
+    """Return (True, None) if Azure DI is configured and has not hit a permanent error.
+    Return (False, reason) otherwise.
+    """
+    global _azure_di_error
+    if _azure_di_error:
+        return False, _azure_di_error
+    if not (settings.use_azure_di and settings.azure_di_endpoint and settings.azure_di_key):
+        return False, "Azure DI not configured (USE_AZURE_DI or credentials missing)"
+    return True, None
+
+
 def azure_di_extract_invoice(
     jpeg_bytes: bytes,
     endpoint: str,
@@ -1032,6 +1050,8 @@ def azure_di_extract_invoice(
     model trained on millions of documents.  Returns the same field schema as the
     OpenAI extraction functions so it slots directly into merge_ai_fields.
     """
+    global _azure_di_error
+
     if not jpeg_bytes or not endpoint or not key:
         return None
 
@@ -1111,7 +1131,20 @@ def azure_di_extract_invoice(
         )
         result = poller.result()
     except Exception as exc:
-        logger.warning("Azure DI API call failed: %s", exc)
+        exc_str = str(exc)
+        # Permanent failures: open the circuit breaker so we don't retry on every page.
+        is_permanent = any(code in exc_str for code in ("403", "401", "VirtualNetwork", "Unauthorized", "Forbidden"))
+        if is_permanent:
+            _azure_di_error = exc_str[:200]
+            logger.error(
+                "Azure DI PERMANENTLY unavailable — circuit breaker opened. "
+                "Cause: %s. "
+                "All pages will fall back to OpenAI vision. "
+                "Fix: remove the VNet restriction on the Azure resource or allow this server's IP.",
+                exc_str[:300],
+            )
+        else:
+            logger.warning("Azure DI API call failed (transient): %s", exc)
         return None
 
     if not result.documents:
@@ -1589,11 +1622,10 @@ def process_pdf_page(
         account_company_name=account_company_name,
     )
 
-    use_azure_di = bool(
-        settings.use_azure_di
-        and settings.azure_di_endpoint
-        and settings.azure_di_key
-    )
+    _di_ok, _di_reason = azure_di_available()
+    use_azure_di = _di_ok
+    if not _di_ok and settings.use_azure_di:
+        logger.debug("Azure DI skipped: %s", _di_reason)
 
     if use_azure_di or use_vision:
         # ── Render the page to raw JPEG bytes (shared by Azure DI and OpenAI vision)

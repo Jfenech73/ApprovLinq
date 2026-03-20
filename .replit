@@ -11,7 +11,7 @@ packages = ["freetype", "glibcLocales", "gumbo", "harfbuzz", "jbig2dec", "lcms2"
 [userenv.shared]
 APP_NAME = "Invoice Scanner Service"
 APP_ENV = "development"
-OPENAI_MODEL = "gpt-4.1-mini"
+OPENAI_MODEL = "gpt-4.1"
 UPLOAD_DIR = "./data/uploads"
 EXPORT_DIR = "./data/exports"
 USE_OPENAI = "true"
