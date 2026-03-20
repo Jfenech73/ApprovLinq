@@ -612,26 +612,51 @@ def limit_to_20_words(text: str) -> str:
 
 
 def normalise_company_name(name: str | None) -> str | None:
-    """Preserve the original casing when any uppercase letters exist.
-    If the entire name is lowercase (e.g. returned by vision AI reading a
-    stylised font), promote it to title case so it displays correctly.
-    Short words like 'and', 'of', 'for', 'the' stay lowercase mid-name.
+    """Normalise casing of a company name for consistent display.
+
+    Logic (in priority order):
+    1. All-lowercase → apply smart title-casing.
+    2. ALL-CAPS (every alpha char uppercase, ignoring digits/punctuation) →
+       apply smart title-casing (avoids shouting names like "NAAR B.V.").
+    3. Mixed case → trust the source (preserves camelCase brands, etc.).
+
+    Short connector words (and, of, for …) are kept lowercase mid-name.
+    Common legal suffixes (Ltd, Plc, B.V., GmbH …) keep standard casing.
     """
     if not name:
         return name
     name = name.strip()
     if not name:
         return name
-    # If ANY uppercase letter already present, trust the source.
-    if any(c.isupper() for c in name):
-        return name
-    # All-lowercase — apply title case with common small-word exceptions.
+
     _lower_words = {"and", "or", "of", "for", "the", "a", "an", "in", "on",
                     "at", "by", "to", "with", "from", "&"}
+    # Legal suffix casing overrides (applied after title-casing)
+    _suffix_map = {
+        "ltd": "Ltd", "limited": "Limited", "plc": "PLC",
+        "llp": "LLP", "llc": "LLC", "inc": "Inc",
+        "bv": "B.V.", "b.v.": "B.V.", "nv": "N.V.", "n.v.": "N.V.",
+        "gmbh": "GmbH", "ag": "AG", "sa": "SA", "sas": "SAS",
+        "sl": "SL", "spa": "SpA", "oy": "Oy", "ab": "AB",
+        "pty": "Pty", "pty.": "Pty.",
+    }
+
+    alpha_chars = [c for c in name if c.isalpha()]
+    all_upper = alpha_chars and all(c.isupper() for c in alpha_chars)
+    all_lower = alpha_chars and all(c.islower() for c in alpha_chars)
+
+    if not (all_upper or all_lower):
+        # Mixed case — trust the source
+        return name
+
+    # Apply smart title-casing
     words = name.split()
     result = []
     for i, w in enumerate(words):
-        if i == 0 or w.lower() not in _lower_words:
+        w_low = w.lower().rstrip(".")
+        if w_low in _suffix_map:
+            result.append(_suffix_map[w_low])
+        elif i == 0 or w_low not in _lower_words:
             result.append(w.capitalize())
         else:
             result.append(w.lower())
@@ -1782,17 +1807,38 @@ def process_pdf_page(
     val_status = validation_result.get("validated_status", "passed") if validation_result else None
     val_issues = (validation_result.get("issues") or []) if validation_result else []
 
-    # Map validated_status → our internal status values
+    # ── Smart review flagging ─────────────────────────────────────────────────
+    # Review is only required for CRITICAL issues that prevent posting:
+    #   • Missing supplier name  (can't post without knowing who issued it)
+    #   • Missing total amount   (can't process payment without a value)
+    #   • Hard AI validation failure
+    # Medium/low confidence on a COMPLETE extraction is not a reason to block —
+    # it generates a warning status instead so accountants can spot-check
+    # without being forced to open every invoice.
+    missing_supplier = not extracted.get("supplier_name")
+    missing_amount   = extracted.get("total_amount") is None
+
     if val_status == "failed":
-        final_status = "review"
+        final_status   = "review_validation_failed"
+        review_required = True
+    elif missing_supplier and missing_amount:
+        final_status   = "review_incomplete"
+        review_required = True
+    elif missing_supplier:
+        final_status   = "review_no_supplier"
+        review_required = True
+    elif missing_amount:
+        final_status   = "review_no_amount"
         review_required = True
     elif val_status == "passed_with_warnings":
-        final_status = "review" if confidence < 0.80 else "ok_with_warnings"
-        review_required = confidence < 0.80
+        final_status   = "ok_warned"
+        review_required = False
+    elif confidence < 0.65:
+        final_status   = "ok_warned"
+        review_required = False
     else:
-        # Threshold upgraded to 0.80 per framework guidance (< 0.80 → review_required)
-        final_status = "ok" if confidence >= 0.80 else "review"
-        review_required = confidence < 0.80
+        final_status   = "ok"
+        review_required = False
 
     # Merge any validation issues into ai_issues
     all_issues = list(extracted.get("ai_issues") or []) + val_issues
@@ -1863,7 +1909,7 @@ def split_line_item_rows(page_result: dict[str, Any], tolerance: float = 0.05) -
     for row in rows:
         if mismatch:
             row["review_required"] = True
-            row["validation_status"] = "review"
+            row["validation_status"] = "review_amount_mismatch"
             row["description"] = f"{row.get('description') or 'Invoice line'}"
     return rows
 
@@ -1975,7 +2021,7 @@ def _build_rows_from_ai_items(
     if invoice_total is not None and abs(float(invoice_total) - summed) > 0.10:
         for row in rows:
             row["review_required"] = True
-            row["validation_status"] = "review"
+            row["validation_status"] = "review_amount_mismatch"
 
     return rows
 

@@ -7,6 +7,25 @@ from io import BytesIO
 import pandas as pd
 
 
+# ── Human-readable actions mapped from validation_status codes ────────────────
+_REVIEW_ACTIONS: dict[str, str] = {
+    "ok":                       "",
+    "ok_warned":                "Spot-check recommended — extraction confidence below optimal",
+    "ok_with_warnings":         "Minor inconsistency noted — verify fields if needed",
+    "review_no_supplier":       "ACTION REQUIRED: Supplier not identified — add to supplier list or enter manually",
+    "review_no_amount":         "ACTION REQUIRED: Total amount missing — enter value from original invoice",
+    "review_incomplete":        "ACTION REQUIRED: Supplier and amount both missing — enter manually from original invoice",
+    "review_validation_failed": "ACTION REQUIRED: Extraction inconsistency detected — verify all fields against original",
+    "review_amount_mismatch":   "ACTION REQUIRED: Line item totals do not match invoice total — verify line amounts",
+    "review":                   "ACTION REQUIRED: Verify all extracted fields against original invoice",
+}
+
+def _review_action(status: str | None) -> str:
+    if not status:
+        return ""
+    return _REVIEW_ACTIONS.get(status, f"Review — {status}")
+
+
 def _safe_value(v):
     """Convert types that openpyxl cannot write into Excel-safe equivalents."""
     if v is None:
@@ -26,7 +45,11 @@ def _row_to_dict(row) -> dict:
     return {col: _safe_value(getattr(row, col)) for col in row.__table__.columns.keys()}
 
 
-def workbook_from_rows(rows, batch_metadata: dict | None = None) -> BytesIO:
+def workbook_from_rows(
+    rows,
+    batch_metadata: dict | None = None,
+    nominal_account_map: dict[str, str] | None = None,
+) -> BytesIO:
     row_dicts = [_row_to_dict(r) for r in rows]
     df = pd.DataFrame(row_dicts)
 
@@ -50,12 +73,33 @@ def workbook_from_rows(rows, batch_metadata: dict | None = None) -> BytesIO:
             "review_required",
         ])
 
+    # ── Derive human-readable columns ─────────────────────────────────────────
+
+    # Recommended Action — derived from the status code, not stored in DB
+    if "validation_status" in df.columns:
+        df.insert(
+            df.columns.get_loc("validation_status") + 1,
+            "recommended_action",
+            df["validation_status"].apply(_review_action),
+        )
+
+    # Nominal Account Name — looked up from the passed map
+    if nominal_account_map and "nominal_account_code" in df.columns:
+        df.insert(
+            df.columns.get_loc("nominal_account_code") + 1,
+            "nominal_account_name",
+            df["nominal_account_code"].apply(
+                lambda c: nominal_account_map.get(str(c).strip(), "") if c else ""
+            ),
+        )
+
     preferred_order = [
         "source_filename",
         "page_no",
         "supplier_name",
         "supplier_posting_account",
         "nominal_account_code",
+        "nominal_account_name",
         "invoice_number",
         "invoice_date",
         "description",
@@ -68,6 +112,7 @@ def workbook_from_rows(rows, batch_metadata: dict | None = None) -> BytesIO:
         "method_used",
         "confidence_score",
         "validation_status",
+        "recommended_action",
         "review_required",
         "header_raw",
         "totals_raw",
@@ -88,16 +133,16 @@ def workbook_from_rows(rows, batch_metadata: dict | None = None) -> BytesIO:
 
     meta = batch_metadata or {}
     summary = {
-        "batch_name": [meta.get("batch_name", "")],
-        "batch_id": [meta.get("batch_id", "")],
-        "scan_mode": [meta.get("scan_mode", "")],
-        "total_rows": [len(df)],
-        "needs_review": [len(review_df)],
-        "sum_net_amount": [float(df["net_amount"].fillna(0).sum()) if "net_amount" in df.columns else 0],
-        "sum_vat_amount": [float(df["vat_amount"].fillna(0).sum()) if "vat_amount" in df.columns else 0],
-        "sum_total_amount": [float(df["total_amount"].fillna(0).sum()) if "total_amount" in df.columns else 0],
-        "avg_confidence": [float(df["confidence_score"].fillna(0).mean()) if "confidence_score" in df.columns else 0],
-        "distinct_source_files": [int(df["source_filename"].fillna("").replace("", pd.NA).dropna().nunique()) if "source_filename" in df.columns else 0],
+        "batch_name":           [meta.get("batch_name", "")],
+        "batch_id":             [meta.get("batch_id", "")],
+        "scan_mode":            [meta.get("scan_mode", "")],
+        "total_rows":           [len(df)],
+        "needs_review":         [len(review_df)],
+        "sum_net_amount":       [float(df["net_amount"].fillna(0).sum()) if "net_amount" in df.columns else 0],
+        "sum_vat_amount":       [float(df["vat_amount"].fillna(0).sum()) if "vat_amount" in df.columns else 0],
+        "sum_total_amount":     [float(df["total_amount"].fillna(0).sum()) if "total_amount" in df.columns else 0],
+        "avg_confidence":       [float(df["confidence_score"].fillna(0).mean()) if "confidence_score" in df.columns else 0],
+        "distinct_source_files":[int(df["source_filename"].fillna("").replace("", pd.NA).dropna().nunique()) if "source_filename" in df.columns else 0],
     }
     summary_df = pd.DataFrame(summary)
 

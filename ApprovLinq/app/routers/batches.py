@@ -716,7 +716,21 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
         "batch_id": str(batch.id),
         "scan_mode": batch.scan_mode or "summary",
     }
-    workbook_bytes = workbook_from_rows(rows, batch_metadata=batch_metadata)
+    # Build a code→name lookup for nominal accounts so the export shows readable names
+    company_id = batch.company_id
+    nominal_accounts = db.query(TenantNominalAccount).filter(
+        TenantNominalAccount.tenant_id == tenant_id,
+        TenantNominalAccount.company_id == company_id,
+    ).all()
+    nominal_account_map: dict[str, str] = {
+        str(a.account_code).strip(): a.account_name
+        for a in nominal_accounts
+    }
+    workbook_bytes = workbook_from_rows(
+        rows,
+        batch_metadata=batch_metadata,
+        nominal_account_map=nominal_account_map,
+    )
     safe_name = re.sub(r"[^\w\-. ]", "_", batch.batch_name or "batch").strip()
     filename = f"{safe_name}_{batch.id}.xlsx"
     encoded = urllib.parse.quote(filename, safe="")
