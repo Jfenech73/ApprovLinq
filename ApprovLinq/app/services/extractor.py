@@ -1190,6 +1190,7 @@ def azure_di_extract_invoice(
     )
 
     return {
+        "extraction_source": "azure_di",
         "supplier_name":    supplier_name,
         "supplier_address": supplier_addr,
         "supplier_vat":     supplier_vat,
@@ -1448,12 +1449,17 @@ def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str
     # because it anchors strictly to position-0 / letterhead text.
     # Only override with the AI result when:
     #   (a) the rule-based result is absent or suspicious, OR
-    #   (b) the AI has high confidence (≥ 0.85) — meaning the image clearly
-    #       confirms a different name than what the text scan found.
-    # This prevents the AI from substituting a customer name it read elsewhere
-    # on the invoice (e.g. "Food Solutions") for the actual supplier letterhead.
+    #   (b) AI has sufficient confidence to confirm a better name.
+    #
+    # Threshold differs by source:
+    #   • Azure DI uses a dedicated VendorName field — vendor vs. customer
+    #     confusion is architecturally impossible, so a lower gate (≥ 0.5) is safe.
+    #   • OpenAI vision/text reads free-form — keep the stricter ≥ 0.85 gate to
+    #     prevent it from picking up a customer name printed elsewhere on the page.
     ai_supplier = ai.get("supplier_name")
     ai_supplier_conf = float((ai.get("ai_confidence") or {}).get("supplier", 0.0))
+    is_azure_di = ai.get("extraction_source") == "azure_di"
+    conf_threshold = 0.5 if is_azure_di else 0.85
     rule_supplier_ok = bool(
         merged.get("supplier_name")
         and not suspicious_supplier_name(merged.get("supplier_name"))
@@ -1463,8 +1469,8 @@ def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str
         if ai_supplier and not suspicious_supplier_name(ai_supplier):
             merged["supplier_name"] = ai_supplier
     else:
-        # Rule-based found something — only upgrade to AI result if AI is confident
-        if ai_supplier and not suspicious_supplier_name(ai_supplier) and ai_supplier_conf >= 0.85:
+        # Rule-based found something — upgrade to AI result if AI is sufficiently confident
+        if ai_supplier and not suspicious_supplier_name(ai_supplier) and ai_supplier_conf >= conf_threshold:
             merged["supplier_name"] = ai_supplier
     # Normalise casing: promote all-lowercase names to title case.
     merged["supplier_name"] = normalise_company_name(merged.get("supplier_name"))
@@ -1502,6 +1508,8 @@ def merge_ai_fields(base: dict[str, Any], ai: dict[str, Any] | None) -> dict[str
         "customer_name", "customer_address", "customer_vat",
         "document_type", "extraction_status", "totals_reconcile",
         "ai_issues", "ai_confidence",
+        "line_items_structured",   # structured list from Azure DI / OpenAI
+        "extraction_source",       # tracks which engine produced the result
     ):
         if ai.get(field) is not None:
             merged[field] = ai[field]
