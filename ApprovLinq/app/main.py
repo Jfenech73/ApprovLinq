@@ -49,6 +49,7 @@ def ensure_runtime_schema() -> None:
         "ALTER TABLE tenant_nominal_accounts ADD COLUMN IF NOT EXISTS company_id UUID",
         "UPDATE tenant_nominal_accounts AS na SET company_id = c.id FROM companies AS c WHERE na.company_id IS NULL AND c.tenant_id = na.tenant_id",
         "CREATE INDEX IF NOT EXISTS ix_tenant_nominals_tenant_company_account_code ON tenant_nominal_accounts (tenant_id, company_id, account_code)",
+        "ALTER TABLE tenant_nominal_accounts ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE",
 
         # ── invoice_batches ──────────────────────────────────────────────────
         "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS tenant_id UUID",

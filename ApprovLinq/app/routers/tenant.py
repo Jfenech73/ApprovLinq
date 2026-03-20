@@ -294,11 +294,50 @@ def list_nominal_accounts(company_id: UUID | None = Query(default=None), tenant_
     )
 
 
+def _clear_default_nominal(db: Session, tenant_id, company_id, exclude_id: int | None = None) -> None:
+    """Clear is_default on all nominal accounts for a company, optionally excluding one row."""
+    q = db.query(TenantNominalAccount).filter(
+        TenantNominalAccount.tenant_id == tenant_id,
+        TenantNominalAccount.company_id == company_id,
+        TenantNominalAccount.is_default.is_(True),
+    )
+    if exclude_id is not None:
+        q = q.filter(TenantNominalAccount.id != exclude_id)
+    q.update({"is_default": False}, synchronize_session=False)
+
+
 @router.post("/nominal-accounts", response_model=NominalAccountOut)
 def create_nominal_account(payload: NominalAccountCreate, tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
     _get_company_or_400(db, tenant_id, payload.company_id)
+    if payload.is_default:
+        _clear_default_nominal(db, tenant_id, payload.company_id)
     account = TenantNominalAccount(tenant_id=tenant_id, **payload.model_dump())
     db.add(account)
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+@router.put("/nominal-accounts/{account_id}/set-default", response_model=NominalAccountOut)
+def set_default_nominal_account(account_id: int, tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
+    """Mark one nominal account as the default; clears the flag on all others in the same company."""
+    account = db.get(TenantNominalAccount, account_id)
+    if not account or account.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Nominal account not found")
+    _clear_default_nominal(db, tenant_id, account.company_id, exclude_id=account_id)
+    account.is_default = True
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+@router.put("/nominal-accounts/{account_id}/clear-default", response_model=NominalAccountOut)
+def clear_default_nominal_account(account_id: int, tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
+    """Remove the default flag from a nominal account (leaves no default set)."""
+    account = db.get(TenantNominalAccount, account_id)
+    if not account or account.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Nominal account not found")
+    account.is_default = False
     db.commit()
     db.refresh(account)
     return account
@@ -309,7 +348,10 @@ def update_nominal_account(account_id: int, payload: NominalAccountUpdate, tenan
     account = db.get(TenantNominalAccount, account_id)
     if not account or account.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Nominal account not found")
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    if updates.get("is_default"):
+        _clear_default_nominal(db, tenant_id, account.company_id, exclude_id=account_id)
+    for field, value in updates.items():
         setattr(account, field, value)
     db.commit()
     db.refresh(account)

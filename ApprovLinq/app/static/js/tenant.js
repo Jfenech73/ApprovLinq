@@ -262,13 +262,40 @@ async function loadSuppliers() {
 
 async function loadAccounts() {
   const tbody = document.getElementById("accountsTableBody");
-  if (!selectedCompanyId) { tbody.innerHTML = '<tr><td colspan="2" class="muted">Select a company to view nominal accounts.</td></tr>'; return; }
+  if (!selectedCompanyId) { tbody.innerHTML = '<tr><td colspan="3" class="muted">Select a company to view nominal accounts.</td></tr>'; return; }
   const rows = await apiFetch(`/tenant/nominal-accounts?company_id=${encodeURIComponent(selectedCompanyId)}`);
-  tbody.innerHTML = rows.length ? rows.map((row) => `
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="3" class="muted">No nominal accounts found for this company.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map((row) => `
         <tr>
           <td>${escapeHtml(row.account_code)}</td>
           <td>${escapeHtml(row.account_name)}</td>
-        </tr>`).join("") : '<tr><td colspan="2" class="muted">No nominal accounts found for this company.</td></tr>';
+          <td style="text-align:center">
+            <input type="checkbox" class="nominal-default-cb" data-id="${row.id}" ${row.is_default ? "checked" : ""}
+              title="${row.is_default ? "This is the default account — click to remove default" : "Click to set as default fallback account"}" />
+          </td>
+        </tr>`).join("");
+
+  tbody.querySelectorAll(".nominal-default-cb").forEach((cb) => {
+    cb.addEventListener("change", async () => {
+      const accountId = cb.dataset.id;
+      try {
+        if (cb.checked) {
+          await apiFetch(`/tenant/nominal-accounts/${accountId}/set-default`, { method: "PUT" });
+          setMessage("accountMessage", "Default nominal account updated.", "success");
+        } else {
+          await apiFetch(`/tenant/nominal-accounts/${accountId}/clear-default`, { method: "PUT" });
+          setMessage("accountMessage", "Default removed — no fallback account set.", "success");
+        }
+        await loadAccounts();
+      } catch (err) {
+        setMessage("accountMessage", err.message);
+        await loadAccounts();
+      }
+    });
+  });
 }
 
 async function loadIssues() {

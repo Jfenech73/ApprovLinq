@@ -132,6 +132,7 @@ create table if not exists tenant_nominal_accounts (
     account_code varchar(100) not null,
     account_name varchar(255) not null,
     is_active    boolean      not null default true,
+    is_default   boolean      not null default false,
     created_at   timestamptz  not null default now(),
     updated_at   timestamptz  not null default now(),
     constraint uq_tenant_company_nominal_account_code

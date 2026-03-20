@@ -144,10 +144,32 @@ def _apply_account_suggestions(db: Session, tenant_id, company_id, row: InvoiceR
             .all()
         )
         text = row.description.lower()
+        default_account = None
         for account in accounts:
+            if account.is_default:
+                default_account = account
             if account.account_name.lower() in text or account.account_code.lower() in text:
                 row.nominal_account_code = account.account_code
                 break
+
+        # If nothing matched by name/code, fall back to the marked default
+        if not row.nominal_account_code and default_account:
+            row.nominal_account_code = default_account.account_code
+
+    # If still no nominal (e.g. no description), try the default account directly
+    if not row.nominal_account_code:
+        default_account = (
+            db.query(TenantNominalAccount)
+            .filter(
+                TenantNominalAccount.tenant_id == tenant_id,
+                TenantNominalAccount.company_id == company_id,
+                TenantNominalAccount.is_active.is_(True),
+                TenantNominalAccount.is_default.is_(True),
+            )
+            .first()
+        )
+        if default_account:
+            row.nominal_account_code = default_account.account_code
 
 
 _PATTERN_STOP_WORDS: frozenset[str] = frozenset({

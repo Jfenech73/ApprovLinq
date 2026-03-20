@@ -158,12 +158,14 @@ class NominalAccountCreate(BaseModel):
     account_code: str = Field(min_length=1, max_length=100)
     account_name: str = Field(min_length=1, max_length=255)
     is_active: bool = True
+    is_default: bool = False
 
 
 class NominalAccountUpdate(BaseModel):
     account_code: str | None = None
     account_name: str | None = None
     is_active: bool | None = None
+    is_default: bool | None = None
 
 
 class NominalAccountOut(BaseModel):
@@ -173,6 +175,7 @@ class NominalAccountOut(BaseModel):
     account_code: str
     account_name: str
     is_active: bool
+    is_default: bool
     created_at: datetime
     updated_at: datetime
 
