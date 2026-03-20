@@ -1208,12 +1208,14 @@ def azure_di_extract_invoice(
             qty, _  = _num(sub.get("Quantity"))
             uprice, _ = _num(sub.get("UnitPrice"))
             amount, _ = _num(sub.get("Amount"))
+            tax, _   = _num(sub.get("Tax"))
             if desc or amount:
                 line_items.append({
                     "description": desc,
-                    "quantity": qty,
-                    "unit_price": uprice,
-                    "net_amount": amount,
+                    "quantity":    qty,
+                    "unit_price":  uprice,
+                    "net_amount":  amount,
+                    "tax_amount":  tax,   # line-level VAT from Azure DI (may be None)
                 })
         if line_items:
             items_conf = min(0.95, 0.70 + 0.05 * len(line_items))
@@ -1949,9 +1951,18 @@ def _build_rows_from_ai_items(
 
         if amount is not None:
             summed += amount
-            row["total_amount"] = amount
+            # Use Azure DI's per-line tax if present; default to 0.0
+            line_vat = item.get("tax_amount")
+            if line_vat is not None:
+                try:
+                    line_vat = float(line_vat)
+                except (TypeError, ValueError):
+                    line_vat = 0.0
+            else:
+                line_vat = 0.0
             row["net_amount"] = amount
-            row["vat_amount"] = 0.0
+            row["vat_amount"] = line_vat
+            row["total_amount"] = round(amount + line_vat, 2)
 
         row["line_no"] = idx
         rows.append(row)
@@ -1984,21 +1995,32 @@ def process_pdf_page_rows(
     )
 
     if (scan_mode or "summary").lower() == "lines":
-        # Priority 1: line_items_structured already extracted by vision (Azure DI or OpenAI).
-        # This is the most accurate source — reuse it rather than making a second AI call.
+        # ── Line-item extraction priority (tallest accuracy first) ─────────
+        # 1. Azure Document Intelligence (primary — prebuilt-invoice model,
+        #    extracts line items with qty / unit_price / net_amount / tax_amount).
+        # 2. OpenAI vision (fallback — reads line items from the page image).
+        #    Both #1 and #2 populate line_items_structured during process_pdf_page.
+        # 3. OpenAI text-only (second fallback for text-layer PDFs).
+        # 4. Rule-based splitter (last resort — parses line_items_raw text).
         structured = page_result.get("line_items_structured")
         if structured and isinstance(structured, list) and len(structured) > 0:
+            engine = page_result.get("method_used", "")
+            src = "azure_di" if "azure_di" in engine else "openai_vision"
+            logger.info(
+                "Lines mode: using %d structured item(s) from %s", len(structured), src
+            )
             return _build_rows_from_ai_items(page_result, structured)
 
-        # Priority 2: Ask OpenAI to extract line items from the native page text.
-        # Works for text-layer PDFs; returns None for empty/scanned text.
+        # Priority 3: OpenAI text-only line item extraction.
         if settings.use_openai and openai_api_key:
             page_text = page_result.get("page_text_raw") or ""
             ai_items = openai_extract_line_items(page_text, openai_api_key, model=settings.openai_model)
             if ai_items:
+                logger.info("Lines mode: using %d item(s) from openai_text", len(ai_items))
                 return _build_rows_from_ai_items(page_result, ai_items)
 
-        # Priority 3: Rule-based splitter on the raw candidate lines.
+        # Priority 4: Rule-based splitter on the raw candidate lines.
+        logger.info("Lines mode: falling back to rule-based line splitter")
         return split_line_item_rows(page_result)
 
     return [page_result]
