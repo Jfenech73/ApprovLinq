@@ -24,6 +24,8 @@ OCR_SPACE_SCALE = "true"
 OCR_SPACE_OCR_ENGINE = "2"
 OCR_SPACE_TIMEOUT_SECONDS = "90"
 ENABLE_PADDLE_OCR = "false"
+AZURE_DI_ENDPOINT = "https://approvlinq.cognitiveservices.azure.com/"
+USE_AZURE_DI = "true"
 
 [workflows]
 runButton = "Project"

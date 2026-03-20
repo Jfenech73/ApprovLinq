@@ -1021,6 +1021,202 @@ def openai_extract_invoice_vision(
     }
 
 
+def azure_di_extract_invoice(
+    jpeg_bytes: bytes,
+    endpoint: str,
+    key: str,
+) -> dict[str, Any] | None:
+    """Extract invoice fields using Azure Document Intelligence prebuilt-invoice model.
+
+    Sends the rendered page JPEG to Azure DI, which uses a purpose-built invoice
+    model trained on millions of documents.  Returns the same field schema as the
+    OpenAI extraction functions so it slots directly into merge_ai_fields.
+    """
+    if not jpeg_bytes or not endpoint or not key:
+        return None
+
+    try:
+        from azure.ai.documentintelligence import DocumentIntelligenceClient
+        from azure.core.credentials import AzureKeyCredential
+    except ImportError:
+        logger.error("azure-ai-documentintelligence not installed — cannot use Azure DI")
+        return None
+
+    def _str(field) -> tuple[str | None, float]:
+        if field is None:
+            return None, 0.0
+        try:
+            val = field.value_string or field.content
+        except AttributeError:
+            val = field.get("valueString") or field.get("content") if isinstance(field, dict) else None
+        conf = getattr(field, "confidence", None) or (field.get("confidence", 0.0) if isinstance(field, dict) else 0.0)
+        return (val.strip() if val else None), float(conf or 0.0)
+
+    def _num(field) -> tuple[float | None, float]:
+        if field is None:
+            return None, 0.0
+        try:
+            raw = field.value_number
+            if raw is None:
+                raw = field.value_currency.amount if field.value_currency else None
+        except AttributeError:
+            raw = field.get("valueNumber") if isinstance(field, dict) else None
+        conf = getattr(field, "confidence", None) or (field.get("confidence", 0.0) if isinstance(field, dict) else 0.0)
+        if raw is None:
+            raw = parse_amount(getattr(field, "content", "") or "")
+        return (float(raw) if raw is not None else None), float(conf or 0.0)
+
+    def _date(field) -> tuple[str | None, float]:
+        if field is None:
+            return None, 0.0
+        try:
+            val = field.value_date
+        except AttributeError:
+            val = field.get("valueDate") if isinstance(field, dict) else None
+        conf = getattr(field, "confidence", None) or (field.get("confidence", 0.0) if isinstance(field, dict) else 0.0)
+        if val is None:
+            raw_str = getattr(field, "content", None) or (field.get("content") if isinstance(field, dict) else None)
+            val = parse_date(raw_str) if raw_str else None
+        else:
+            val = parse_date(str(val))
+        return val, float(conf or 0.0)
+
+    def _addr(field) -> str | None:
+        if field is None:
+            return None
+        try:
+            addr_obj = field.value_address
+            if addr_obj:
+                parts = [
+                    getattr(addr_obj, "road", None),
+                    getattr(addr_obj, "city", None),
+                    getattr(addr_obj, "state", None),
+                    getattr(addr_obj, "postal_code", None),
+                    getattr(addr_obj, "country_region", None),
+                ]
+                return ", ".join(p for p in parts if p) or field.content
+        except AttributeError:
+            pass
+        return getattr(field, "content", None) or (field.get("content") if isinstance(field, dict) else None)
+
+    try:
+        client = DocumentIntelligenceClient(
+            endpoint=endpoint.rstrip("/"),
+            credential=AzureKeyCredential(key),
+        )
+        poller = client.begin_analyze_document(
+            "prebuilt-invoice",
+            body=jpeg_bytes,
+            content_type="image/jpeg",
+        )
+        result = poller.result()
+    except Exception as exc:
+        logger.warning("Azure DI API call failed: %s", exc)
+        return None
+
+    if not result.documents:
+        logger.info("Azure DI returned no documents")
+        return None
+
+    fields = result.documents[0].fields or {}
+
+    # ── Core fields ────────────────────────────────────────────────────────
+    supplier_name, s_conf     = _str(fields.get("VendorName"))
+    supplier_addr, _          = _str(fields.get("VendorAddress"))
+    if not supplier_addr:
+        supplier_addr = _addr(fields.get("VendorAddress"))
+    supplier_vat, _           = _str(fields.get("VendorTaxId"))
+
+    customer_name, c_conf     = _str(fields.get("CustomerName"))
+    customer_addr, _          = _str(fields.get("CustomerAddress"))
+    if not customer_addr:
+        customer_addr = _addr(fields.get("CustomerAddress"))
+    customer_vat, _           = _str(fields.get("CustomerTaxId"))
+
+    invoice_number, _         = _str(fields.get("InvoiceId"))
+    invoice_date, _           = _date(fields.get("InvoiceDate"))
+    due_date, _               = _date(fields.get("DueDate"))
+
+    net_amount, t_conf_sub    = _num(fields.get("SubTotal"))
+    vat_amount, t_conf_tax    = _num(fields.get("TotalTax"))
+    total_amount, t_conf_tot  = _num(fields.get("InvoiceTotal"))
+    if total_amount is None:
+        total_amount, _       = _num(fields.get("AmountDue"))
+
+    currency, _               = _str(fields.get("CurrencyCode"))
+
+    # ── Line items ──────────────────────────────────────────────────────────
+    items_field = fields.get("Items")
+    line_items: list[dict] = []
+    items_conf = 0.0
+    if items_field is not None:
+        try:
+            raw_items = items_field.value_array or []
+        except AttributeError:
+            raw_items = items_field.get("valueArray", []) if isinstance(items_field, dict) else []
+        for item in raw_items:
+            try:
+                sub = item.value_object or {}
+            except AttributeError:
+                sub = item.get("valueObject", {}) if isinstance(item, dict) else {}
+            desc, _ = _str(sub.get("Description"))
+            qty, _  = _num(sub.get("Quantity"))
+            uprice, _ = _num(sub.get("UnitPrice"))
+            amount, _ = _num(sub.get("Amount"))
+            if desc or amount:
+                line_items.append({
+                    "description": desc,
+                    "quantity": qty,
+                    "unit_price": uprice,
+                    "net_amount": amount,
+                })
+        if line_items:
+            items_conf = min(0.95, 0.70 + 0.05 * len(line_items))
+
+    # ── Description: derive from line items ─────────────────────────────────
+    descs = [it["description"] for it in line_items if it.get("description")]
+    description = limit_to_20_words("; ".join(descs)) if descs else None
+
+    # ── Per-section confidence scores ───────────────────────────────────────
+    totals_conf = round(
+        (t_conf_sub + t_conf_tax + t_conf_tot) / max(
+            sum(1 for v in (t_conf_sub, t_conf_tax, t_conf_tot) if v > 0), 1
+        ), 2
+    )
+
+    logger.info(
+        "Azure DI extracted: supplier=%r inv=%r total=%s conf=s%.2f/c%.2f/t%.2f",
+        supplier_name, invoice_number, total_amount, s_conf, c_conf, totals_conf,
+    )
+
+    return {
+        "supplier_name":    supplier_name,
+        "supplier_address": supplier_addr,
+        "supplier_vat":     supplier_vat,
+        "customer_name":    customer_name,
+        "customer_address": customer_addr,
+        "customer_vat":     customer_vat,
+        "invoice_number":   invoice_number,
+        "invoice_date":     invoice_date,
+        "due_date":         due_date,
+        "description":      description,
+        "net_amount":       net_amount,
+        "vat_amount":       vat_amount,
+        "total_amount":     total_amount,
+        "currency":         currency,
+        "tax_code":         None,
+        "line_items_structured": line_items,
+        "document_type":    "invoice",
+        "extraction_status": "complete" if (supplier_name and invoice_number and total_amount) else "partial",
+        "ai_confidence": {
+            "supplier": round(s_conf, 2),
+            "customer": round(c_conf, 2),
+            "lines":    round(items_conf, 2),
+            "totals":   round(totals_conf, 2),
+        },
+    }
+
+
 def openai_extract_invoice_fields(
     page_text: str,
     api_key: str,
@@ -1358,16 +1554,46 @@ def process_pdf_page(
         account_company_name=account_company_name,
     )
 
-    if use_vision:
-        # Stage 3a — Render the page to a JPEG and send directly to the vision
-        # model.  The AI reads text straight from the image — far superior to
-        # OCR output on scanned / rotated / two-column documents.
-        jpeg_b64 = render_page_for_vision(pdf_path, page_index)
+    use_azure_di = bool(
+        settings.use_azure_di
+        and settings.azure_di_endpoint
+        and settings.azure_di_key
+    )
 
-        if jpeg_b64:
+    if use_azure_di or use_vision:
+        # ── Render the page to raw JPEG bytes (shared by Azure DI and OpenAI vision)
+        try:
+            jpeg_bytes = OCRBackend.render_pdf_page_to_jpeg_bytes(
+                pdf_path, page_index, scale=1.5, quality=80
+            )
+            if jpeg_bytes and len(jpeg_bytes) > 4 * 1024 * 1024:
+                jpeg_bytes = OCRBackend.render_pdf_page_to_jpeg_bytes(
+                    pdf_path, page_index, scale=1.0, quality=60
+                )
+        except Exception as exc:
+            logger.warning("JPEG render failed p%d: %s", page_index, exc)
+            jpeg_bytes = None
+
+        ai_fields = None
+
+        # ── Stage 3a: Azure Document Intelligence (primary, highest accuracy) ──
+        if use_azure_di and jpeg_bytes:
+            ai_fields = azure_di_extract_invoice(
+                jpeg_bytes,
+                settings.azure_di_endpoint,
+                settings.azure_di_key,
+            )
+            if ai_fields:
+                extracted = merge_ai_fields(extracted, ai_fields)
+                method = f"{method}+azure_di"
+                logger.info("Azure DI extraction succeeded for page %d", page_index)
+
+        # ── Stage 3b: OpenAI vision (fallback if Azure DI not available/failed) ─
+        if ai_fields is None and use_vision and jpeg_bytes:
+            jpeg_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
             ai_fields = openai_extract_invoice_vision(
                 jpeg_b64,
-                native_text,          # native text as lightweight supplement only
+                native_text,
                 openai_api_key,
                 model=settings.openai_model,
                 account_company_name=account_company_name,
@@ -1375,49 +1601,32 @@ def process_pdf_page(
             if ai_fields:
                 extracted = merge_ai_fields(extracted, ai_fields)
                 method = f"{method}+vision"
-            else:
-                # Vision API call failed — fall back to text-only AI
-                logger.info("Vision extraction failed p%d — text-only fallback", page_index)
-                _text_for_ai = final_text if count_meaningful_chars(final_text) >= 20 else native_text
+
+        # ── Stage 3c: Text-only AI (fallback when image unavailable) ────────────
+        if ai_fields is None and use_vision:
+            logger.info("Image unavailable p%d — text-only AI fallback", page_index)
+            _text_for_ai = final_text if count_meaningful_chars(final_text) >= 20 else native_text
+            if count_meaningful_chars(_text_for_ai) >= 20:
                 ai_fields = openai_extract_invoice_fields(
                     _text_for_ai, openai_api_key,
                     model=settings.openai_model,
                     account_company_name=account_company_name,
                 )
-                extracted = merge_ai_fields(extracted, ai_fields)
-                method = f"{method}+openai_text"
-        else:
-            # Image render failed — run OCR then text-only AI as fallback
-            ocr_backend = get_ocr_backend()
-            if count_meaningful_chars(native_text) < 80 and ocr_backend is not None:
-                try:
-                    ocr_text = clean_text(
-                        ocr_backend.extract_text_from_pdf_page(pdf_path, page_index, scale=1.8)
-                    )
-                    if count_meaningful_chars(ocr_text) > count_meaningful_chars(native_text):
-                        final_text = ocr_text
-                        method = f"ocr_{ocr_backend.name}"
-                except Exception as e:
-                    logger.warning("OCR fallback failed p%d: %s", page_index, e)
-            if count_meaningful_chars(final_text) >= 20:
-                ai_fields = openai_extract_invoice_fields(
-                    final_text, openai_api_key,
-                    model=settings.openai_model,
-                    account_company_name=account_company_name,
-                )
-                extracted = merge_ai_fields(extracted, ai_fields)
-                method = f"{method}+openai_text"
+                if ai_fields:
+                    extracted = merge_ai_fields(extracted, ai_fields)
+                    method = f"{method}+openai_text"
 
-        # Stage 4 — Second-pass validation
-        validation_result = openai_validate_extraction(
-            native_text or final_text,
-            extracted,
-            openai_api_key,
-            model=settings.openai_model,
-        )
-        if validation_result:
-            extracted["_validation_result"] = validation_result
-            method = f"{method}+validated"
+        # ── Stage 4: OpenAI validation pass (runs after Azure DI too if available)
+        if use_vision and openai_api_key:
+            validation_result = openai_validate_extraction(
+                native_text or final_text,
+                extracted,
+                openai_api_key,
+                model=settings.openai_model,
+            )
+            if validation_result:
+                extracted["_validation_result"] = validation_result
+                method = f"{method}+validated"
 
     # -------------------------------------------------------------------------
     # Stage 5 — confidence scoring & business rule checks

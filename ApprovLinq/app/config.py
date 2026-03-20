@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1"
 
+    # Azure Document Intelligence
+    use_azure_di: bool = False
+    azure_di_endpoint: str | None = None
+    azure_di_key: str | None = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -63,6 +68,9 @@ class Settings(BaseSettings):
             "use_openai": self.use_openai,
             "openai_api_key_present": bool(self.openai_api_key),
             "openai_model": self.openai_model,
+            "use_azure_di": self.use_azure_di,
+            "azure_di_endpoint": self.azure_di_endpoint,
+            "azure_di_key_present": bool(self.azure_di_key),
             "upload_dir": self.upload_dir,
             "export_dir": self.export_dir,
         }
