@@ -85,29 +85,82 @@ from app.db.models import Tenant, User, UserTenant
 from app.utils.security import hash_password
 
 
+def _prompt(label: str, default: str | None = None, secret: bool = False) -> str:
+    """Prompt the user for a value, with an optional default."""
+    import getpass as _getpass
+    suffix = f" [{default}]" if default else ""
+    prompt_text = f"  {label}{suffix}: "
+    if secret:
+        value = _getpass.getpass(prompt_text)
+    else:
+        value = input(prompt_text).strip()
+    return value if value else (default or "")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Seed the first admin user and tenant for Invoice Scanner Service"
+        description="Seed the first admin user and tenant for Invoice Scanner Service.\n"
+                    "Run with no arguments to be prompted interactively.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--admin-email",    required=True, help="Admin login email")
-    parser.add_argument("--admin-password", required=True, help="Admin login password")
-    parser.add_argument("--admin-name",     required=True, help="Admin full name")
-    parser.add_argument("--tenant-code",    required=True, help="Unique tenant code, e.g. acme")
-    parser.add_argument("--tenant-name",    required=True, help="Tenant display name")
-    parser.add_argument("--contact-name",   default=None,  help="Tenant contact name")
-    parser.add_argument("--contact-email",  default=None,  help="Tenant contact email")
-    parser.add_argument("--tenant-notes",   default=None,  help="Optional tenant notes")
+    parser.add_argument("--admin-email",    default=None, help="Admin login email")
+    parser.add_argument("--admin-password", default=None, help="Admin login password")
+    parser.add_argument("--admin-name",     default=None, help="Admin full name")
+    parser.add_argument("--tenant-code",    default=None, help="Unique tenant code, e.g. acme")
+    parser.add_argument("--tenant-name",    default=None, help="Tenant display name")
+    parser.add_argument("--contact-name",   default=None, help="Tenant contact name (optional)")
+    parser.add_argument("--contact-email",  default=None, help="Tenant contact email (optional)")
+    parser.add_argument("--tenant-notes",   default=None, help="Optional tenant notes")
     parser.add_argument(
         "--link-admin-to-tenant",
         action="store_true",
-        help="Also assign the admin user to the tenant as default access",
+        help="Assign the admin user to the tenant as default access",
     )
     parser.add_argument(
         "--force-update-password",
         action="store_true",
         help="If the admin already exists, update the password hash",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # If any required field is missing, switch to interactive mode
+    required_missing = not all([args.admin_email, args.admin_password, args.admin_name,
+                                 args.tenant_code, args.tenant_name])
+    if required_missing:
+        print("\nSeed setup — enter values below (press Enter to accept defaults).\n")
+        if not args.admin_email:
+            args.admin_email = _prompt("Admin email")
+        if not args.admin_password:
+            args.admin_password = _prompt("Admin password", secret=True)
+        if not args.admin_name:
+            args.admin_name = _prompt("Admin full name")
+        if not args.tenant_code:
+            args.tenant_code = _prompt("Tenant code (no spaces, e.g. my-company)")
+        if not args.tenant_name:
+            args.tenant_name = _prompt("Tenant display name")
+        if not args.contact_name:
+            raw = _prompt("Contact name (optional, press Enter to skip)")
+            args.contact_name = raw or None
+        if not args.contact_email:
+            raw = _prompt("Contact email (optional, press Enter to skip)")
+            args.contact_email = raw or None
+        if not args.link_admin_to_tenant:
+            raw = _prompt("Link admin to tenant? (y/n)", default="y")
+            args.link_admin_to_tenant = raw.strip().lower().startswith("y")
+        print()
+
+    # Final validation
+    missing = [f for f, v in [
+        ("--admin-email", args.admin_email),
+        ("--admin-password", args.admin_password),
+        ("--admin-name", args.admin_name),
+        ("--tenant-code", args.tenant_code),
+        ("--tenant-name", args.tenant_name),
+    ] if not v]
+    if missing:
+        parser.error(f"Missing required values: {', '.join(missing)}")
+
+    return args
 
 
 def main() -> int:
