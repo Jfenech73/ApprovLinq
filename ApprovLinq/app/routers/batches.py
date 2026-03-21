@@ -75,19 +75,23 @@ def _word_overlap(a: str, b: str) -> float:
 
 
 def _match_supplier_fuzzy(
-    db: Session, tenant_id, company_id, supplier_name: str
+    db: Session,
+    tenant_id,
+    company_id,
+    supplier_name: str,
+    supplier_vat: str | None = None,
 ) -> TenantSupplier | None:
     """Return the best-matching active supplier, or None if no good match exists.
 
-    Strategy (in order):
-    1. Exact case-insensitive match.
+    Strategy (in order of reliability):
+    0. VAT number exact match — most authoritative identifier.
+    1. Exact case-insensitive name match.
     2. Normalised containment — one name's core words fully contained in the other.
     3. Word-overlap ≥ 0.5 — majority of meaningful words in common.
     """
-    if not supplier_name:
+    if not supplier_name and not supplier_vat:
         return None
 
-    name = supplier_name.strip()
     base_q = (
         db.query(TenantSupplier)
         .filter(
@@ -96,6 +100,24 @@ def _match_supplier_fuzzy(
             TenantSupplier.is_active.is_(True),
         )
     )
+
+    # 0. VAT number match (most reliable — not sensitive to OCR name variation)
+    if supplier_vat:
+        vat_clean = re.sub(r"\s+", "", supplier_vat).upper()
+        vat_match = (
+            base_q
+            .filter(TenantSupplier.vat_number.isnot(None))
+            .all()
+        )
+        for s in vat_match:
+            if s.vat_number and re.sub(r"\s+", "", s.vat_number).upper() == vat_clean:
+                logger.debug("Supplier matched via VAT number: %s → %s", supplier_vat, s.supplier_name)
+                return s
+
+    if not supplier_name:
+        return None
+
+    name = supplier_name.strip()
 
     # 1. Exact ilike
     exact = base_q.filter(TenantSupplier.supplier_name.ilike(name)).first()
@@ -126,16 +148,100 @@ def _match_supplier_fuzzy(
     return best if best_score >= 0.50 else None
 
 
-def _apply_account_suggestions(db: Session, tenant_id, company_id, row: InvoiceRow):
-    if row.supplier_name:
-        supplier = _match_supplier_fuzzy(db, tenant_id, company_id, row.supplier_name)
+def _get_supplier_historical_nominal(
+    db: Session,
+    tenant_id,
+    company_id,
+    supplier_name: str,
+    limit: int = 50,
+) -> str | None:
+    """Return the most frequently used nominal account code for invoices from this
+    supplier (by name), based on historical invoice rows.
+
+    Used in the hybrid classification order as step 2 (after explicit supplier
+    default_nominal, before brand taxonomy and keyword matching).
+    """
+    from sqlalchemy import func
+
+    if not supplier_name:
+        return None
+
+    result = (
+        db.query(InvoiceRow.nominal_account_code, func.count().label("cnt"))
+        .filter(
+            InvoiceRow.tenant_id == tenant_id,
+            InvoiceRow.company_id == company_id,
+            InvoiceRow.supplier_name == supplier_name,
+            InvoiceRow.nominal_account_code.isnot(None),
+        )
+        .group_by(InvoiceRow.nominal_account_code)
+        .order_by(func.count().desc())
+        .limit(1)
+        .first()
+    )
+    if result and result.cnt >= 2:
+        logger.debug(
+            "Historical nominal for %r: %r (%d uses)", supplier_name, result.nominal_account_code, result.cnt
+        )
+        return result.nominal_account_code
+    return None
+
+
+def _apply_account_suggestions(
+    db: Session,
+    tenant_id,
+    company_id,
+    row: InvoiceRow,
+    supplier_vat: str | None = None,
+):
+    """Assign supplier posting account and nominal account code using a 5-step
+    hybrid classification order:
+
+    Supplier matching:
+        0. VAT number exact match (most reliable)
+        1. Exact / fuzzy name match
+
+    Nominal classification (first hit wins):
+        A. Supplier default_nominal (explicit per-supplier setting)
+        B. Supplier historical nominal (most-used code for this supplier in history)
+        C. Description keyword match (account name/code in description text)
+        D. Brand/product taxonomy (known brand → category hint → nominal account)
+        E. Marked default nominal account (fallback)
+    """
+    matched_supplier_name: str | None = None
+
+    if row.supplier_name or supplier_vat:
+        supplier = _match_supplier_fuzzy(
+            db, tenant_id, company_id,
+            row.supplier_name or "",
+            supplier_vat=supplier_vat,
+        )
         if supplier:
-            # Canonicalise the name to the list entry so downstream is consistent
+            matched_supplier_name = supplier.supplier_name
+            # Canonicalise name to the master list entry
             row.supplier_name = supplier.supplier_name
             if not row.supplier_posting_account:
-                row.supplier_posting_account = supplier.supplier_account_code or supplier.posting_account
+                row.supplier_posting_account = (
+                    supplier.supplier_account_code or supplier.posting_account
+                )
+            # A. Supplier default_nominal
             if not row.nominal_account_code and supplier.default_nominal:
                 row.nominal_account_code = supplier.default_nominal
+                logger.debug(
+                    "Nominal [A-supplier-default]: %r → %r",
+                    supplier.supplier_name, row.nominal_account_code,
+                )
+
+    # B. Supplier historical nominal (requires a matched supplier)
+    if not row.nominal_account_code and matched_supplier_name:
+        hist_nominal = _get_supplier_historical_nominal(
+            db, tenant_id, company_id, matched_supplier_name
+        )
+        if hist_nominal:
+            row.nominal_account_code = hist_nominal
+            logger.debug(
+                "Nominal [B-historical]: %r → %r", matched_supplier_name, hist_nominal
+            )
 
     if not row.nominal_account_code:
         accounts = (
@@ -149,17 +255,21 @@ def _apply_account_suggestions(db: Session, tenant_id, company_id, row: InvoiceR
         )
         default_account = next((a for a in accounts if a.is_default), None)
 
-        # 1. Keyword match: account name or code appears in the description
+        # C. Keyword match: account name or code appears in the description
         if row.description:
             desc_lower = row.description.lower()
             for account in accounts:
-                if account.account_name.lower() in desc_lower or account.account_code.lower() in desc_lower:
+                if (
+                    account.account_name.lower() in desc_lower
+                    or account.account_code.lower() in desc_lower
+                ):
                     row.nominal_account_code = account.account_code
+                    logger.debug(
+                        "Nominal [C-keyword]: desc=%r → %r", row.description, account.account_code
+                    )
                     break
 
-        # 2. Brand/product taxonomy: match known brands to a category hint, then
-        #    find a nominal account whose name contains that category keyword.
-        #    Searches both description and raw line items text for brand names.
+        # D. Brand/product taxonomy
         if not row.nominal_account_code:
             search_text = " ".join(filter(None, [row.description, row.line_items_raw]))
             category_hint = _category_hint_from_text(search_text)
@@ -169,16 +279,17 @@ def _apply_account_suggestions(db: Session, tenant_id, company_id, row: InvoiceR
                     if hint_lower in account.account_name.lower():
                         row.nominal_account_code = account.account_code
                         logger.debug(
-                            "Brand taxonomy match: category=%r → account=%r for desc=%r",
+                            "Nominal [D-taxonomy]: category=%r → %r for desc=%r",
                             category_hint, account.account_code, row.description,
                         )
                         break
 
-        # 3. Fall back to the marked default account
+        # E. Default account fallback
         if not row.nominal_account_code and default_account:
             row.nominal_account_code = default_account.account_code
+            logger.debug("Nominal [E-default]: %r", default_account.account_code)
 
-    # If still no nominal (e.g. no description and no accounts loaded yet), try default directly
+    # Final safety net: direct query for is_default if still nothing
     if not row.nominal_account_code:
         default_account = (
             db.query(TenantNominalAccount)
@@ -577,6 +688,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 db, tenant_id, batch.company_id, header_text
                             )
                             supplier_name = r.get("supplier_name")
+                            supplier_vat  = r.get("supplier_vat")
                             if pattern_supplier:
                                 supplier_name = pattern_supplier.supplier_name
                                 logger.debug(
@@ -606,11 +718,16 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 confidence_score=r.get("confidence_score"),
                                 validation_status=r.get("validation_status"),
                                 review_required=r.get("review_required", False),
+                                review_reasons=r.get("review_reasons"),
+                                page_quality_score=r.get("page_quality_score"),
                                 header_raw=r.get("header_raw"),
                                 totals_raw=r.get("totals_raw"),
                                 page_text_raw=r.get("page_text_raw"),
                             )
-                            _apply_account_suggestions(db, tenant_id, batch.company_id, row)
+                            _apply_account_suggestions(
+                                db, tenant_id, batch.company_id, row,
+                                supplier_vat=supplier_vat,
+                            )
                             db.add(row)
                             inserted_rows += 1
                             total_rows += 1

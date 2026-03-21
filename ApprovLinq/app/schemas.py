@@ -298,6 +298,8 @@ class InvoiceRowOut(BaseModel):
     confidence_score: float | None = None
     validation_status: str | None = None
     review_required: bool
+    review_reasons: str | None = None
+    page_quality_score: float | None = None
     header_raw: str | None = None
     totals_raw: str | None = None
     page_text_raw: str | None = None

@@ -29,6 +29,175 @@ def count_meaningful_chars(text: str) -> int:
     return len(re.findall(r"[A-Za-z0-9]", text or ""))
 
 
+def preprocess_page_image(jpeg_bytes: bytes) -> tuple[bytes, float]:
+    """Stage 1 image preprocessing: enhance contrast, reduce bleed-through noise,
+    and score page quality.
+
+    Returns:
+        (processed_jpeg_bytes, quality_score 0.0–1.0)
+
+    Quality score:
+        • 0.8–1.0 — clear, high-contrast scan
+        • 0.5–0.8 — usable but may have noise or low contrast
+        • 0.0–0.5 — poor quality; likely bleed-through, rotation, or low ink
+    """
+    try:
+        import io
+        import statistics
+        from PIL import Image, ImageEnhance, ImageFilter
+
+        img = Image.open(io.BytesIO(jpeg_bytes))
+
+        # Ensure RGB for consistent processing
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+
+        # ── Quality scoring (from grayscale pixel distribution) ────────────
+        gray = img.convert("L")
+        pixels = list(gray.getdata())
+        mean_px = sum(pixels) / max(len(pixels), 1)
+        try:
+            std_px = statistics.stdev(pixels)
+        except statistics.StatisticsError:
+            std_px = 0.0
+        # High std = high contrast = good scan; mid-range brightness is ideal
+        contrast_score = min(std_px / 75.0, 1.0)
+        brightness_score = 1.0 - abs(mean_px - 128.0) / 128.0
+        quality_score = round(contrast_score * 0.65 + brightness_score * 0.35, 2)
+
+        # ── Enhancement pass ───────────────────────────────────────────────
+        # 1. Contrast boost — helps faded/low-ink scans
+        img = ImageEnhance.Contrast(img).enhance(1.45)
+
+        # 2. Sharpness boost — helps blurry or low-res scans
+        img = ImageEnhance.Sharpness(img).enhance(1.25)
+
+        # 3. Bleed-through suppression — a median filter reduces the
+        #    fine-grained noise caused by ink from the reverse side of
+        #    thin paper showing through.  Size=3 is fast and effective.
+        img = img.filter(ImageFilter.MedianFilter(size=3))
+
+        # 4. Brightness normalisation — very dark scans get a gentle lift
+        if mean_px < 100:
+            img = ImageEnhance.Brightness(img).enhance(1.2)
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=88, optimize=True)
+        processed = buf.getvalue()
+
+        logger.debug(
+            "preprocess_page_image: quality=%.2f (contrast=%.2f brightness=%.2f) "
+            "input=%d bytes output=%d bytes",
+            quality_score, contrast_score, brightness_score,
+            len(jpeg_bytes), len(processed),
+        )
+        return processed, quality_score
+
+    except Exception as exc:
+        logger.warning("preprocess_page_image failed (using original): %s", exc)
+        return jpeg_bytes, 0.5
+
+
+def _check_deposit_component(
+    net: float | None,
+    vat: float | None,
+    total: float | None,
+) -> tuple[bool, float]:
+    """Check whether a totals mismatch is plausibly explained by a deposit
+    or returnable-container component (e.g. BCRS in Malta).
+
+    Returns:
+        (True, deposit_amount) if a deposit is the likely cause.
+        (False, 0.0)           otherwise.
+
+    Heuristic: the unexplained difference is positive (additional charge),
+    small (≤ €25), and lands on a "round" value (whole euro or 50-cent
+    multiples) — consistent with per-unit BCRS / deposit charges.
+    """
+    if net is None or total is None:
+        return False, 0.0
+    vat_val = float(vat or 0.0)
+    diff = round(float(total) - (float(net) + vat_val), 2)
+    if 0.01 <= diff <= 25.00:
+        # Round-number check: whole euro, 50c, 25c, or 10c multiples
+        if round(diff % 1.0, 2) in (0.0, 0.10, 0.25, 0.50, 0.75):
+            return True, diff
+    return False, 0.0
+
+
+def _collect_review_reasons(
+    extracted: dict[str, Any],
+    validation_result: dict[str, Any] | None,
+) -> list[str]:
+    """Compute a list of specific reason codes explaining why this invoice
+    row may need human review.
+
+    Reason codes (pipe-joined when stored):
+        no_supplier             — supplier name could not be extracted
+        invoice_number_missing  — invoice number absent or looks like a label
+        no_amount               — total amount is missing
+        ambiguous_date_locale   — date is ambiguous (day == month, both ≤ 12)
+        vat_missing             — total > net but no VAT captured
+        vat_anomaly             — VAT rate is implausible (> 35% or < 2%)
+        totals_mismatch         — net + vat ≠ total (beyond tolerance)
+        deposit_component_detected:<amount> — mismatch explained by deposit
+        ai_validation_failed    — OpenAI validation pass returned 'failed'
+        ai_validation_warned    — OpenAI validation pass returned warnings
+        low_confidence          — overall confidence < 0.55
+    """
+    reasons: list[str] = []
+
+    if not extracted.get("supplier_name"):
+        reasons.append("no_supplier")
+
+    if suspicious_invoice_number(extracted.get("invoice_number")):
+        reasons.append("invoice_number_missing")
+
+    if extracted.get("total_amount") is None:
+        reasons.append("no_amount")
+
+    # Ambiguous date: both day AND month ≤ 12 (could be read either way)
+    d = extracted.get("invoice_date")
+    if d and hasattr(d, "day"):
+        if d.day <= 12 and d.month <= 12 and d.day != d.month:
+            reasons.append("ambiguous_date_locale")
+
+    net = extracted.get("net_amount")
+    vat = extracted.get("vat_amount")
+    total = extracted.get("total_amount")
+
+    if net is not None and total is not None and vat is None:
+        if float(total) > float(net) * 1.02:
+            reasons.append("vat_missing")
+
+    if net is not None and vat is not None and float(net) > 0:
+        vat_rate = float(vat) / float(net)
+        if vat_rate > 0.35 or (0.0 < vat_rate < 0.015):
+            reasons.append("vat_anomaly")
+
+    if net is not None and vat is not None and total is not None:
+        diff = abs((float(net) + float(vat)) - float(total))
+        if diff > 0.10:
+            is_deposit, deposit_amt = _check_deposit_component(net, vat, total)
+            if is_deposit:
+                reasons.append(f"deposit_component_detected:{deposit_amt:.2f}")
+            else:
+                reasons.append("totals_mismatch")
+
+    if validation_result:
+        vs = validation_result.get("validated_status", "passed")
+        if vs == "failed":
+            reasons.append("ai_validation_failed")
+        elif vs == "passed_with_warnings":
+            reasons.append("ai_validation_warned")
+
+    conf = extracted.get("_confidence")
+    if conf is not None and float(conf) < 0.55:
+        reasons.append("low_confidence")
+
+    return reasons
+
+
 def parse_amount(value: str | None) -> float | None:
     if not value:
         return None
@@ -1681,22 +1850,43 @@ def process_pdf_page(
     openai_api_key: str | None = None,
     account_company_name: str | None = None,
 ) -> dict[str, Any]:
+    """Extract invoice data from a single PDF page.
+
+    Pipeline stages
+    ───────────────
+    Stage 1 — Acquire + preprocess + quality score
+        Render the page to JPEG, apply image enhancement (contrast boost,
+        sharpness boost, bleed-through suppression) and compute a quality
+        score (0.0–1.0) that feeds into later confidence blending.
+
+    Stage 2 — Field extraction
+        Rule-based pass (always) → Azure Document Intelligence (primary AI)
+        → OpenAI vision (first fallback) → OpenAI text (second fallback).
+
+    Stage 3 — Line normalization
+        Net→Total fallback for zero-VAT invoices; deposit/BCRS component
+        detection when totals don't reconcile; supplier name normalisation.
+
+    Stage 4 — Accounting classification preparation
+        Confidence scoring (rule-based + AI section scores + quality penalty),
+        review reason code collection, validation_status assignment, and
+        header/totals evidence strings for the UI.
+    """
     pdf_path = Path(pdf_path)
 
-    # Stage 1 — Fast native text extraction (no API cost, always runs).
+    # ─────────────────────────────────────────────────────────────────────────
+    # STAGE 1 — Document acquisition, preprocessing & quality assessment
+    # ─────────────────────────────────────────────────────────────────────────
+    logger.debug("Stage 1: acquiring page %d from %s", page_index, pdf_path.name)
+
     native_text = extract_native_pdf_page(pdf_path, page_index)
     method = "native_text"
+    page_quality_score: float = 0.5  # default until we render the image
 
-    # When OpenAI vision is available we send the rendered image directly to
-    # the AI, which reads the text from the image itself — so we do NOT need
-    # OCR.  OCR is only needed as a last resort when both vision and native
-    # text fail to produce enough content.
     use_vision = bool(settings.use_openai and openai_api_key)
-
-    final_text = native_text  # used for rule-based pass and fallback
+    final_text = native_text
 
     if not use_vision:
-        # No vision — run OCR if native text is thin
         ocr_backend = get_ocr_backend()
         if count_meaningful_chars(native_text) < 80 and ocr_backend is not None:
             try:
@@ -1713,7 +1903,12 @@ def process_pdf_page(
         final_text = "(page text unavailable)"
         method = f"{method}_empty"
 
-    # Stage 2 — Rule-based extraction from whatever text we have.
+    # ─────────────────────────────────────────────────────────────────────────
+    # STAGE 2 — Field extraction
+    # ─────────────────────────────────────────────────────────────────────────
+    logger.debug("Stage 2: field extraction for page %d", page_index)
+
+    # 2a — Rule-based baseline (no API cost, instant)
     extracted = simple_extract(
         final_text,
         openai_api_key=openai_api_key,
@@ -1726,22 +1921,30 @@ def process_pdf_page(
         logger.debug("Azure DI skipped: %s", _di_reason)
 
     if use_azure_di or use_vision:
-        # ── Render the page to raw JPEG bytes (shared by Azure DI and OpenAI vision)
+        # Render page → JPEG (shared by Azure DI and OpenAI vision).
+        # Apply preprocessing to improve extraction accuracy on low-quality scans.
         try:
-            jpeg_bytes = OCRBackend.render_pdf_page_to_jpeg_bytes(
+            raw_jpeg = OCRBackend.render_pdf_page_to_jpeg_bytes(
                 pdf_path, page_index, scale=1.5, quality=80
             )
-            if jpeg_bytes and len(jpeg_bytes) > 4 * 1024 * 1024:
-                jpeg_bytes = OCRBackend.render_pdf_page_to_jpeg_bytes(
+            if raw_jpeg and len(raw_jpeg) > 4 * 1024 * 1024:
+                raw_jpeg = OCRBackend.render_pdf_page_to_jpeg_bytes(
                     pdf_path, page_index, scale=1.0, quality=60
                 )
         except Exception as exc:
             logger.warning("JPEG render failed p%d: %s", page_index, exc)
+            raw_jpeg = None
+
+        # Stage 1 preprocessing applied once we have the JPEG
+        if raw_jpeg:
+            jpeg_bytes, page_quality_score = preprocess_page_image(raw_jpeg)
+            logger.debug("Page %d quality score: %.2f", page_index, page_quality_score)
+        else:
             jpeg_bytes = None
 
         ai_fields = None
 
-        # ── Stage 3a: Azure Document Intelligence (primary, highest accuracy) ──
+        # 2b — Azure Document Intelligence (primary — highest accuracy)
         if use_azure_di and jpeg_bytes:
             ai_fields = azure_di_extract_invoice(
                 jpeg_bytes,
@@ -1753,7 +1956,7 @@ def process_pdf_page(
                 method = f"{method}+azure_di"
                 logger.info("Azure DI extraction succeeded for page %d", page_index)
 
-        # ── Stage 3b: OpenAI vision (fallback if Azure DI not available/failed) ─
+        # 2c — OpenAI vision (fallback when Azure DI unavailable or returned nothing)
         if ai_fields is None and use_vision and jpeg_bytes:
             jpeg_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
             ai_fields = openai_extract_invoice_vision(
@@ -1767,7 +1970,7 @@ def process_pdf_page(
                 extracted = merge_ai_fields(extracted, ai_fields, account_company_name)
                 method = f"{method}+vision"
 
-        # ── Stage 3c: Text-only AI (fallback when image unavailable) ────────────
+        # 2d — Text-only AI (second fallback when image unavailable)
         if ai_fields is None and use_vision:
             logger.info("Image unavailable p%d — text-only AI fallback", page_index)
             _text_for_ai = final_text if count_meaningful_chars(final_text) >= 20 else native_text
@@ -1781,7 +1984,7 @@ def process_pdf_page(
                     extracted = merge_ai_fields(extracted, ai_fields, account_company_name)
                     method = f"{method}+openai_text"
 
-        # ── Stage 4: OpenAI validation pass (runs after Azure DI too if available)
+        # 2e — OpenAI validation pass (cross-checks the merged result)
         if use_vision and openai_api_key:
             validation_result = openai_validate_extraction(
                 native_text or final_text,
@@ -1793,11 +1996,12 @@ def process_pdf_page(
                 extracted["_validation_result"] = validation_result
                 method = f"{method}+validated"
 
-    # ── Net → Total fallback ─────────────────────────────────────────────────
-    # On subscription / zero-VAT invoices (reverse charge, VAT-exempt, SaaS)
-    # the invoice often has only one amount with no explicit "Total" label.
-    # If we have a net_amount but total_amount is still null AND vat is absent
-    # or zero, treat net as the total — it's the only amount on the document.
+    # ─────────────────────────────────────────────────────────────────────────
+    # STAGE 3 — Line normalization
+    # ─────────────────────────────────────────────────────────────────────────
+    logger.debug("Stage 3: line normalization for page %d", page_index)
+
+    # 3a — Net → Total fallback for zero-VAT / subscription / reverse-charge invoices
     if (
         extracted.get("total_amount") is None
         and extracted.get("net_amount") is not None
@@ -1806,15 +2010,36 @@ def process_pdf_page(
         extracted["total_amount"] = extracted["net_amount"]
         logger.debug("Net→Total fallback applied: total set to %.2f", extracted["net_amount"])
 
-    # -------------------------------------------------------------------------
-    # Stage 5 — confidence scoring & business rule checks
-    # -------------------------------------------------------------------------
-    # Per-section scores from the AI response (0.0 if not available)
-    ai_conf = extracted.get("ai_confidence") or {}
-    supplier_conf = float(ai_conf.get("supplier", 0.0))
-    totals_conf = float(ai_conf.get("totals", 0.0))
+    # 3b — Deposit/BCRS detection: flag mismatches that are explained by a
+    #      returnable-container or deposit surcharge rather than an error.
+    net_s3  = extracted.get("net_amount")
+    vat_s3  = extracted.get("vat_amount")
+    tot_s3  = extracted.get("total_amount")
+    if net_s3 is not None and tot_s3 is not None and vat_s3 is not None:
+        diff_s3 = abs((float(net_s3) + float(vat_s3)) - float(tot_s3))
+        if diff_s3 > 0.10:
+            is_dep, dep_amt = _check_deposit_component(net_s3, vat_s3, tot_s3)
+            if is_dep:
+                extracted["_deposit_component"] = dep_amt
+                logger.debug(
+                    "Deposit component detected on page %d: %.2f", page_index, dep_amt
+                )
 
-    # Rule-based component scores (always computed regardless of AI)
+    # 3c — Supplier name OCR normalisation
+    extracted["supplier_name"] = normalise_company_name(
+        _clean_ocr_supplier_name(extracted.get("supplier_name"))
+    )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STAGE 4 — Accounting classification preparation
+    # ─────────────────────────────────────────────────────────────────────────
+    logger.debug("Stage 4: accounting prep for page %d", page_index)
+
+    # 4a — Confidence scoring
+    ai_conf       = extracted.get("ai_confidence") or {}
+    supplier_conf = float(ai_conf.get("supplier", 0.0))
+    totals_conf   = float(ai_conf.get("totals", 0.0))
+
     rule_score = 0.0
     if extracted.get("supplier_name"):
         rule_score += 0.20
@@ -1828,84 +2053,89 @@ def process_pdf_page(
         rule_score += 0.10
     if extracted.get("vat_amount") is not None:
         rule_score += 0.10
-    # Arithmetic reconciliation bonus
     if (
         extracted.get("net_amount") is not None
         and extracted.get("vat_amount") is not None
         and extracted.get("total_amount") is not None
-        and round((extracted["net_amount"] + extracted["vat_amount"]) - extracted["total_amount"], 2) == 0
+        and round(
+            (extracted["net_amount"] + extracted["vat_amount"]) - extracted["total_amount"], 2
+        ) == 0
     ):
         rule_score = min(rule_score + 0.05, 1.0)
 
-    # Blend: when AI section scores are available, weight them alongside rules
     if ai_conf:
-        ai_overall = (supplier_conf * 0.35 + totals_conf * 0.35
-                      + float(ai_conf.get("lines", 0.0)) * 0.15
-                      + float(ai_conf.get("customer", 0.0)) * 0.15)
+        ai_overall = (
+            supplier_conf * 0.35
+            + totals_conf * 0.35
+            + float(ai_conf.get("lines", 0.0)) * 0.15
+            + float(ai_conf.get("customer", 0.0)) * 0.15
+        )
         confidence = round(min(rule_score * 0.50 + ai_overall * 0.50, 0.99), 2)
     else:
         confidence = round(min(rule_score, 0.99), 2)
 
-    # Validation pass can downgrade or confirm status
+    # Apply a small quality penalty for very poor scans
+    if page_quality_score < 0.35:
+        confidence = round(max(confidence - 0.08, 0.0), 2)
+
+    extracted["_confidence"] = confidence  # used by _collect_review_reasons
+
+    # 4b — Validation pass result
     validation_result = extracted.pop("_validation_result", None)
-    val_status = validation_result.get("validated_status", "passed") if validation_result else None
+    val_status = (
+        validation_result.get("validated_status", "passed") if validation_result else None
+    )
     val_issues = (validation_result.get("issues") or []) if validation_result else []
 
-    # ── Smart review flagging ─────────────────────────────────────────────────
-    # Review is only required for CRITICAL issues that prevent posting:
-    #   • Missing supplier name  (can't post without knowing who issued it)
-    #   • Missing total amount   (can't process payment without a value)
-    #   • Hard AI validation failure
-    # Medium/low confidence on a COMPLETE extraction is not a reason to block —
-    # it generates a warning status instead so accountants can spot-check
-    # without being forced to open every invoice.
+    # 4c — Review reason codes
+    review_reasons_list = _collect_review_reasons(extracted, validation_result)
+    review_reasons_str  = "|".join(review_reasons_list) if review_reasons_list else None
+    extracted.pop("_confidence", None)
+
+    # 4d — validation_status / review_required (primary status for the UI)
     missing_supplier = not extracted.get("supplier_name")
     missing_amount   = extracted.get("total_amount") is None
 
     if val_status == "failed":
-        final_status   = "review_validation_failed"
+        final_status    = "review_validation_failed"
         review_required = True
     elif missing_supplier and missing_amount:
-        final_status   = "review_incomplete"
+        final_status    = "review_incomplete"
         review_required = True
     elif missing_supplier:
-        final_status   = "review_no_supplier"
+        final_status    = "review_no_supplier"
         review_required = True
     elif missing_amount:
-        final_status   = "review_no_amount"
+        final_status    = "review_no_amount"
         review_required = True
-    elif val_status == "passed_with_warnings":
-        final_status   = "ok_warned"
+    elif review_reasons_list and any(
+        r in review_reasons_list for r in ("totals_mismatch", "vat_anomaly")
+    ):
+        final_status    = "review_validation_failed"
+        review_required = True
+    elif val_status == "passed_with_warnings" or "ai_validation_warned" in review_reasons_list:
+        final_status    = "ok_warned"
         review_required = False
     elif confidence < 0.65:
-        final_status   = "ok_warned"
+        final_status    = "ok_warned"
         review_required = False
     else:
-        final_status   = "ok"
+        final_status    = "ok"
         review_required = False
 
-    # Merge any validation issues into ai_issues
+    # 4e — Merge all issues
     all_issues = list(extracted.get("ai_issues") or []) + val_issues
     if all_issues:
         extracted["ai_issues"] = all_issues
 
-    # extraction_status from AI or derived
     if not extracted.get("extraction_status"):
         extracted["extraction_status"] = (
-            "complete" if confidence >= 0.80
-            else "partial" if confidence >= 0.50
+            "complete"        if confidence >= 0.80
+            else "partial"    if confidence >= 0.50
             else "review_required"
         )
 
-    # Ensure supplier name has OCR artefacts removed and casing normalised.
-    extracted["supplier_name"] = normalise_company_name(
-        _clean_ocr_supplier_name(extracted.get("supplier_name"))
-    )
-
-    # ── Build header/totals evidence strings ─────────────────────────────────
-    # When the page has no usable text layer (scanned image), final_text is
-    # "(page text unavailable)".  Synthesize readable evidence from what the
-    # AI actually extracted so that reviewers can see what was found.
+    # 4f — Build header/totals evidence strings for the review UI
     _text_is_unavailable = (
         not final_text
         or count_meaningful_chars(final_text) < 20
@@ -1913,7 +2143,6 @@ def process_pdf_page(
     )
 
     if _text_is_unavailable:
-        # Synthesize header from extracted fields
         _header_parts: list[str] = []
         if extracted.get("supplier_name"):
             _header_parts.append(f"Supplier: {extracted['supplier_name']}")
@@ -1925,9 +2154,10 @@ def process_pdf_page(
             _header_parts.append(f"Date: {extracted['invoice_date']}")
         if extracted.get("customer_name"):
             _header_parts.append(f"Customer: {extracted['customer_name']}")
-        header_raw = " | ".join(_header_parts) if _header_parts else f"[Scanned — extracted via {method}]"
-
-        # Synthesize totals from extracted amounts
+        header_raw = (
+            " | ".join(_header_parts) if _header_parts
+            else f"[Scanned — extracted via {method}]"
+        )
         _totals_parts: list[str] = []
         if extracted.get("net_amount") is not None:
             _totals_parts.append(f"Net: {extracted['net_amount']:.2f}")
@@ -1937,23 +2167,24 @@ def process_pdf_page(
             _totals_parts.append(f"Total: {extracted['total_amount']:.2f}")
         if extracted.get("currency"):
             _totals_parts.append(f"Currency: {extracted['currency']}")
-        totals_raw = " | ".join(_totals_parts) if _totals_parts else None
-
+        totals_raw    = " | ".join(_totals_parts) if _totals_parts else None
         page_text_raw = f"[Scanned page — no text layer — extracted via {method}]\n" + header_raw
     else:
-        header_raw = "\n".join(final_text.splitlines()[:12])
-        totals_raw = "\n".join(final_text.splitlines()[-10:])
+        header_raw    = "\n".join(final_text.splitlines()[:12])
+        totals_raw    = "\n".join(final_text.splitlines()[-10:])
         page_text_raw = final_text[:20000]
 
     extracted.update({
-        "page_no": page_index + 1,
-        "method_used": method,
-        "confidence_score": confidence,
+        "page_no":           page_index + 1,
+        "method_used":       method,
+        "confidence_score":  confidence,
         "validation_status": final_status,
-        "review_required": review_required,
-        "header_raw": header_raw,
-        "totals_raw": totals_raw,
-        "page_text_raw": page_text_raw,
+        "review_required":   review_required,
+        "review_reasons":    review_reasons_str,
+        "page_quality_score": round(page_quality_score, 2),
+        "header_raw":        header_raw,
+        "totals_raw":        totals_raw,
+        "page_text_raw":     page_text_raw,
     })
     return extracted
 

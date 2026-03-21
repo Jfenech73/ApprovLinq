@@ -48,5 +48,20 @@ Secrets:
 - `POST /batches/{id}/process` - Process invoices
 - `GET /batches/{id}/export.xlsx` - Export to Excel
 
+## Extraction Pipeline (4-Stage)
+`process_pdf_page` in `app/services/extractor.py`:
+1. **Stage 1** — Acquire + preprocess + quality score (PIL contrast/sharpness/bleed-suppression, quality 0–1)
+2. **Stage 2** — Field extraction: rule-based → Azure DI (primary) → OpenAI vision → OpenAI text → validation pass
+3. **Stage 3** — Line normalization: Net→Total fallback, deposit/BCRS detection, supplier name normalisation
+4. **Stage 4** — Accounting prep: confidence scoring (with quality penalty), review reason codes, validation_status, evidence strings
+
+## Nominal Account Classification (Hybrid Order in batches.py)
+`_apply_account_suggestions`: VAT match → fuzzy name → A. supplier default_nominal → B. historical nominal → C. keyword → D. brand taxonomy → E. is_default fallback
+
+## Key DB Columns (v3.80+)
+- `tenant_suppliers.vat_number` — supplier VAT for authoritative matching
+- `invoice_rows.review_reasons` — pipe-separated reason codes (no_supplier, invoice_number_missing, vat_anomaly, totals_mismatch, deposit_component_detected, etc.)
+- `invoice_rows.page_quality_score` — scan quality 0.0–1.0
+
 ## Deployment
 Configured for autoscale deployment on Replit.

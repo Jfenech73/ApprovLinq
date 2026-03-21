@@ -71,6 +71,13 @@ def ensure_runtime_schema() -> None:
         "ALTER TABLE invoice_rows ALTER COLUMN method_used TYPE VARCHAR(200)",
         "UPDATE invoice_rows AS r SET company_id = b.company_id FROM invoice_batches AS b WHERE r.company_id IS NULL AND b.id = r.batch_id",
 
+        # ── tenant_suppliers — new columns ───────────────────────────────────
+        "ALTER TABLE tenant_suppliers ADD COLUMN IF NOT EXISTS vat_number VARCHAR(100)",
+
+        # ── invoice_rows — new columns ────────────────────────────────────────
+        "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS review_reasons VARCHAR(500)",
+        "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS page_quality_score NUMERIC(4,2)",
+
         # ── supplier_patterns (new table) ────────────────────────────────────
         (
             "CREATE TABLE IF NOT EXISTS supplier_patterns ("
