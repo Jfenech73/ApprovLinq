@@ -1,7 +1,8 @@
 -- =============================================================================
 -- ApprovLinq Invoice Scanner Service — Complete Database Schema
--- Safe to run on a fresh database OR an existing one (all statements are
--- idempotent: CREATE IF NOT EXISTS, ADD COLUMN IF NOT EXISTS, etc.)
+-- Safe to run on a fresh database OR an existing one.
+-- All statements are idempotent: CREATE IF NOT EXISTS, ADD COLUMN IF NOT EXISTS.
+-- NO dollar-quoted DO blocks — compatible with all SQL editors including Neon.
 -- =============================================================================
 
 create extension if not exists pgcrypto;
@@ -90,20 +91,16 @@ create table if not exists companies (
 -- TENANT SUPPLIERS  (supplier master list per tenant + company)
 -- ---------------------------------------------------------------------------
 create table if not exists tenant_suppliers (
-    id                   bigserial    primary key,
-    tenant_id            uuid         not null references tenants(id)   on delete cascade,
-    company_id           uuid         not null references companies(id) on delete cascade,
+    id                    bigserial    primary key,
+    tenant_id             uuid         not null references tenants(id)   on delete cascade,
+    company_id            uuid         references companies(id) on delete cascade,
     supplier_account_code varchar(100),
-    supplier_name        varchar(255) not null,
-    default_nominal      varchar(100),
-    posting_account      varchar(100) not null,
-    is_active            boolean      not null default true,
-    created_at           timestamptz  not null default now(),
-    updated_at           timestamptz  not null default now(),
-    constraint uq_tenant_company_supplier_name
-        unique (tenant_id, company_id, supplier_name),
-    constraint uq_tenant_company_supplier_account_code
-        unique (tenant_id, company_id, supplier_account_code)
+    supplier_name         varchar(255) not null,
+    default_nominal       varchar(100),
+    posting_account       varchar(100) not null default '',
+    is_active             boolean      not null default true,
+    created_at            timestamptz  not null default now(),
+    updated_at            timestamptz  not null default now()
 );
 
 -- Back-fill columns added after initial release (safe on existing DBs)
@@ -116,11 +113,6 @@ create unique index if not exists ix_tenant_suppliers_tenant_company_account_cod
     on tenant_suppliers(tenant_id, company_id, supplier_account_code)
     where supplier_account_code is not null;
 
--- Legacy index without company_id (kept for backwards compat with old rows)
-create unique index if not exists ix_tenant_suppliers_tenant_account_code
-    on tenant_suppliers(tenant_id, supplier_account_code)
-    where supplier_account_code is not null and company_id is null;
-
 
 -- ---------------------------------------------------------------------------
 -- TENANT NOMINAL ACCOUNTS  (chart of accounts per tenant + company)
@@ -128,7 +120,7 @@ create unique index if not exists ix_tenant_suppliers_tenant_account_code
 create table if not exists tenant_nominal_accounts (
     id           bigserial    primary key,
     tenant_id    uuid         not null references tenants(id)   on delete cascade,
-    company_id   uuid         not null references companies(id) on delete cascade,
+    company_id   uuid         references companies(id) on delete cascade,
     account_code varchar(100) not null,
     account_name varchar(255) not null,
     is_active    boolean      not null default true,
@@ -139,8 +131,9 @@ create table if not exists tenant_nominal_accounts (
         unique (tenant_id, company_id, account_code)
 );
 
--- Back-fill column added after initial release
-alter table tenant_nominal_accounts add column if not exists company_id uuid references companies(id) on delete cascade;
+-- Back-fill columns added after initial release
+alter table tenant_nominal_accounts add column if not exists company_id  uuid references companies(id) on delete cascade;
+alter table tenant_nominal_accounts add column if not exists is_default  boolean not null default false;
 
 
 -- ---------------------------------------------------------------------------
@@ -178,26 +171,12 @@ create table if not exists invoice_batches (
 );
 
 -- Back-fill columns added after initial release
-alter table invoice_batches add column if not exists tenant_id    uuid references tenants(id)   on delete set null;
-alter table invoice_batches add column if not exists company_id   uuid references companies(id) on delete set null;
-alter table invoice_batches add column if not exists scan_mode    varchar(20) default 'summary';
+alter table invoice_batches add column if not exists tenant_id  uuid references tenants(id)   on delete set null;
+alter table invoice_batches add column if not exists company_id uuid references companies(id) on delete set null;
+alter table invoice_batches add column if not exists scan_mode  varchar(20) default 'summary';
 
 -- Ensure scan_mode is never NULL on old rows
 update invoice_batches set scan_mode = 'summary' where scan_mode is null;
-
--- Foreign key constraints (idempotent guard)
-do $$ begin
-    if not exists (select 1 from pg_constraint where conname = 'fk_invoice_batches_tenant') then
-        alter table invoice_batches
-            add constraint fk_invoice_batches_tenant
-            foreign key (tenant_id) references tenants(id) on delete set null;
-    end if;
-    if not exists (select 1 from pg_constraint where conname = 'fk_invoice_batches_company') then
-        alter table invoice_batches
-            add constraint fk_invoice_batches_company
-            foreign key (company_id) references companies(id) on delete set null;
-    end if;
-end $$;
 
 create index if not exists idx_invoice_batches_tenant_id  on invoice_batches(tenant_id);
 create index if not exists idx_invoice_batches_company_id on invoice_batches(company_id);
@@ -227,20 +206,6 @@ create table if not exists invoice_files (
 alter table invoice_files add column if not exists tenant_id       uuid references tenants(id)   on delete set null;
 alter table invoice_files add column if not exists company_id      uuid references companies(id) on delete set null;
 alter table invoice_files add column if not exists file_size_bytes integer;
-
--- Foreign key constraints (idempotent guard)
-do $$ begin
-    if not exists (select 1 from pg_constraint where conname = 'fk_invoice_files_tenant') then
-        alter table invoice_files
-            add constraint fk_invoice_files_tenant
-            foreign key (tenant_id) references tenants(id) on delete set null;
-    end if;
-    if not exists (select 1 from pg_constraint where conname = 'fk_invoice_files_company') then
-        alter table invoice_files
-            add constraint fk_invoice_files_company
-            foreign key (company_id) references companies(id) on delete set null;
-    end if;
-end $$;
 
 create index if not exists idx_invoice_files_batch_id   on invoice_files(batch_id);
 create index if not exists idx_invoice_files_tenant_id  on invoice_files(tenant_id);
@@ -288,27 +253,6 @@ alter table invoice_rows add column if not exists nominal_account_code    varcha
 
 -- Widen method_used if it was created as varchar(50) on older installs
 alter table invoice_rows alter column method_used type varchar(200);
-
--- Foreign key constraints (idempotent guard)
-do $$ begin
-    if not exists (select 1 from pg_constraint where conname = 'fk_invoice_rows_tenant') then
-        alter table invoice_rows
-            add constraint fk_invoice_rows_tenant
-            foreign key (tenant_id) references tenants(id) on delete set null;
-    end if;
-    if not exists (select 1 from pg_constraint where conname = 'fk_invoice_rows_company') then
-        alter table invoice_rows
-            add constraint fk_invoice_rows_company
-            foreign key (company_id) references companies(id) on delete set null;
-    end if;
-end $$;
-
--- Back-fill tenant_id from the batch's company where not set
-update invoice_rows as r
-set    tenant_id = c.tenant_id
-from   companies as c
-where  r.company_id = c.id
-  and  r.tenant_id is null;
 
 create index if not exists idx_invoice_rows_batch_id    on invoice_rows(batch_id);
 create index if not exists idx_invoice_rows_tenant_id   on invoice_rows(tenant_id);
