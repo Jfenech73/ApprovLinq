@@ -55,6 +55,10 @@ outputType = "webview"
 localPort = 5000
 externalPort = 80
 
+[[ports]]
+localPort = 5001
+externalPort = 3000
+
 [deployment]
 deploymentTarget = "autoscale"
-run = ["sh", "-c", "cd ApprovLinq && uvicorn app.main:app --host 0.0.0.0 --port 5000"]
+run = ["sh", "-c", "cd ApprovLinq && gunicorn --bind=0.0.0.0:5000 --reuse-port -k uvicorn.workers.UvicornWorker app.main:app"]
