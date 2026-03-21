@@ -137,26 +137,48 @@ def _apply_account_suggestions(db: Session, tenant_id, company_id, row: InvoiceR
             if not row.nominal_account_code and supplier.default_nominal:
                 row.nominal_account_code = supplier.default_nominal
 
-    if row.description and not row.nominal_account_code:
+    if not row.nominal_account_code:
         accounts = (
             db.query(TenantNominalAccount)
-            .filter(TenantNominalAccount.tenant_id == tenant_id, TenantNominalAccount.company_id == company_id, TenantNominalAccount.is_active.is_(True))
+            .filter(
+                TenantNominalAccount.tenant_id == tenant_id,
+                TenantNominalAccount.company_id == company_id,
+                TenantNominalAccount.is_active.is_(True),
+            )
             .all()
         )
-        text = row.description.lower()
-        default_account = None
-        for account in accounts:
-            if account.is_default:
-                default_account = account
-            if account.account_name.lower() in text or account.account_code.lower() in text:
-                row.nominal_account_code = account.account_code
-                break
+        default_account = next((a for a in accounts if a.is_default), None)
 
-        # If nothing matched by name/code, fall back to the marked default
+        # 1. Keyword match: account name or code appears in the description
+        if row.description:
+            desc_lower = row.description.lower()
+            for account in accounts:
+                if account.account_name.lower() in desc_lower or account.account_code.lower() in desc_lower:
+                    row.nominal_account_code = account.account_code
+                    break
+
+        # 2. Brand/product taxonomy: match known brands to a category hint, then
+        #    find a nominal account whose name contains that category keyword.
+        #    Searches both description and raw line items text for brand names.
+        if not row.nominal_account_code:
+            search_text = " ".join(filter(None, [row.description, row.line_items_raw]))
+            category_hint = _category_hint_from_text(search_text)
+            if category_hint:
+                hint_lower = category_hint.lower()
+                for account in accounts:
+                    if hint_lower in account.account_name.lower():
+                        row.nominal_account_code = account.account_code
+                        logger.debug(
+                            "Brand taxonomy match: category=%r → account=%r for desc=%r",
+                            category_hint, account.account_code, row.description,
+                        )
+                        break
+
+        # 3. Fall back to the marked default account
         if not row.nominal_account_code and default_account:
             row.nominal_account_code = default_account.account_code
 
-    # If still no nominal (e.g. no description), try the default account directly
+    # If still no nominal (e.g. no description and no accounts loaded yet), try default directly
     if not row.nominal_account_code:
         default_account = (
             db.query(TenantNominalAccount)
@@ -170,6 +192,75 @@ def _apply_account_suggestions(db: Session, tenant_id, company_id, row: InvoiceR
         )
         if default_account:
             row.nominal_account_code = default_account.account_code
+
+
+# Brand taxonomy: maps known brand/product keywords to accounting category hints.
+# These hints are used to search the tenant's nominal account names for a better
+# match than the generic default.  More specific entries take priority — the dict
+# is scanned in insertion order so put longer/more specific keys first.
+_BRAND_TAXONOMY: dict[str, str] = {
+    # Tobacco — any of these brands → look for a "Tobacco" nominal account
+    "rothmans": "Tobacco",
+    "pall mall": "Tobacco",
+    "du maurier": "Tobacco",
+    "lucky strike": "Tobacco",
+    "benson & hedges": "Tobacco",
+    "benson and hedges": "Tobacco",
+    "marlboro": "Tobacco",
+    "dunhill": "Tobacco",
+    "parliament": "Tobacco",
+    "chesterfield": "Tobacco",
+    "winston cigarette": "Tobacco",
+    "camel cigarette": "Tobacco",
+    "royals cigarette": "Tobacco",
+    # Alcohol / Spirits
+    "heineken": "Alcohol",
+    "carlsberg": "Alcohol",
+    "amstel": "Alcohol",
+    "corona beer": "Alcohol",
+    "guinness": "Alcohol",
+    "peroni": "Alcohol",
+    "cisk": "Alcohol",
+    "hopleaf": "Alcohol",
+    "jack daniel": "Alcohol",
+    "johnnie walker": "Alcohol",
+    "absolut vodka": "Alcohol",
+    "baileys": "Alcohol",
+    # Soft Drinks / Beverages
+    "coca cola": "Beverages",
+    "coke zero": "Beverages",
+    "pepsi cola": "Beverages",
+    "fanta": "Beverages",
+    "sprite": "Beverages",
+    "ribena": "Beverages",
+    "monster energy": "Beverages",
+    "red bull": "Beverages",
+    "lucozade": "Beverages",
+    "7up": "Beverages",
+    "kinnie": "Beverages",
+    "san pellegrino": "Beverages",
+    "acqua panna": "Beverages",
+    "evian": "Beverages",
+    # Food
+    "bigilla": "Food",
+    "baguette": "Food",
+    "ftira": "Food",
+    "olive oil": "Food",
+    "catering supplies": "Food",
+    "fresh seafood": "Food",
+    "fresh produce": "Food",
+}
+
+
+def _category_hint_from_text(text: str) -> str | None:
+    """Return a category hint if any known brand/product keyword appears in text."""
+    if not text:
+        return None
+    lower = text.lower()
+    for brand, category in _BRAND_TAXONOMY.items():
+        if brand in lower:
+            return category
+    return None
 
 
 _PATTERN_STOP_WORDS: frozenset[str] = frozenset({

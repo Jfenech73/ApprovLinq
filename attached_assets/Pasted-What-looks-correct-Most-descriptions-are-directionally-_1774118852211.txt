@@ -1,0 +1,242 @@
+What looks correct:
+
+Most descriptions are directionally right.
+Most totals are close or correct.
+Supplier recognition is often broadly correct even when noisy.
+The review logic is catching genuinely risky rows rather than random rows.
+
+What is clearly wrong or risky:
+
+Date parsing is inconsistent and often wrong because dd/mm/yyyy is being read as mm/dd/yyyy.
+Page 5 is shown in Excel as 2026-05-02, but the invoice shows 05/02/2026.
+Page 7 is shown as 2026-07-02, but the invoice shows 07/02/2026.
+Page 9 is shown as 2026-06-02, but the invoice shows 06/02/2026.
+Page 15 is shown as 2026-03-02, but the invoice shows 03/02/2026.
+Page 18 is shown as 2026-06-02, but the invoice shows 06/02/2026.
+Supplier names are dirty instead of standardized.
+Examples: N\nN Calleja Trading, 5\nJ.Sultana\nBeverages, Wines & Spirits, ฿ Br Supply Co., jbl\nJoseph Borg Ltd.
+These are OCR/layout artefacts and should not survive into final output.
+Invoice numbers are unreliable on some poor-quality pages.
+Page 1 looks especially weak because of bleed-through and low contrast.
+Page 12 appears to have no reliable invoice number extracted.
+VAT handling is incomplete.
+Some rows have vat_amount = None even where the invoice structure suggests tax logic should be evaluated.
+Some invoices include deposits or special charges, so total ≠ net + VAT unless you model those extra components.
+Header evidence is not being preserved.
+In Excel, header_raw, totals_raw, and page_text_raw are mostly (page text unavailable), which removes traceability and makes review harder.
+Accounting classification is too generic.
+Nearly everything is landing on nominal 5002 Purchases.
+For cigarette brands, the line AI should strongly infer a tobacco-related nominal or at least a tobacco review rule instead of generic purchases.
+
+The cigarette invoice is the best example of where your current approach needs another layer. On page 6, the lines clearly indicate tobacco products: Rothmans, Royals, Dunhill, Pall Mall, Du Maurier. The system extracted the brand text fairly well, but still assigned generic purchases. That means extraction is working better than classification.
+
+How to improve this properly with Azure Document Intelligence + OpenAI:
+
+1. Split the pipeline into 4 stages, not 1
+Use:
+
+document detection/orientation
+field extraction
+line normalization
+accounting classification
+
+Right now it feels like extraction and interpretation are too blended. Keep them separate.
+
+2. Add image preprocessing before Azure DI
+For scanned supplier invoices:
+
+auto-rotate
+deskew
+contrast boost
+background cleanup
+bleed-through suppression
+crop margins
+page-level quality scoring
+
+This will help a lot on pages 1–3 and the rotated pages.
+
+3. Force locale-aware date parsing
+Hard rule:
+
+default invoice dates to dd/mm/yyyy
+only allow mm/dd if supplier country and invoice format strongly support it
+if both day and month are ≤12, flag as ambiguous_date_locale
+store both raw_date_text and normalized_date
+
+This alone would remove several false review items.
+
+4. Standardize supplier names with a supplier master
+Create a supplier normalization layer:
+
+OCR name
+cleaned name
+matched master supplier
+confidence
+matched VAT number
+
+Example:
+
+5\nJ.Sultana\nBeverages, Wines & Spirits → J. Sultana Beverages, Wines & Spirits
+jbl\nJoseph Borg Ltd → Joseph Borg Ltd
+Br Supply Co. / B Br Supply Co. / ฿ Br Supply Co. → BR Supply Co.
+
+Best key for matching:
+
+VAT number
+supplier account number
+exact name
+fuzzy name match
+
+5. Build a product taxonomy layer for line interpretation
+This is the biggest improvement for your cigarette issue.
+
+Create a dictionary with:
+
+brand
+family
+category
+subcategory
+nominal account
+VAT expectation
+pack/unit hints
+supplier-specific aliases
+
+Example:
+
+Rothmans → Tobacco → Cigarettes → Tobacco Purchases
+Dunhill → Tobacco → Cigarettes → Tobacco Purchases
+Pall Mall → Tobacco → Cigarettes → Tobacco Purchases
+Ribena → Beverage → Soft Drinks
+Coca Cola Zero → Beverage → Soft Drinks
+Bigilla → Food → Dips/Preserves
+Baguette / Ftira → Bakery
+
+Then use AI only after dictionary matching, not before. The AI should interpret uncertain lines, but deterministic mapping should handle known brands first.
+
+6. Add supplier-specific catalog memory
+Per supplier, keep historical known products:
+
+Vernons: mayo, tuna, catering goods
+J. Sultana: water, soft drinks, beverages
+Maverick Trading: Monster, Ribena
+Dione Busuttil: cigarette brands
+
+This sharply improves line classification because the same supplier usually sells repeat product families.
+
+7. Use hybrid classification, not pure LLM classification
+Recommended order:
+
+rules
+supplier catalog lookup
+brand dictionary lookup
+embedding similarity against approved historical lines
+LLM only for unresolved cases
+
+That gives you higher precision and fewer hallucinations.
+
+8. Improve the review logic
+Do not send rows to review only because confidence is under a threshold. Use reason codes:
+
+ambiguous date
+uncertain supplier match
+invoice number missing
+totals mismatch
+unknown brand
+nominal mismatch
+VAT anomaly
+duplicate candidate
+deposit/returnable container component detected
+
+Then reviewers know exactly what to fix.
+
+9. Preserve structured evidence per field
+For each extracted field, keep:
+
+value
+source snippet
+bounding box / page region
+extraction method
+confidence
+
+Example:
+
+supplier_name = Vernons
+source_region = page 2 top-left header
+source_text = “vernons since 1955”
+confidence = 0.96
+
+This makes human review far faster than “page text unavailable”.
+
+10. Add line-level validation against totals
+For each invoice:
+
+sum parsed lines
+compare to subtotal
+compare VAT rate by category/supplier
+compare extra charges like BCRS deposits
+compare final total
+
+If mismatch:
+
+do not just flag the row
+identify the missing component, such as VAT, deposit, discount, or unread line
+
+For example page 15 likely includes a deposit component in addition to net and VAT, so the logic should model that instead of treating it as a mismatch.
+
+Best practical design for your use case:
+
+A. Extraction JSON
+
+supplier_raw
+supplier_clean
+supplier_master_id
+invoice_number_raw
+invoice_number_final
+invoice_date_raw
+invoice_date_final
+subtotal
+vat
+deposits
+total
+lines[]
+
+B. Line JSON
+
+raw_text
+cleaned_text
+brand
+category
+subtype
+quantity
+uom
+unit_price
+line_total
+nominal_suggested
+nominal_reason
+review_flag
+review_reason
+
+C. Classification rule
+If:
+
+supplier = Dione Busuttil
+and 2+ lines match cigarette brand dictionary
+then:
+nominal_suggested = Tobacco Purchases
+review only if confidence remains below threshold or if invoice contains mixed categories
+
+My view on your current result:
+
+Extraction quality: moderate
+Header quality: weak on bad scans
+Line understanding: fair
+Accounting interpretation: currently the weakest part
+Review engine: useful, but too broad and not reason-driven
+
+The fastest gains will come from:
+
+fixed date locale handling
+supplier normalization
+brand/category master for products
+supplier-specific product memory
+separating extraction from nominal-account assignment

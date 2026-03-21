@@ -611,6 +611,34 @@ def limit_to_20_words(text: str) -> str:
     return " ".join(words[:20]).strip()
 
 
+def _clean_ocr_supplier_name(name: str | None) -> str | None:
+    """Strip common OCR artefacts from a raw supplier name.
+
+    Handles cases that appear in scanned multi-column invoices:
+      "5\\nJ.Sultana\\nBeverages, Wines & Spirits" → "J. Sultana Beverages, Wines & Spirits"
+      "jbl\\nJoseph Borg Ltd."                     → "Joseph Borg Ltd."
+      "฿ Br Supply Co."                            → "Br Supply Co."
+      "N\\nN Calleja Trading"                       → "N Calleja Trading"
+    """
+    if not name:
+        return name
+    # Replace embedded newlines/carriage returns with a space
+    name = name.replace("\n", " ").replace("\r", " ")
+    # Strip leading non-uppercase junk (digits, symbols, short lowercase OCR words)
+    # before the first uppercase letter in the string.
+    # e.g. "5 J.Sultana" → "J.Sultana",  "jbl Joseph" → "Joseph", "฿ Br" → "Br"
+    name = re.sub(r"^[^A-Z]+(?=[A-Z])", "", name)
+    # If the name starts with "X Y..." where X is a single uppercase char and Y
+    # begins with the same letter (OCR duplicated initial), strip the lone prefix char.
+    # e.g. "N N Calleja Trading" → "N Calleja Trading"
+    m = re.match(r"^([A-Z])\s+([A-Z]\S.*)$", name)
+    if m and m.group(2).upper().startswith(m.group(1)):
+        name = m.group(2)
+    # Collapse multiple spaces
+    name = re.sub(r"\s+", " ", name).strip()
+    return name if len(name) >= 2 else None
+
+
 def normalise_company_name(name: str | None) -> str | None:
     """Normalise casing of a company name for consistent display.
 
@@ -903,7 +931,9 @@ def openai_extract_invoice_vision(
         "RULES:\n"
         "- Do not guess. Return null for any field you cannot determine with confidence.\n"
         "- Preserve original text for names and identifiers (no paraphrasing).\n"
-        "- Normalize dates to YYYY-MM-DD.\n"
+        "- Normalize dates to YYYY-MM-DD. IMPORTANT: These are European/Maltese invoices.\n"
+        "  Dates are printed as dd/mm/yyyy (day first). For example, 05/02/2026 means\n"
+        "  5 February 2026, NOT 2 May 2026. Always interpret ambiguous dates as dd/mm/yyyy.\n"
         "- Normalize amounts as plain decimal numbers (no symbols or commas).\n"
         "- NEVER confuse supplier and customer.\n"
         "- Never invent line items or amounts.\n\n"
@@ -1126,17 +1156,27 @@ def azure_di_extract_invoice(
     def _date(field) -> tuple[str | None, float]:
         if field is None:
             return None, 0.0
+        # Always get the raw content text first — it preserves the original
+        # date string as printed on the invoice (e.g. "05/02/2026").
+        raw_str = getattr(field, "content", None) or (field.get("content") if isinstance(field, dict) else None)
         try:
             val = field.value_date
         except AttributeError:
             val = field.get("valueDate") if isinstance(field, dict) else None
         conf = getattr(field, "confidence", None) or (field.get("confidence", 0.0) if isinstance(field, dict) else 0.0)
-        if val is None:
-            raw_str = getattr(field, "content", None) or (field.get("content") if isinstance(field, dict) else None)
-            val = parse_date(raw_str) if raw_str else None
-        else:
-            val = parse_date(str(val))
-        return val, float(conf or 0.0)
+        # Locale-aware fix: Azure DI may interpret dd/mm/yyyy dates as mm/dd/yyyy
+        # (US format). Re-parsing the raw content string with parse_date() fixes
+        # this because parse_date() tries %d/%m/%Y first (European/Maltese locale).
+        # Example: Azure DI returns 2026-05-02 for "05/02/2026", but
+        # parse_date("05/02/2026") correctly returns 2026-02-05 (February 5).
+        if raw_str:
+            content_date = parse_date(raw_str.strip())
+            if content_date is not None:
+                return content_date, float(conf or 0.0)
+        # Fallback: use Azure DI's parsed value_date only if content re-parse failed
+        if val is not None:
+            return parse_date(str(val)), float(conf or 0.0)
+        return None, float(conf or 0.0)
 
     def _addr(field) -> str | None:
         if field is None:
@@ -1325,7 +1365,9 @@ def openai_extract_invoice_fields(
         "RULES:\n"
         "- Do not guess. Return null for any field you cannot determine with confidence.\n"
         "- Preserve original text for names and identifiers.\n"
-        "- Normalize dates to YYYY-MM-DD.\n"
+        "- Normalize dates to YYYY-MM-DD. IMPORTANT: These are European/Maltese invoices.\n"
+        "  Dates are printed as dd/mm/yyyy (day first). For example, 05/02/2026 means\n"
+        "  5 February 2026, NOT 2 May 2026. Always interpret ambiguous dates as dd/mm/yyyy.\n"
         "- Normalize amounts as plain decimal numbers (no currency symbols or commas).\n"
         "- Separate supplier vs customer STRICTLY — never confuse them.\n"
         "- Never invent line items or amounts.\n\n"
@@ -1586,8 +1628,10 @@ def merge_ai_fields(
         # Rule-based found something — upgrade to AI result if AI is sufficiently confident
         if ai_supplier and not suspicious_supplier_name(ai_supplier) and ai_supplier_conf >= conf_threshold:
             merged["supplier_name"] = ai_supplier
-    # Normalise casing: promote all-lowercase names to title case.
-    merged["supplier_name"] = normalise_company_name(merged.get("supplier_name"))
+    # Clean OCR artefacts (embedded newlines, leading junk chars) then normalise casing.
+    merged["supplier_name"] = normalise_company_name(
+        _clean_ocr_supplier_name(merged.get("supplier_name"))
+    )
 
     # -- Invoice number --------------------------------------------------------
     if suspicious_invoice_number(merged.get("invoice_number")) and ai.get("invoice_number"):
@@ -1853,8 +1897,53 @@ def process_pdf_page(
             else "review_required"
         )
 
-    # Ensure supplier name is never returned in all-lowercase
-    extracted["supplier_name"] = normalise_company_name(extracted.get("supplier_name"))
+    # Ensure supplier name has OCR artefacts removed and casing normalised.
+    extracted["supplier_name"] = normalise_company_name(
+        _clean_ocr_supplier_name(extracted.get("supplier_name"))
+    )
+
+    # ── Build header/totals evidence strings ─────────────────────────────────
+    # When the page has no usable text layer (scanned image), final_text is
+    # "(page text unavailable)".  Synthesize readable evidence from what the
+    # AI actually extracted so that reviewers can see what was found.
+    _text_is_unavailable = (
+        not final_text
+        or count_meaningful_chars(final_text) < 20
+        or final_text.startswith("(page text unavailable")
+    )
+
+    if _text_is_unavailable:
+        # Synthesize header from extracted fields
+        _header_parts: list[str] = []
+        if extracted.get("supplier_name"):
+            _header_parts.append(f"Supplier: {extracted['supplier_name']}")
+        if extracted.get("supplier_vat"):
+            _header_parts.append(f"VAT No: {extracted['supplier_vat']}")
+        if extracted.get("invoice_number"):
+            _header_parts.append(f"Invoice No: {extracted['invoice_number']}")
+        if extracted.get("invoice_date"):
+            _header_parts.append(f"Date: {extracted['invoice_date']}")
+        if extracted.get("customer_name"):
+            _header_parts.append(f"Customer: {extracted['customer_name']}")
+        header_raw = " | ".join(_header_parts) if _header_parts else f"[Scanned — extracted via {method}]"
+
+        # Synthesize totals from extracted amounts
+        _totals_parts: list[str] = []
+        if extracted.get("net_amount") is not None:
+            _totals_parts.append(f"Net: {extracted['net_amount']:.2f}")
+        if extracted.get("vat_amount") is not None:
+            _totals_parts.append(f"VAT: {extracted['vat_amount']:.2f}")
+        if extracted.get("total_amount") is not None:
+            _totals_parts.append(f"Total: {extracted['total_amount']:.2f}")
+        if extracted.get("currency"):
+            _totals_parts.append(f"Currency: {extracted['currency']}")
+        totals_raw = " | ".join(_totals_parts) if _totals_parts else None
+
+        page_text_raw = f"[Scanned page — no text layer — extracted via {method}]\n" + header_raw
+    else:
+        header_raw = "\n".join(final_text.splitlines()[:12])
+        totals_raw = "\n".join(final_text.splitlines()[-10:])
+        page_text_raw = final_text[:20000]
 
     extracted.update({
         "page_no": page_index + 1,
@@ -1862,9 +1951,9 @@ def process_pdf_page(
         "confidence_score": confidence,
         "validation_status": final_status,
         "review_required": review_required,
-        "header_raw": "\n".join(final_text.splitlines()[:12]),
-        "totals_raw": "\n".join(final_text.splitlines()[-10:]) if final_text else None,
-        "page_text_raw": final_text[:20000],
+        "header_raw": header_raw,
+        "totals_raw": totals_raw,
+        "page_text_raw": page_text_raw,
     })
     return extracted
 
