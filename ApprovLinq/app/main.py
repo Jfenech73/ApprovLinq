@@ -76,7 +76,13 @@ def ensure_runtime_schema() -> None:
 
         # ── invoice_rows — new columns ────────────────────────────────────────
         "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS review_reasons VARCHAR(500)",
+        "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS review_priority VARCHAR(20)",
+        "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS review_fields VARCHAR(300)",
+        "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS auto_approved BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS page_quality_score NUMERIC(4,2)",
+        "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS classification_method VARCHAR(50)",
+        "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS supplier_match_method VARCHAR(50)",
+        "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS totals_reconciliation_status VARCHAR(50)",
 
         # ── supplier_patterns (new table) ────────────────────────────────────
         (

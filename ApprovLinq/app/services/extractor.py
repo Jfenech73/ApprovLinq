@@ -15,6 +15,20 @@ import requests
 from app.services.ocr import OCRBackend, OCRSpaceBackend, PaddleOCRBackend
 from app.config import settings
 
+# New pipeline modules — imported lazily inside functions to avoid circular deps
+# at module load time; direct imports kept here for type checking.
+try:
+    from app.services.parse_dates import parse_invoice_date, ParsedDate
+    from app.services.normalize_suppliers import normalize_supplier as _normalize_supplier
+    from app.services.validate_invoice import validate_invoice as _validate_invoice
+    from app.services.review_engine import compute_review_decision
+    from app.services.preprocess import preprocess_page as _preprocess_page
+    _NEW_MODULES_AVAILABLE = True
+except ImportError as _imp_err:
+    _NEW_MODULES_AVAILABLE = False
+    import logging as _log
+    _log.getLogger(__name__).warning("New pipeline modules not available: %s", _imp_err)
+
 logger = logging.getLogger(__name__)
 
 
@@ -2010,25 +2024,75 @@ def process_pdf_page(
         extracted["total_amount"] = extracted["net_amount"]
         logger.debug("Net→Total fallback applied: total set to %.2f", extracted["net_amount"])
 
-    # 3b — Deposit/BCRS detection: flag mismatches that are explained by a
-    #      returnable-container or deposit surcharge rather than an error.
-    net_s3  = extracted.get("net_amount")
-    vat_s3  = extracted.get("vat_amount")
-    tot_s3  = extracted.get("total_amount")
-    if net_s3 is not None and tot_s3 is not None and vat_s3 is not None:
-        diff_s3 = abs((float(net_s3) + float(vat_s3)) - float(tot_s3))
-        if diff_s3 > 0.10:
-            is_dep, dep_amt = _check_deposit_component(net_s3, vat_s3, tot_s3)
-            if is_dep:
-                extracted["_deposit_component"] = dep_amt
-                logger.debug(
-                    "Deposit component detected on page %d: %.2f", page_index, dep_amt
-                )
+    # 3b — Financial validation (replaces raw deposit-detection logic)
+    #      Uses the dedicated validate_invoice module for component-aware
+    #      reconciliation with structured reason codes.
+    _inv_validation = None
+    if _NEW_MODULES_AVAILABLE:
+        try:
+            _inv_validation = _validate_invoice(extracted)
+            if _inv_validation.deposit_amount:
+                extracted["_deposit_component"] = _inv_validation.deposit_amount
+            extracted["_totals_reconciliation_status"] = (
+                _inv_validation.totals_reconciliation_status
+            )
+            extracted["_validation_reasons"] = _inv_validation.review_reasons
+        except Exception as _ve:
+            logger.warning("validate_invoice failed on page %d: %s", page_index, _ve)
+    else:
+        # Fallback: legacy deposit detection
+        net_s3  = extracted.get("net_amount")
+        vat_s3  = extracted.get("vat_amount")
+        tot_s3  = extracted.get("total_amount")
+        if net_s3 is not None and tot_s3 is not None and vat_s3 is not None:
+            diff_s3 = abs((float(net_s3) + float(vat_s3)) - float(tot_s3))
+            if diff_s3 > 0.10:
+                is_dep, dep_amt = _check_deposit_component(net_s3, vat_s3, tot_s3)
+                if is_dep:
+                    extracted["_deposit_component"] = dep_amt
 
-    # 3c — Supplier name OCR normalisation
-    extracted["supplier_name"] = normalise_company_name(
-        _clean_ocr_supplier_name(extracted.get("supplier_name"))
+    # 3c — Supplier name normalisation
+    #      First apply the lightweight OCR artefact removal and casing fix,
+    #      then run the full supplier normalisation module which adds
+    #      match_method and canonical name from suppliers.yaml.
+    raw_supplier = extracted.get("supplier_name")
+    clean_supplier = normalise_company_name(
+        _clean_ocr_supplier_name(raw_supplier)
     )
+    extracted["supplier_name"] = clean_supplier
+    extracted["_supplier_name_raw"] = raw_supplier or ""
+
+    if _NEW_MODULES_AVAILABLE and clean_supplier:
+        try:
+            supplier_vat_s3 = extracted.get("supplier_vat")
+            _snorm = _normalize_supplier(clean_supplier, supplier_vat=supplier_vat_s3)
+            extracted["_supplier_norm"] = _snorm
+            extracted["_supplier_match_method"] = _snorm.match_method
+            # Prefer canonical name if we got a confident match
+            if _snorm.match_method in ("vat_match", "alias_match") or \
+               (_snorm.match_method == "fuzzy_match" and _snorm.match_confidence >= 0.75):
+                extracted["supplier_name"] = _snorm.canonical
+        except Exception as _sne:
+            logger.warning("normalize_supplier failed on page %d: %s", page_index, _sne)
+
+    # 3d — Date ambiguity detection
+    #      Check if the extracted invoice_date is potentially ambiguous
+    #      (day and month both ≤ 12, could be interpreted either way).
+    if _NEW_MODULES_AVAILABLE:
+        _raw_date_str = extracted.get("_invoice_date_raw") or str(
+            extracted.get("invoice_date") or ""
+        )
+        if _raw_date_str:
+            try:
+                _pd = parse_invoice_date(_raw_date_str)
+                extracted["_date_parse_strategy"] = _pd.parse_strategy
+                extracted["_date_ambiguity_flag"] = _pd.ambiguity_flag
+                if _pd.review_reason:
+                    existing = extracted.get("_validation_reasons") or []
+                    if _pd.review_reason not in existing:
+                        extracted["_validation_reasons"] = existing + [_pd.review_reason]
+            except Exception as _de:
+                logger.debug("parse_invoice_date failed: %s", _de)
 
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 4 — Accounting classification preparation
@@ -2087,43 +2151,78 @@ def process_pdf_page(
     )
     val_issues = (validation_result.get("issues") or []) if validation_result else []
 
-    # 4c — Review reason codes
-    review_reasons_list = _collect_review_reasons(extracted, validation_result)
-    review_reasons_str  = "|".join(review_reasons_list) if review_reasons_list else None
+    # 4c — Review decision via the new review_engine (or fallback to legacy codes)
+    _snorm = extracted.pop("_supplier_norm", None)
+    _supplier_reasons: list[str] = []
+    if _snorm is not None and _snorm.review_reason:
+        _supplier_reasons.append(_snorm.review_reason)
+
+    # Merge validation_reasons collected during Stage 3
+    _val_reasons = extracted.pop("_validation_reasons", []) or []
+
+    if _NEW_MODULES_AVAILABLE:
+        try:
+            review_decision = compute_review_decision(
+                extracted=extracted,
+                supplier_reasons=_supplier_reasons + _val_reasons,
+                validation=extracted.pop("_inv_validation_obj", None),
+                confidence=confidence,
+                page_quality=page_quality_score,
+            )
+            review_reasons_list  = review_decision.review_reasons
+            review_reasons_str   = "|".join(review_reasons_list) if review_reasons_list else None
+            review_fields_str    = "|".join(review_decision.review_fields) if review_decision.review_fields else None
+            review_priority_str  = review_decision.review_priority
+            auto_approved        = review_decision.auto_approved
+            final_status         = review_decision.validation_status
+            review_required      = review_decision.review_required
+        except Exception as _re_exc:
+            logger.warning("compute_review_decision failed: %s", _re_exc)
+            review_reasons_list = []
+            review_reasons_str = review_fields_str = review_priority_str = None
+            auto_approved = False
+            final_status = "ok"
+            review_required = False
+    else:
+        # Legacy fallback
+        all_legacy = _collect_review_reasons(extracted, validation_result)
+        all_legacy = list(dict.fromkeys(all_legacy + _supplier_reasons + _val_reasons))
+        review_reasons_list = all_legacy
+        review_reasons_str  = "|".join(all_legacy) if all_legacy else None
+        review_fields_str   = None
+        review_priority_str = None
+        auto_approved       = False
+
+        missing_supplier = not extracted.get("supplier_name")
+        missing_amount   = extracted.get("total_amount") is None
+        if val_status == "failed":
+            final_status    = "review_validation_failed"
+            review_required = True
+        elif missing_supplier and missing_amount:
+            final_status    = "review_incomplete"
+            review_required = True
+        elif missing_supplier:
+            final_status    = "review_no_supplier"
+            review_required = True
+        elif missing_amount:
+            final_status    = "review_no_amount"
+            review_required = True
+        elif any(r in all_legacy for r in ("totals_mismatch", "vat_anomaly")):
+            final_status    = "review_validation_failed"
+            review_required = True
+        elif val_status == "passed_with_warnings" or "ai_validation_warned" in all_legacy:
+            final_status    = "ok_warned"
+            review_required = False
+        elif confidence < 0.65:
+            final_status    = "ok_warned"
+            review_required = False
+        else:
+            final_status    = "ok"
+            review_required = False
+
     extracted.pop("_confidence", None)
 
-    # 4d — validation_status / review_required (primary status for the UI)
-    missing_supplier = not extracted.get("supplier_name")
-    missing_amount   = extracted.get("total_amount") is None
-
-    if val_status == "failed":
-        final_status    = "review_validation_failed"
-        review_required = True
-    elif missing_supplier and missing_amount:
-        final_status    = "review_incomplete"
-        review_required = True
-    elif missing_supplier:
-        final_status    = "review_no_supplier"
-        review_required = True
-    elif missing_amount:
-        final_status    = "review_no_amount"
-        review_required = True
-    elif review_reasons_list and any(
-        r in review_reasons_list for r in ("totals_mismatch", "vat_anomaly")
-    ):
-        final_status    = "review_validation_failed"
-        review_required = True
-    elif val_status == "passed_with_warnings" or "ai_validation_warned" in review_reasons_list:
-        final_status    = "ok_warned"
-        review_required = False
-    elif confidence < 0.65:
-        final_status    = "ok_warned"
-        review_required = False
-    else:
-        final_status    = "ok"
-        review_required = False
-
-    # 4e — Merge all issues
+    # 4d — Merge all issues
     all_issues = list(extracted.get("ai_issues") or []) + val_issues
     if all_issues:
         extracted["ai_issues"] = all_issues
@@ -2175,17 +2274,27 @@ def process_pdf_page(
         page_text_raw = final_text[:20000]
 
     extracted.update({
-        "page_no":           page_index + 1,
-        "method_used":       method,
-        "confidence_score":  confidence,
-        "validation_status": final_status,
-        "review_required":   review_required,
-        "review_reasons":    review_reasons_str,
-        "page_quality_score": round(page_quality_score, 2),
-        "header_raw":        header_raw,
-        "totals_raw":        totals_raw,
-        "page_text_raw":     page_text_raw,
+        "page_no":                    page_index + 1,
+        "method_used":                method,
+        "confidence_score":           confidence,
+        "validation_status":          final_status,
+        "review_required":            review_required,
+        "review_priority":            review_priority_str,
+        "review_reasons":             review_reasons_str,
+        "review_fields":              review_fields_str,
+        "auto_approved":              auto_approved,
+        "page_quality_score":         round(page_quality_score, 2),
+        "supplier_match_method":      extracted.pop("_supplier_match_method", None),
+        "totals_reconciliation_status": extracted.pop("_totals_reconciliation_status", None),
+        "header_raw":                 header_raw,
+        "totals_raw":                 totals_raw,
+        "page_text_raw":              page_text_raw,
     })
+    # Clean up internal temp keys
+    for _k in ("_supplier_name_raw", "_date_parse_strategy", "_date_ambiguity_flag",
+               "_deposit_component", "_validation_reasons", "_inv_validation_obj",
+               "_supplier_norm", "_supplier_match_method", "_totals_reconciliation_status"):
+        extracted.pop(_k, None)
     return extracted
 
 

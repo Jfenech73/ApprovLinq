@@ -48,20 +48,46 @@ Secrets:
 - `POST /batches/{id}/process` - Process invoices
 - `GET /batches/{id}/export.xlsx` - Export to Excel
 
+## Service Modules (app/services/)
+| Module | Purpose |
+|---|---|
+| `extractor.py` | 4-stage extraction pipeline — primary extraction + all hooks |
+| `parse_dates.py` | Strict day-first date parsing with ambiguity detection |
+| `normalize_suppliers.py` | Supplier name matching against suppliers.yaml (VAT/alias/fuzzy) |
+| `validate_invoice.py` | Arithmetic reconciliation — deposit/discount/mismatch detection |
+| `classify_lines.py` | Hybrid nominal account classification (supplier_rule→taxonomy→historical→keyword→llm→default) |
+| `review_engine.py` | Weighted triage → priority bands (high/medium/low) + auto-approval |
+| `preprocess.py` | Page image quality scoring (PIL contrast/sharpness) |
+| `exporter.py` | Excel export with all new columns |
+
+## Config Files
+- `config/suppliers.yaml` — supplier master list with canonical names, VAT, aliases, nominal hints
+- `config/product_taxonomy.yaml` — brand/product YAML with nominal account hints and OCR aliases
+
 ## Extraction Pipeline (4-Stage)
 `process_pdf_page` in `app/services/extractor.py`:
 1. **Stage 1** — Acquire + preprocess + quality score (PIL contrast/sharpness/bleed-suppression, quality 0–1)
 2. **Stage 2** — Field extraction: rule-based → Azure DI (primary) → OpenAI vision → OpenAI text → validation pass
-3. **Stage 3** — Line normalization: Net→Total fallback, deposit/BCRS detection, supplier name normalisation
-4. **Stage 4** — Accounting prep: confidence scoring (with quality penalty), review reason codes, validation_status, evidence strings
+3. **Stage 3** — `validate_invoice` for arithmetic reconciliation; `normalize_supplier` for canonical name + match_method; `parse_invoice_date` for ambiguity check
+4. **Stage 4** — `compute_review_decision` for consolidated priority/reasons/fields/auto_approved; confidence scoring with quality penalty
 
 ## Nominal Account Classification (Hybrid Order in batches.py)
-`_apply_account_suggestions`: VAT match → fuzzy name → A. supplier default_nominal → B. historical nominal → C. keyword → D. brand taxonomy → E. is_default fallback
+`_apply_account_suggestions`: A. supplier DB default_nominal (explicit) → `classify_line` pipeline (supplier_rule from config → taxonomy_match → historical_similarity → keyword_match → llm_fallback → default)
 
-## Key DB Columns (v3.80+)
+## Key DB Columns (v4+)
 - `tenant_suppliers.vat_number` — supplier VAT for authoritative matching
-- `invoice_rows.review_reasons` — pipe-separated reason codes (no_supplier, invoice_number_missing, vat_anomaly, totals_mismatch, deposit_component_detected, etc.)
+- `invoice_rows.review_priority` — high/medium/low triage band
+- `invoice_rows.review_reasons` — pipe-separated reason codes
+- `invoice_rows.review_fields` — pipe-separated field names that need review
+- `invoice_rows.auto_approved` — TRUE when all reasons are low-severity
 - `invoice_rows.page_quality_score` — scan quality 0.0–1.0
+- `invoice_rows.classification_method` — how the nominal was determined
+- `invoice_rows.supplier_match_method` — vat_match/alias_match/fuzzy_match/unmatched
+- `invoice_rows.totals_reconciliation_status` — ok/ok_with_deposit/totals_mismatch/vat_anomaly/etc.
+
+## Tests (77 cases)
+`ApprovLinq/tests/` — pytest suite covering all pipeline modules:
+- `test_parse_dates.py`, `test_normalize_suppliers.py`, `test_validate_invoice.py`, `test_classify_lines.py`, `test_review_engine.py`
 
 ## Deployment
 Configured for autoscale deployment on Replit.

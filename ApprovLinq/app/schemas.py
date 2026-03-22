@@ -298,8 +298,14 @@ class InvoiceRowOut(BaseModel):
     confidence_score: float | None = None
     validation_status: str | None = None
     review_required: bool
+    review_priority: str | None = None
     review_reasons: str | None = None
+    review_fields: str | None = None
+    auto_approved: bool = False
     page_quality_score: float | None = None
+    classification_method: str | None = None
+    supplier_match_method: str | None = None
+    totals_reconciliation_status: str | None = None
     header_raw: str | None = None
     totals_raw: str | None = None
     page_text_raw: str | None = None

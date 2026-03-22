@@ -1,0 +1,629 @@
+You are a senior Python engineer specializing in Azure Document Intelligence, OCR-heavy invoice extraction, accounting classification, and production-safe refactoring.
+
+You are working on an existing Python invoice-processing pipeline that already:
+
+ingests PDF invoices
+uses Azure Document Intelligence
+uses OpenAI for interpretation/validation
+exports Excel outputs
+has review logic and evidence capture
+
+Your task is to implement the next iteration in safe phases, preserving current working functionality while improving extraction accuracy, classification accuracy, auditability, and review precision.
+
+Do not perform a full rewrite unless absolutely necessary. Refactor incrementally.
+
+Core objective
+
+Improve the pipeline so it:
+
+parses invoice dates correctly using day-first logic by default
+standardizes supplier recognition
+recognizes product brands and product families better
+classifies nominal accounts more reliably, especially cigarettes/tobacco
+reconciles totals more accurately
+sends fewer but better-targeted rows to manual review
+produces stronger evidence for audit and human review
+remains deterministic, explainable, and regression-safe
+Non-negotiable guardrails
+Do not break the current Excel export shape unless explicitly extending it.
+Keep current sheet names if they exist:
+Invoices
+Needs Review
+Summary
+Evidence
+Do not remove working logic unless replacing it with a better, tested equivalent.
+LLM usage must remain secondary to rules and deterministic matching.
+Every review decision must be explainable with reason codes.
+Every important extracted field must retain raw value plus normalized value where applicable.
+Changes must be config-driven wherever practical.
+Recommended phased order
+Phase 1: Stabilize foundations
+
+Focus on the highest-confidence, lowest-risk improvements first.
+
+Scope
+date normalization
+supplier normalization
+field evidence structure
+review reason codes
+output schema extensions
+Why first
+
+These changes are low-risk, high-impact, and improve correctness immediately without changing the whole classification engine.
+
+Deliverables
+strict day-first date parser
+supplier normalization module
+structured evidence model
+expanded review fields
+updated Excel columns
+tests for date and supplier normalization
+Acceptance criteria
+dates like 05/02/2026 are parsed as 5 February 2026 by default
+ambiguous dates do not silently normalize without recording the strategy
+supplier names with broken OCR are cleaned into canonical names where possible
+Needs Review contains meaningful reason codes, not only generic failure labels
+Excel export still works with existing downstream workflow
+Phase 2: Improve document extraction quality
+
+Formalize preprocessing and stronger Azure extraction use.
+
+Scope
+page preprocessing
+page quality scoring
+better Azure layout usage
+better header/body/totals zoning
+Why second
+
+This improves the raw evidence feeding downstream logic and helps all later stages.
+
+Deliverables
+preprocessing module
+page quality score
+extraction of words/lines/tables/positions
+document zoning logic
+improved evidence capture for supplier/date/invoice number/totals
+Acceptance criteria
+rotated pages are corrected before extraction
+low-contrast pages receive lower quality score
+extraction preserves page number and positional evidence
+supplier/date/totals evidence is populated in Evidence
+existing extraction output is not degraded on known working samples
+Phase 3: Hybrid line classification
+
+Shift classification from broad AI interpretation to layered deterministic logic.
+
+Scope
+product taxonomy config
+brand dictionary
+supplier-aware classification
+line classification reason codes
+LLM fallback only for unresolved lines
+Why third
+
+This is where the largest classification gains happen, especially for cigarettes and repeat suppliers.
+
+Deliverables
+taxonomy-based classification module
+tobacco brand alias recognition
+supplier product memory support
+historical approved line matching hook
+structured classification method and reason fields
+Acceptance criteria
+recognized tobacco brands map to tobacco/cigarettes category
+cigarette invoices stop defaulting to generic purchases when brand evidence is strong
+classification records whether rule, taxonomy, history, or LLM was used
+deterministic matches are not overridden by the LLM
+review count decreases only where confidence truly improves
+Phase 4: Totals reconciliation and validation
+
+Make financial validation more precise and useful.
+
+Scope
+component-aware totals validation
+deposit/discount/other charges handling
+arithmetic reason codes
+supplier/category sanity checks
+Why fourth
+
+Once extraction and line interpretation are better, totals validation can become much more accurate.
+
+Deliverables
+totals model
+reconciliation engine
+validation rules
+specific mismatch reason codes
+updated summary metrics
+Acceptance criteria
+invoices with deposits do not fail generic totals checks unnecessarily
+total mismatches include specific reason codes
+VAT anomalies are separated from subtotal extraction issues
+summary output shows counts by mismatch type
+Phase 5: Review engine tuning and regression hardening
+
+Finalize triage quality and protect against future breakage.
+
+Scope
+weighted review engine
+review priority
+auto-approval rules
+regression test pack
+migration notes
+Why fifth
+
+This phase locks in stability and gives production confidence.
+
+Deliverables
+weighted document review scoring
+review priority bands
+auto-approved flag
+regression tests on sample PDFs and workbook outputs
+implementation notes
+Acceptance criteria
+review rows are more actionable and grouped by high-value reasons
+review priority distinguishes severe failures from low-risk ambiguity
+automated tests cover core edge cases
+current working outputs remain compatible
+File-by-file implementation tasks
+1. preprocess.py
+
+Purpose: improve image quality before Azure extraction.
+
+Tasks
+add page rotation correction
+add deskew
+add grayscale normalization
+add contrast enhancement
+add light denoise
+add optional bleed-through suppression
+compute page quality metrics:
+blur estimate
+contrast score
+skew angle
+text density proxy
+noise / bleed-through estimate
+return preprocessed page image and page_quality_score
+Acceptance criteria
+pages that are sideways are auto-corrected
+low-quality scans are flagged with lower page-quality scores
+preprocessing can be toggled/configured
+preprocessing does not noticeably degrade already-clean pages
+2. azure_extract.py
+
+Purpose: structured extraction using Azure Document Intelligence.
+
+Tasks
+extract words, lines, paragraphs, tables
+preserve positional metadata
+create header/body/totals/footer zones
+identify likely metadata blocks
+identify likely totals blocks
+keep raw snippets for critical fields
+expose consistent extraction objects for downstream modules
+Acceptance criteria
+supplier/date/invoice number/total fields each have raw source snippets
+page number and region metadata are preserved
+line items are separated from header/totals text more reliably
+extraction output is stable across multi-page invoices
+3. parse_dates.py
+
+Purpose: strict invoice date normalization.
+
+Tasks
+implement default day-first parsing
+support supplier-specific locale rules
+output:
+invoice_date_raw
+invoice_date_normalized
+invoice_date_parse_strategy
+date_ambiguity_flag
+mark unresolved ambiguity for review
+Acceptance criteria
+05/02/2026 defaults to 2026-02-05
+ambiguous cases are tracked, not silently guessed
+review reason ambiguous_date_locale appears only when warranted
+parser is unit-tested thoroughly
+4. normalize_suppliers.py
+
+Purpose: clean OCR supplier noise and match to supplier master.
+
+Tasks
+remove line breaks, odd symbols, broken unicode, duplicate initials
+separate supplier text from accidental customer text when possible
+support matching by:
+VAT number
+exact canonical match
+alias match
+fuzzy match
+store:
+supplier_name_raw
+supplier_name_clean
+supplier_name_canonical
+supplier_match_method
+supplier_match_confidence
+Acceptance criteria
+noisy supplier names collapse to clean canonical names
+canonical matching uses config rather than scattered hardcoding
+supplier matching is auditable and confidence-scored
+unknown suppliers remain visible as unknown, not falsely overconfident
+5. config/suppliers.yaml
+
+Purpose: supplier master configuration.
+
+Tasks
+
+For each known supplier support:
+
+canonical name
+VAT number if known
+aliases
+known invoice traits
+date locale if exceptional
+default nominal hints
+known product families
+optional invoice-number patterns
+Acceptance criteria
+adding a new supplier requires config more than code
+supplier-specific rules can be applied without editing core logic
+6. config/product_taxonomy.yaml
+
+Purpose: deterministic product and brand mapping.
+
+Tasks
+
+Create structured mappings for:
+
+tobacco / cigarettes
+beverages / soft drinks
+bakery
+canned goods / condiments
+groceries
+fresh produce
+
+Each entry should support:
+
+brand
+aliases
+product family
+category
+subcategory
+nominal code
+nominal name
+supplier hints
+optional OCR-noise aliases
+Acceptance criteria
+known brands match even with mild OCR corruption
+taxonomy is readable and easy to extend
+nominal mapping is derived from taxonomy where confidence is high
+7. classify_lines.py
+
+Purpose: hybrid line classification.
+
+Tasks
+
+Implement classification in this strict order:
+
+supplier-specific rule
+taxonomy/brand match
+historical approved similarity lookup
+OpenAI fallback
+
+For each line store:
+
+raw_line_text
+clean_line_text
+brand
+product_family
+category
+subcategory
+nominal_account_code_suggested
+nominal_account_name_suggested
+classification_confidence
+classification_method
+classification_reason
+Acceptance criteria
+deterministic matches are preferred
+cigarette brands classify to tobacco category when evidence is strong
+generic purchases are used less often where specific mapping exists
+LLM is used only when deterministic methods fall below threshold
+8. validate_invoice.py
+
+Purpose: arithmetic and business-rule validation.
+
+Tasks
+
+Implement:
+
+line sum validation
+subtotal/net validation
+VAT validation
+deposit/discount/other-charge support
+total reconciliation
+category-vs-supplier sanity checks
+nominal-vs-product consistency checks
+
+Store:
+
+net_amount
+vat_amount
+deposit_amount
+discount_amount
+other_charges_amount
+total_amount
+totals_reconciliation_status
+totals_reconciliation_reason
+Acceptance criteria
+deposit-driven differences are not misclassified as generic failures
+VAT anomalies are distinguished from extraction misses
+mismatches produce precise reason codes
+arithmetic checks are deterministic and testable
+9. review_engine.py
+
+Purpose: targeted manual review triage.
+
+Tasks
+
+Create field-level review logic with weighted severity.
+
+Track:
+
+review_required
+review_priority
+review_reasons
+review_fields
+auto_approved
+manual_override_status
+
+Suggested review priorities:
+
+high: supplier unknown, invoice number missing, severe totals mismatch, major classification failure
+medium: ambiguous date, partial totals mismatch, mixed classification confidence
+low: minor OCR cleanup issue, weak but acceptable evidence
+Acceptance criteria
+review decisions are reason-driven
+severe extraction failures are clearly distinguished from minor ambiguities
+low-risk rows are not over-sent to manual review
+every review reason maps to a specific field or validation result
+10. export_excel.py
+
+Purpose: preserve export compatibility and add new columns.
+
+Tasks
+
+Keep current sheets and extend them safely.
+
+Add columns where appropriate:
+
+supplier_name_raw
+supplier_name_clean
+supplier_match_method
+supplier_match_confidence
+invoice_date_raw
+invoice_date_normalized
+invoice_date_parse_strategy
+date_ambiguity_flag
+deposit_amount
+discount_amount
+other_charges_amount
+totals_reconciliation_status
+totals_reconciliation_reason
+classification_method
+classification_reason
+review_priority
+review_fields
+auto_approved
+field_confidence_json
+field_evidence_json
+Acceptance criteria
+workbook opens cleanly
+old consumers of core columns are not broken
+Needs Review contains only flagged documents
+Summary includes reason-based counts
+Evidence is more useful for audit and human QA
+11. models.py or schemas.py
+
+Purpose: define typed data structures.
+
+Tasks
+
+Create typed models for:
+
+document header
+line item
+totals breakdown
+evidence item
+review decision
+
+Preferred:
+
+Pydantic if already used
+otherwise dataclasses with validation helpers
+Acceptance criteria
+downstream modules exchange structured objects instead of loose dicts where practical
+fields are explicit and documented
+serialization to Excel/JSON remains easy
+12. tests/
+
+Purpose: regression protection.
+
+Must-have tests
+ambiguous date parsing
+supplier alias cleanup
+tobacco brand recognition with OCR noise
+totals reconciliation with deposit
+missing invoice number handling
+rotated page preprocessing
+review engine severity logic
+export compatibility smoke test
+Acceptance criteria
+test suite passes locally in Replit
+at least one regression test covers the current sample pack
+tobacco mapping remains stable
+date normalization bug does not reappear
+Concrete implementation order inside each phase
+Phase 1 task order
+add models/schemas
+implement parse_dates.py
+implement normalize_suppliers.py
+extend review reason structure
+extend Excel export columns
+write tests for dates and suppliers
+Phase 2 task order
+implement preprocessing
+add page-quality scoring
+expand Azure extraction output
+add evidence-region capture
+regression-check current sample outputs
+Phase 3 task order
+create product_taxonomy.yaml
+implement taxonomy matcher
+implement supplier-aware classification rules
+add historical approved similarity hook
+add LLM fallback wrapper with strict controls
+add tobacco-focused tests
+Phase 4 task order
+create totals breakdown model
+implement reconciliation logic
+add deposit/discount/other-charge detection
+add validation reason codes
+update summary output
+Phase 5 task order
+weight review logic
+add review priority
+add auto-approval rules
+finalize regression suite
+write migration notes and decision-flow documentation
+Detailed acceptance criteria by business outcome
+Outcome 1: date correctness
+
+The system must stop silently converting day-first invoice dates incorrectly.
+
+Pass when:
+
+invoices with dates like 05/02/2026, 06/02/2026, 03/02/2026 normalize day-first by default
+ambiguous parsing strategy is recorded
+review is only raised if ambiguity remains unresolved
+Outcome 2: supplier correctness
+
+The system must standardize supplier identities more reliably.
+
+Pass when:
+
+OCR-broken supplier names are cleaned
+supplier matching records method and confidence
+known suppliers map to canonical names consistently
+Outcome 3: tobacco classification correctness
+
+The system must recognize cigarette brands and map them to the correct nominal account.
+
+Pass when:
+
+tobacco brands with mild OCR corruption still map correctly
+cigarette invoices do not default to generic purchases where evidence is strong
+classification reason clearly explains why tobacco nominal was selected
+Outcome 4: review precision
+
+The system must reduce noisy reviews and improve actionability.
+
+Pass when:
+
+review rows include specific reasons
+severe failures are clearly prioritized above mild ambiguity
+review counts do not drop merely because checks were weakened
+Outcome 5: auditability
+
+The system must be easier to debug and audit.
+
+Pass when:
+
+key extracted fields retain raw value, normalized value, confidence, source snippet, and page number
+evidence sheet gives enough context to verify supplier/date/total/classification decisions
+Prompt rules for OpenAI integration
+
+When using OpenAI:
+
+do not ask it to invent invoice fields
+do not allow it to override high-confidence rule results
+use it only for unresolved semantic normalization
+require output as strict JSON
+store metadata:
+llm_used
+llm_prompt_version
+llm_confidence
+llm_reason
+
+Example allowed use:
+
+normalize messy OCR product description
+infer likely product family when rules are inconclusive
+explain semantic consistency between supplier and line classification
+
+Example disallowed use:
+
+invent missing invoice dates
+invent invoice numbers
+force totals to reconcile without evidence
+Suggested review reason codes
+
+Use codes like:
+
+supplier_unknown
+supplier_low_confidence
+invoice_number_missing
+invoice_date_missing
+ambiguous_date_locale
+page_quality_low
+line_classification_unresolved
+nominal_mapping_uncertain
+vat_missing
+vat_anomaly
+line_sum_mismatch
+subtotal_not_found
+deposit_component_detected
+totals_mismatch
+mixed_category_invoice
+low_evidence_density
+Suggested classification method values
+
+Use one of:
+
+supplier_rule
+taxonomy_match
+historical_similarity
+llm_fallback
+manual_override
+Suggested commit strategy in Replit
+
+Use small commits in this order:
+
+feat: add typed schemas and date normalization
+feat: add supplier normalization and review reason structure
+feat: add preprocessing and page quality scoring
+feat: expand azure extraction evidence capture
+feat: add taxonomy-based line classification
+feat: add supplier-aware and historical line matching
+feat: add totals reconciliation engine
+feat: add weighted review engine
+test: add regression coverage for invoice pack
+docs: add migration notes and decision flow
+Final delivery expectation for Replit
+
+Return:
+
+updated codebase
+new config files
+tests
+migration notes
+short explanation of the decision flow
+one example of output row before vs after
+Extra instruction to Replit
+
+Before changing anything:
+
+inspect the existing project structure
+identify current data flow from PDF → extraction → normalization → classification → validation → export
+preserve working interfaces where possible
+flag any part where a breaking change is unavoidable
+implement phase by phase, validating after each phase
+
+Do not skip tests.

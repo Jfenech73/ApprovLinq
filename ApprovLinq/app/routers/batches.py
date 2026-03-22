@@ -14,6 +14,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
 from app.db.models import Company, InvoiceBatch, InvoiceFile, InvoiceRow, IssueLog, TenantNominalAccount, TenantSupplier, User
+
+try:
+    from app.services.classify_lines import classify_line as _classify_line
+    from app.services.normalize_suppliers import normalize_supplier as _normalize_supplier_batches
+    _CLASSIFY_AVAILABLE = True
+except ImportError:
+    _CLASSIFY_AVAILABLE = False
+
 from app.db.session import engine, get_db
 from app.routers.auth import current_tenant_id, current_user
 from app.schemas import BatchCreate, BatchUpdate, BatchDetailOut, BatchFileOut, BatchOut, InvoiceRowOut
@@ -253,41 +261,85 @@ def _apply_account_suggestions(
             )
             .all()
         )
-        default_account = next((a for a in accounts if a.is_default), None)
+        accts_dicts = [
+            {
+                "account_code": a.account_code,
+                "account_name": a.account_name,
+                "is_default":   getattr(a, "is_default", False),
+            }
+            for a in accounts
+        ]
 
-        # C. Keyword match: account name or code appears in the description
-        if row.description:
-            desc_lower = row.description.lower()
-            for account in accounts:
-                if (
-                    account.account_name.lower() in desc_lower
-                    or account.account_code.lower() in desc_lower
-                ):
-                    row.nominal_account_code = account.account_code
-                    logger.debug(
-                        "Nominal [C-keyword]: desc=%r → %r", row.description, account.account_code
-                    )
-                    break
-
-        # D. Brand/product taxonomy
-        if not row.nominal_account_code:
-            search_text = " ".join(filter(None, [row.description, row.line_items_raw]))
-            category_hint = _category_hint_from_text(search_text)
-            if category_hint:
-                hint_lower = category_hint.lower()
-                for account in accounts:
-                    if hint_lower in account.account_name.lower():
-                        row.nominal_account_code = account.account_code
-                        logger.debug(
-                            "Nominal [D-taxonomy]: category=%r → %r for desc=%r",
-                            category_hint, account.account_code, row.description,
+        if _CLASSIFY_AVAILABLE:
+            try:
+                # Build supplier_norm from the already-matched supplier name
+                supplier_norm = None
+                if row.supplier_name:
+                    try:
+                        supplier_norm = _normalize_supplier_batches(
+                            row.supplier_name,
+                            supplier_vat=getattr(row, "supplier_vat", None),
                         )
+                        if (
+                            supplier_norm.match_method != "unmatched"
+                            and supplier_norm.match_confidence >= 0.70
+                        ):
+                            row.supplier_name = supplier_norm.canonical
+                    except Exception:
+                        pass
+
+                def _hist_hook():
+                    return _get_supplier_historical_nominal(
+                        db, tenant_id, company_id, matched_supplier_name or row.supplier_name
+                    )
+
+                cl = _classify_line(
+                    description=row.description,
+                    line_items_raw=row.line_items_raw,
+                    supplier_norm=supplier_norm,
+                    nominal_accounts=accts_dicts,
+                    historical_hook=_hist_hook,
+                    openai_api_key=getattr(settings, "openai_api_key", None),
+                )
+                if cl.nominal_account_code:
+                    row.nominal_account_code = cl.nominal_account_code
+                    row.classification_method = cl.classification_method
+                    logger.debug(
+                        "Nominal [classify_line/%s]: %r → %r",
+                        cl.classification_method, row.supplier_name, cl.nominal_account_code,
+                    )
+            except Exception as _ce:
+                logger.warning("classify_line failed: %s", _ce)
+
+        else:
+            # Legacy fallback (when classify module unavailable)
+            default_account = next((a for a in accounts if a.is_default), None)
+
+            # C. Keyword match
+            if row.description:
+                desc_lower = row.description.lower()
+                for account in accounts:
+                    if (
+                        account.account_name.lower() in desc_lower
+                        or account.account_code.lower() in desc_lower
+                    ):
+                        row.nominal_account_code = account.account_code
                         break
 
-        # E. Default account fallback
-        if not row.nominal_account_code and default_account:
-            row.nominal_account_code = default_account.account_code
-            logger.debug("Nominal [E-default]: %r", default_account.account_code)
+            # D. Brand/product taxonomy
+            if not row.nominal_account_code:
+                search_text = " ".join(filter(None, [row.description, row.line_items_raw]))
+                category_hint = _category_hint_from_text(search_text)
+                if category_hint:
+                    hint_lower = category_hint.lower()
+                    for account in accounts:
+                        if hint_lower in account.account_name.lower():
+                            row.nominal_account_code = account.account_code
+                            break
+
+            # E. Default account fallback
+            if not row.nominal_account_code and default_account:
+                row.nominal_account_code = default_account.account_code
 
     # Final safety net: direct query for is_default if still nothing
     if not row.nominal_account_code:
@@ -718,8 +770,13 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 confidence_score=r.get("confidence_score"),
                                 validation_status=r.get("validation_status"),
                                 review_required=r.get("review_required", False),
+                                review_priority=r.get("review_priority"),
                                 review_reasons=r.get("review_reasons"),
+                                review_fields=r.get("review_fields"),
+                                auto_approved=bool(r.get("auto_approved", False)),
                                 page_quality_score=r.get("page_quality_score"),
+                                supplier_match_method=r.get("supplier_match_method"),
+                                totals_reconciliation_status=r.get("totals_reconciliation_status"),
                                 header_raw=r.get("header_raw"),
                                 totals_raw=r.get("totals_raw"),
                                 page_text_raw=r.get("page_text_raw"),
