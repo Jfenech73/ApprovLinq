@@ -171,6 +171,143 @@ def create_template(
     return tpl
 
 
+# ── Assignments ───────────────────────────────────────────────────────────────
+# NOTE: These fixed-path routes MUST be registered before /{template_id} so
+# that FastAPI does not treat "assignments" as a UUID template_id path param.
+
+@router.get("/assignments", response_model=list[TemplateAssignmentOut])
+def list_assignments(
+    tenant_id: UUID | None = Query(default=None),
+    _user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    q = db.query(TemplateAssignment)
+    if tenant_id:
+        q = q.filter(TemplateAssignment.tenant_id == tenant_id)
+    return q.order_by(TemplateAssignment.tenant_id.asc()).all()
+
+
+@router.get("/assignments/effective", response_model=TemplateAssignmentOut | None)
+def effective_assignment(
+    tenant_id: UUID,
+    company_id: UUID | None = Query(default=None),
+    _user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Return the assignment that would be used when exporting for this tenant/company."""
+    if company_id:
+        assign = (
+            db.query(TemplateAssignment)
+            .filter(
+                TemplateAssignment.tenant_id == tenant_id,
+                TemplateAssignment.company_id == company_id,
+                TemplateAssignment.is_active.is_(True),
+            )
+            .first()
+        )
+        if assign:
+            return assign
+
+    assign = (
+        db.query(TemplateAssignment)
+        .filter(
+            TemplateAssignment.tenant_id == tenant_id,
+            TemplateAssignment.company_id.is_(None),
+            TemplateAssignment.is_active.is_(True),
+        )
+        .first()
+    )
+    return assign
+
+
+@router.post("/assignments", response_model=TemplateAssignmentOut)
+def create_assignment(
+    payload: TemplateAssignmentCreate,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    tpl = db.get(ExportTemplate, payload.template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if not tpl.is_active:
+        raise HTTPException(status_code=400, detail="Cannot assign an inactive template")
+
+    if not db.get(Tenant, payload.tenant_id):
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    if payload.company_id and not db.get(Company, payload.company_id):
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    existing = (
+        db.query(TemplateAssignment)
+        .filter(
+            TemplateAssignment.tenant_id == payload.tenant_id,
+            TemplateAssignment.company_id == payload.company_id,
+            TemplateAssignment.is_active.is_(True),
+        )
+        .first()
+    )
+    if existing:
+        existing.template_id = payload.template_id
+        existing.assigned_by = user.id
+        db.flush()
+        _audit(
+            db,
+            "assignment_updated",
+            "template_assignment",
+            str(existing.id),
+            user,
+            f"Template {payload.template_id} → tenant {payload.tenant_id} company {payload.company_id}",
+        )
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    assign = TemplateAssignment(
+        template_id=payload.template_id,
+        tenant_id=payload.tenant_id,
+        company_id=payload.company_id,
+        is_active=payload.is_active,
+        assigned_by=user.id,
+    )
+    db.add(assign)
+    db.flush()
+    _audit(
+        db,
+        "assignment_created",
+        "template_assignment",
+        str(assign.id),
+        user,
+        f"Template {payload.template_id} → tenant {payload.tenant_id} company {payload.company_id}",
+    )
+    db.commit()
+    db.refresh(assign)
+    return assign
+
+
+@router.delete("/assignments/{assignment_id}", status_code=204)
+def delete_assignment(
+    assignment_id: int,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    assign = db.get(TemplateAssignment, assignment_id)
+    if not assign:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    _audit(
+        db,
+        "assignment_removed",
+        "template_assignment",
+        str(assign.id),
+        user,
+        f"Template {assign.template_id} removed from tenant {assign.tenant_id}",
+    )
+    db.delete(assign)
+    db.commit()
+
+
+# ── Template CRUD ─────────────────────────────────────────────────────────────
+
 @router.get("/{template_id}", response_model=ExportTemplateDetailOut)
 def get_template(
     template_id: UUID,
@@ -387,136 +524,3 @@ def preview_template(
         columns=columns,
         sample_rows=[{k: (str(v) if v is not None else "") for k, v in r.items()} for r in rows],
     )
-
-
-# ── Assignments ───────────────────────────────────────────────────────────────
-
-@router.get("/assignments", response_model=list[TemplateAssignmentOut])
-def list_assignments(
-    tenant_id: UUID | None = Query(default=None),
-    _user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    q = db.query(TemplateAssignment)
-    if tenant_id:
-        q = q.filter(TemplateAssignment.tenant_id == tenant_id)
-    return q.order_by(TemplateAssignment.tenant_id.asc()).all()
-
-
-@router.get("/assignments/effective", response_model=TemplateAssignmentOut | None)
-def effective_assignment(
-    tenant_id: UUID,
-    company_id: UUID | None = Query(default=None),
-    _user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    """Return the assignment that would be used when exporting for this tenant/company."""
-    if company_id:
-        assign = (
-            db.query(TemplateAssignment)
-            .filter(
-                TemplateAssignment.tenant_id == tenant_id,
-                TemplateAssignment.company_id == company_id,
-                TemplateAssignment.is_active.is_(True),
-            )
-            .first()
-        )
-        if assign:
-            return assign
-
-    assign = (
-        db.query(TemplateAssignment)
-        .filter(
-            TemplateAssignment.tenant_id == tenant_id,
-            TemplateAssignment.company_id.is_(None),
-            TemplateAssignment.is_active.is_(True),
-        )
-        .first()
-    )
-    return assign
-
-
-@router.post("/assignments", response_model=TemplateAssignmentOut)
-def create_assignment(
-    payload: TemplateAssignmentCreate,
-    user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    tpl = db.get(ExportTemplate, payload.template_id)
-    if not tpl:
-        raise HTTPException(status_code=404, detail="Template not found")
-    if not tpl.is_active:
-        raise HTTPException(status_code=400, detail="Cannot assign an inactive template")
-
-    if not db.get(Tenant, payload.tenant_id):
-        raise HTTPException(status_code=404, detail="Tenant not found")
-
-    if payload.company_id and not db.get(Company, payload.company_id):
-        raise HTTPException(status_code=404, detail="Company not found")
-
-    existing = (
-        db.query(TemplateAssignment)
-        .filter(
-            TemplateAssignment.tenant_id == payload.tenant_id,
-            TemplateAssignment.company_id == payload.company_id,
-            TemplateAssignment.is_active.is_(True),
-        )
-        .first()
-    )
-    if existing:
-        existing.template_id = payload.template_id
-        existing.assigned_by = user.id
-        db.flush()
-        _audit(
-            db,
-            "assignment_updated",
-            "template_assignment",
-            str(existing.id),
-            user,
-            f"Template {payload.template_id} → tenant {payload.tenant_id} company {payload.company_id}",
-        )
-        db.commit()
-        db.refresh(existing)
-        return existing
-
-    assign = TemplateAssignment(
-        template_id=payload.template_id,
-        tenant_id=payload.tenant_id,
-        company_id=payload.company_id,
-        is_active=payload.is_active,
-        assigned_by=user.id,
-    )
-    db.add(assign)
-    db.flush()
-    _audit(
-        db,
-        "assignment_created",
-        "template_assignment",
-        str(assign.id),
-        user,
-        f"Template {payload.template_id} → tenant {payload.tenant_id} company {payload.company_id}",
-    )
-    db.commit()
-    db.refresh(assign)
-    return assign
-
-
-@router.delete("/assignments/{assignment_id}", status_code=204)
-def delete_assignment(
-    assignment_id: int,
-    user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    assign = db.get(TemplateAssignment, assignment_id)
-    if not assign:
-        raise HTTPException(status_code=404, detail="Assignment not found")
-    _audit(
-        db,
-        "assignment_removed",
-        "template_assignment",
-        str(assign.id),
-        user,
-        f"Template {assign.template_id} removed from tenant {assign.tenant_id}",
-    )
-    db.delete(assign)
-    db.commit()
