@@ -160,6 +160,8 @@ def _evaluate_conditions(rules: list, row: dict, source_value) -> object:
             if not _check_condition(field_val, operator, rule.get("value")):
                 continue
 
+        if output == "__skip__":
+            continue
         return source_value if output == "__field__" else output
 
     return source_value

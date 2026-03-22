@@ -273,8 +273,10 @@ function _buildOpSel(selected) {
 function _addCondRow(tbodyId, rule) {
   const tbody = document.getElementById(tbodyId);
   const tr = document.createElement("tr");
-  const noVal = rule && (rule.operator === "is_null" || rule.operator === "is_not_null");
+  const noVal   = rule && (rule.operator === "is_null" || rule.operator === "is_not_null");
+  const useSkip = rule && rule.output === "__skip__";
   const useField = rule && rule.output === "__field__";
+  const outHide  = useField || useSkip;
   tr.innerHTML = `
     <td style="padding:3px 4px">${_buildFieldSel(rule ? rule.if_field : "")}</td>
     <td style="padding:3px 4px">${_buildOpSel(rule ? rule.operator : "")}</td>
@@ -283,10 +285,13 @@ function _addCondRow(tbodyId, rule) {
         placeholder="value" style="width:100%;font-size:12px;padding:2px 4px;display:${noVal ? "none" : ""}" />
     </td>
     <td style="padding:3px 4px;display:flex;align-items:center;gap:4px">
-      <input class="cond-out" type="text" value="${useField ? "" : (rule ? escapeHtml(rule.output || "") : "")}"
-        placeholder="output value" style="flex:1;font-size:12px;padding:2px 4px;display:${useField ? "none" : ""}" />
-      <label style="font-size:11px;white-space:nowrap;display:flex;align-items:center;gap:3px">
+      <input class="cond-out" type="text" value="${(useField || useSkip) ? "" : (rule ? escapeHtml(rule.output || "") : "")}"
+        placeholder="output value" style="flex:1;font-size:12px;padding:2px 4px;display:${outHide ? "none" : ""}" />
+      <label style="font-size:11px;white-space:nowrap;display:flex;align-items:center;gap:3px" title="Output the source field value">
         <input type="checkbox" class="cond-use-field" style="width:13px;height:13px"${useField ? " checked" : ""}> field val
+      </label>
+      <label style="font-size:11px;white-space:nowrap;display:flex;align-items:center;gap:3px" title="Condition matched but skip to next rule">
+        <input type="checkbox" class="cond-pass-thru" style="width:13px;height:13px"${useSkip ? " checked" : ""}> pass-thru
       </label>
     </td>
     <td style="padding:3px 4px;text-align:center">
@@ -294,13 +299,24 @@ function _addCondRow(tbodyId, rule) {
     </td>`;
   tbody.appendChild(tr);
 
+  const outEl       = tr.querySelector(".cond-out");
+  const useFieldCb  = tr.querySelector(".cond-use-field");
+  const passThruCb  = tr.querySelector(".cond-pass-thru");
+
+  function _syncOutputVis() {
+    const skip = passThruCb.checked;
+    const fld  = useFieldCb.checked;
+    outEl.style.display      = (skip || fld) ? "none" : "";
+    useFieldCb.disabled      = skip;
+    if (skip) useFieldCb.checked = false;
+  }
+
   tr.querySelector(".cond-op").addEventListener("change", function () {
     const v = this.value;
     tr.querySelector(".cond-val").style.display = (v === "is_null" || v === "is_not_null") ? "none" : "";
   });
-  tr.querySelector(".cond-use-field").addEventListener("change", function () {
-    tr.querySelector(".cond-out").style.display = this.checked ? "none" : "";
-  });
+  useFieldCb.addEventListener("change", _syncOutputVis);
+  passThruCb.addEventListener("change", _syncOutputVis);
   tr.querySelector(".cond-remove-btn").addEventListener("click", () => tr.remove());
 }
 
@@ -308,12 +324,13 @@ function _buildConditionRules(tbodyId, defaultId, useFieldId) {
   const rules = [];
   const tbody = document.getElementById(tbodyId);
   for (const tr of tbody.querySelectorAll("tr")) {
-    const ifField  = tr.querySelector(".cond-field")?.value || "";
-    const operator = tr.querySelector(".cond-op")?.value || "";
-    const value    = tr.querySelector(".cond-val")?.value?.trim() ?? null;
-    const useField = tr.querySelector(".cond-use-field")?.checked;
-    const outTxt   = tr.querySelector(".cond-out")?.value?.trim() || "";
-    const output   = useField ? "__field__" : outTxt;
+    const ifField   = tr.querySelector(".cond-field")?.value || "";
+    const operator  = tr.querySelector(".cond-op")?.value || "";
+    const value     = tr.querySelector(".cond-val")?.value?.trim() ?? null;
+    const useField  = tr.querySelector(".cond-use-field")?.checked;
+    const passThru  = tr.querySelector(".cond-pass-thru")?.checked;
+    const outTxt    = tr.querySelector(".cond-out")?.value?.trim() || "";
+    const output    = passThru ? "__skip__" : (useField ? "__field__" : outTxt);
     const rule = { if_field: ifField, operator, output };
     if (!["is_null", "is_not_null"].includes(operator)) rule.value = value || null;
     rules.push(rule);
