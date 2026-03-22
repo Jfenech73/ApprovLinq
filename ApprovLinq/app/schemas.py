@@ -227,6 +227,7 @@ class ExportTemplateColumnCreate(BaseModel):
     source_field: str | None = Field(default=None, max_length=100)
     static_value: str | None = Field(default=None, max_length=500)
     transform_rule: str | None = Field(default=None, max_length=200)
+    condition_rules: list | None = None
     column_order: int = Field(default=0, ge=0)
     is_active: bool = True
     notes: str | None = None
@@ -238,6 +239,7 @@ class ExportTemplateColumnUpdate(BaseModel):
     source_field: str | None = None
     static_value: str | None = None
     transform_rule: str | None = None
+    condition_rules: list | None = None
     column_order: int | None = Field(default=None, ge=0)
     is_active: bool | None = None
     notes: str | None = None
@@ -252,6 +254,7 @@ class ExportTemplateColumnOut(BaseModel):
     source_field: str | None = None
     static_value: str | None = None
     transform_rule: str | None = None
+    condition_rules: list | None = None
     is_active: bool
     notes: str | None = None
 

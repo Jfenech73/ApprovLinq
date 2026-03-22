@@ -166,6 +166,32 @@
             <input id="newColTransformRule" type="text" placeholder="e.g. default:N/A" maxlength="200" style="display:none;margin-top:4px;width:100%;box-sizing:border-box" />
           </div>
         </div>
+        <!-- Multi-condition builder — shown only for conditional_value -->
+        <div id="newConditionBuilder" style="display:none">
+          <div style="font-size:12px;font-weight:600;color:var(--primary-dark);margin-bottom:6px;border-top:1px solid var(--border);padding-top:10px">
+            Condition Rules <span style="font-weight:400;color:var(--muted)">(evaluated top-to-bottom — first match wins)</span>
+          </div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px" id="newCondTable">
+            <thead>
+              <tr style="background:var(--surface-soft)">
+                <th style="padding:4px 6px;text-align:left;color:var(--muted)">If field</th>
+                <th style="padding:4px 6px;text-align:left;color:var(--muted)">Operator</th>
+                <th style="padding:4px 6px;text-align:left;color:var(--muted)">Compare value</th>
+                <th style="padding:4px 6px;text-align:left;color:var(--muted)">Then output</th>
+                <th style="width:28px"></th>
+              </tr>
+            </thead>
+            <tbody id="newCondRows"></tbody>
+          </table>
+          <div style="margin-top:6px;display:flex;align-items:center;gap:10px">
+            <button class="btn btn-secondary" type="button" id="addNewCondRowBtn" style="font-size:12px;padding:4px 12px">+ Add Condition</button>
+            <span style="font-size:12px;color:var(--muted)">Default (no match) →</span>
+            <input id="newCondDefault" type="text" placeholder="fallback value" style="width:140px;font-size:12px;padding:3px 6px" />
+            <label style="font-size:12px;display:flex;align-items:center;gap:4px">
+              <input type="checkbox" id="newCondDefaultUseField" style="width:14px;height:14px" /> use field value
+            </label>
+          </div>
+        </div>
         <textarea id="newColNotes" placeholder="Notes (optional)" rows="1" maxlength="500"></textarea>
         <div style="display:flex;gap:8px">
           <button class="btn btn-primary" type="button" id="saveNewColBtn">Add Column</button>
@@ -203,6 +229,32 @@
               <option value="custom">Custom rule…</option>
             </select>
             <input id="editColTransformRule" type="text" placeholder="e.g. default:N/A" maxlength="200" style="display:none;margin-top:4px;width:100%;box-sizing:border-box" />
+          </div>
+        </div>
+        <!-- Multi-condition builder — shown only for conditional_value -->
+        <div id="editConditionBuilder" style="display:none">
+          <div style="font-size:12px;font-weight:600;color:var(--primary-dark);margin-bottom:6px;border-top:1px solid var(--border);padding-top:10px">
+            Condition Rules <span style="font-weight:400;color:var(--muted)">(evaluated top-to-bottom — first match wins)</span>
+          </div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead>
+              <tr style="background:#f5edd0">
+                <th style="padding:4px 6px;text-align:left;color:var(--muted)">If field</th>
+                <th style="padding:4px 6px;text-align:left;color:var(--muted)">Operator</th>
+                <th style="padding:4px 6px;text-align:left;color:var(--muted)">Compare value</th>
+                <th style="padding:4px 6px;text-align:left;color:var(--muted)">Then output</th>
+                <th style="width:28px"></th>
+              </tr>
+            </thead>
+            <tbody id="editCondRows"></tbody>
+          </table>
+          <div style="margin-top:6px;display:flex;align-items:center;gap:10px">
+            <button class="btn btn-secondary" type="button" id="addEditCondRowBtn" style="font-size:12px;padding:4px 12px">+ Add Condition</button>
+            <span style="font-size:12px;color:var(--muted)">Default (no match) →</span>
+            <input id="editCondDefault" type="text" placeholder="fallback value" style="width:140px;font-size:12px;padding:3px 6px" />
+            <label style="font-size:12px;display:flex;align-items:center;gap:4px">
+              <input type="checkbox" id="editCondDefaultUseField" style="width:14px;height:14px" /> use field value
+            </label>
           </div>
         </div>
         <textarea id="editColNotes" placeholder="Notes (optional)" rows="1" maxlength="500"></textarea>

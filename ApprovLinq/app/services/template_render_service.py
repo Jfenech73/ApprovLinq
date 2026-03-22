@@ -104,6 +104,67 @@ def apply_transform(value, rule: str | None):
     return value
 
 
+def _check_condition(field_val, operator: str, compare_value) -> bool:
+    """Evaluate a single condition against a field value from the row."""
+    if operator == "is_null":
+        return field_val is None or str(field_val).strip() == ""
+    if operator == "is_not_null":
+        return field_val is not None and str(field_val).strip() != ""
+    if operator == "contains":
+        return str(compare_value or "").lower() in str(field_val or "").lower()
+    if operator == "not_contains":
+        return str(compare_value or "").lower() not in str(field_val or "").lower()
+    if operator == "starts_with":
+        return str(field_val or "").lower().startswith(str(compare_value or "").lower())
+    if operator in ("eq", "ne", "gt", "gte", "lt", "lte"):
+        fv_str = str(field_val).strip() if field_val is not None else ""
+        cv_str = str(compare_value).strip() if compare_value is not None else ""
+        try:
+            fv = float(fv_str)
+            cv = float(cv_str)
+            if operator == "eq":  return fv == cv
+            if operator == "ne":  return fv != cv
+            if operator == "gt":  return fv > cv
+            if operator == "gte": return fv >= cv
+            if operator == "lt":  return fv < cv
+            if operator == "lte": return fv <= cv
+        except (ValueError, TypeError):
+            if operator == "eq":  return fv_str == cv_str
+            if operator == "ne":  return fv_str != cv_str
+            return False
+    return False
+
+
+def _evaluate_conditions(rules: list, row: dict, source_value) -> object:
+    """
+    Evaluate a priority-list of condition rules against the current row.
+
+    Each rule has the shape:
+        {
+          "if_field":  "<field_name>",   # optional — omit for a catch-all default
+          "operator":  "<operator>",     # is_null | is_not_null | eq | ne | gt | gte | lt | lte | contains
+          "value":     "<compare_val>",  # omit for is_null / is_not_null
+          "output":    "<literal>"       # or "__field__" to use the column source value
+        }
+
+    Rules are evaluated top-to-bottom; first matching rule wins.
+    """
+    for rule in rules:
+        if_field = rule.get("if_field", "").strip()
+        operator = rule.get("operator", "").strip()
+        output = rule.get("output", "")
+
+        has_condition = bool(if_field and operator)
+        if has_condition:
+            field_val = row.get(if_field)
+            if not _check_condition(field_val, operator, rule.get("value")):
+                continue
+
+        return source_value if output == "__field__" else output
+
+    return source_value
+
+
 def _coerce_cell(value):
     """Convert any Python value to an openpyxl-safe equivalent."""
     if value is None:
@@ -165,10 +226,18 @@ def render_template_sheet(
             elif ctype == "empty_column":
                 out_row[heading] = None
 
-            elif ctype in ("mapped_field", "derived_value", "conditional_value"):
+            elif ctype in ("mapped_field", "derived_value"):
                 raw = merged.get(col.source_field) if col.source_field else None
                 transformed = apply_transform(raw, col.transform_rule)
                 out_row[heading] = _coerce_cell(transformed)
+
+            elif ctype == "conditional_value":
+                raw = merged.get(col.source_field) if col.source_field else None
+                if col.condition_rules:
+                    result = _evaluate_conditions(col.condition_rules, merged, raw)
+                else:
+                    result = apply_transform(raw, col.transform_rule)
+                out_row[heading] = _coerce_cell(result)
 
             else:
                 out_row[heading] = None

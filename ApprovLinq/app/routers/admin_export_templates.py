@@ -384,6 +384,7 @@ def duplicate_template(
             source_field=col.source_field,
             static_value=col.static_value,
             transform_rule=col.transform_rule,
+            condition_rules=col.condition_rules,
             is_active=col.is_active,
             notes=col.notes,
         )
@@ -427,6 +428,7 @@ def add_column(
         source_field=payload.source_field,
         static_value=payload.static_value,
         transform_rule=payload.transform_rule,
+        condition_rules=payload.condition_rules,
         is_active=payload.is_active,
         notes=payload.notes,
     )

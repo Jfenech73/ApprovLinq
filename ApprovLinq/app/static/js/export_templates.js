@@ -239,6 +239,121 @@ document.getElementById("newColTransformPreset").addEventListener("change", func
   }
 });
 
+// ── Condition Builder ─────────────────────────────────────────────────────────
+
+const COND_OPERATORS = [
+  { value: "is_null",      label: "is blank/null" },
+  { value: "is_not_null",  label: "is not blank" },
+  { value: "eq",           label: "= equals" },
+  { value: "ne",           label: "≠ not equals" },
+  { value: "gt",           label: "> greater than" },
+  { value: "gte",          label: "≥ greater or equal" },
+  { value: "lt",           label: "< less than" },
+  { value: "lte",          label: "≤ less or equal" },
+  { value: "contains",     label: "contains" },
+  { value: "not_contains", label: "does not contain" },
+  { value: "starts_with",  label: "starts with" },
+];
+
+function _buildFieldSel(selected) {
+  const opts = ['<option value="">— field —</option>']
+    .concat((_availableFields || []).map(f =>
+      `<option value="${f}"${f === selected ? " selected" : ""}>${f}</option>`
+    ));
+  return `<select class="cond-field" style="width:100%;font-size:12px;padding:2px 4px">${opts.join("")}</select>`;
+}
+
+function _buildOpSel(selected) {
+  const opts = COND_OPERATORS.map(o =>
+    `<option value="${o.value}"${o.value === selected ? " selected" : ""}>${o.label}</option>`
+  );
+  return `<select class="cond-op" style="width:100%;font-size:12px;padding:2px 4px">${opts.join("")}</select>`;
+}
+
+function _addCondRow(tbodyId, rule) {
+  const tbody = document.getElementById(tbodyId);
+  const tr = document.createElement("tr");
+  const noVal = rule && (rule.operator === "is_null" || rule.operator === "is_not_null");
+  const useField = rule && rule.output === "__field__";
+  tr.innerHTML = `
+    <td style="padding:3px 4px">${_buildFieldSel(rule ? rule.if_field : "")}</td>
+    <td style="padding:3px 4px">${_buildOpSel(rule ? rule.operator : "")}</td>
+    <td style="padding:3px 4px">
+      <input class="cond-val" type="text" value="${rule && rule.value != null ? escapeHtml(String(rule.value)) : ""}"
+        placeholder="value" style="width:100%;font-size:12px;padding:2px 4px;display:${noVal ? "none" : ""}" />
+    </td>
+    <td style="padding:3px 4px;display:flex;align-items:center;gap:4px">
+      <input class="cond-out" type="text" value="${useField ? "" : (rule ? escapeHtml(rule.output || "") : "")}"
+        placeholder="output value" style="flex:1;font-size:12px;padding:2px 4px;display:${useField ? "none" : ""}" />
+      <label style="font-size:11px;white-space:nowrap;display:flex;align-items:center;gap:3px">
+        <input type="checkbox" class="cond-use-field" style="width:13px;height:13px"${useField ? " checked" : ""}> field val
+      </label>
+    </td>
+    <td style="padding:3px 4px;text-align:center">
+      <button type="button" class="cond-remove-btn" style="background:none;border:none;cursor:pointer;color:var(--danger-text);font-size:16px;line-height:1">&times;</button>
+    </td>`;
+  tbody.appendChild(tr);
+
+  tr.querySelector(".cond-op").addEventListener("change", function () {
+    const v = this.value;
+    tr.querySelector(".cond-val").style.display = (v === "is_null" || v === "is_not_null") ? "none" : "";
+  });
+  tr.querySelector(".cond-use-field").addEventListener("change", function () {
+    tr.querySelector(".cond-out").style.display = this.checked ? "none" : "";
+  });
+  tr.querySelector(".cond-remove-btn").addEventListener("click", () => tr.remove());
+}
+
+function _buildConditionRules(tbodyId, defaultId, useFieldId) {
+  const rules = [];
+  const tbody = document.getElementById(tbodyId);
+  for (const tr of tbody.querySelectorAll("tr")) {
+    const ifField  = tr.querySelector(".cond-field")?.value || "";
+    const operator = tr.querySelector(".cond-op")?.value || "";
+    const value    = tr.querySelector(".cond-val")?.value?.trim() ?? null;
+    const useField = tr.querySelector(".cond-use-field")?.checked;
+    const outTxt   = tr.querySelector(".cond-out")?.value?.trim() || "";
+    const output   = useField ? "__field__" : outTxt;
+    const rule = { if_field: ifField, operator, output };
+    if (!["is_null", "is_not_null"].includes(operator)) rule.value = value || null;
+    rules.push(rule);
+  }
+  const defUseField = document.getElementById(useFieldId)?.checked;
+  const defOut = defUseField ? "__field__" : (document.getElementById(defaultId)?.value?.trim() || "");
+  rules.push({ output: defOut });
+  return rules;
+}
+
+function _populateConditionBuilder(tbodyId, defaultId, useFieldId, rules) {
+  document.getElementById(tbodyId).innerHTML = "";
+  document.getElementById(defaultId).value = "";
+  if (document.getElementById(useFieldId)) document.getElementById(useFieldId).checked = false;
+  if (!rules || !rules.length) return;
+  const condRules = rules.filter(r => r.if_field && r.operator);
+  const defaultRule = rules.find(r => !r.if_field || !r.operator);
+  for (const r of condRules) _addCondRow(tbodyId, r);
+  if (defaultRule) {
+    if (defaultRule.output === "__field__") {
+      document.getElementById(useFieldId).checked = true;
+      document.getElementById(defaultId).value = "";
+    } else {
+      document.getElementById(defaultId).value = defaultRule.output || "";
+    }
+  }
+}
+
+function _clearConditionBuilder(tbodyId, defaultId, useFieldId) {
+  document.getElementById(tbodyId).innerHTML = "";
+  document.getElementById(defaultId).value = "";
+  if (document.getElementById(useFieldId)) document.getElementById(useFieldId).checked = false;
+}
+
+// wire up "Add Condition" buttons
+document.getElementById("addNewCondRowBtn").addEventListener("click", () => _addCondRow("newCondRows", null));
+document.getElementById("addEditCondRowBtn").addEventListener("click", () => _addCondRow("editCondRows", null));
+
+// ── Column form visibility ─────────────────────────────────────────────────────
+
 function updateColFormVisibility() {
   const t = document.getElementById("newColType").value;
   const sfEl = document.getElementById("newColSourceField");
@@ -246,7 +361,9 @@ function updateColFormVisibility() {
   const trEl = document.getElementById("newColTransformRule");
   sfEl.style.display = (t === "mapped_field" || t === "derived_value" || t === "conditional_value") ? "" : "none";
   svEl.style.display = (t === "static_text") ? "" : "none";
-  trEl.style.display = (t !== "empty_column" && t !== "static_text") ? "" : "none";
+  trEl.style.display = (t !== "empty_column" && t !== "static_text" && t !== "conditional_value") ? "" : "none";
+  document.getElementById("newColTransformWrap").style.display = (t === "conditional_value") ? "none" : "";
+  document.getElementById("newConditionBuilder").style.display = (t === "conditional_value") ? "" : "none";
 }
 
 saveNewColBtn.addEventListener("click", async () => {
@@ -264,12 +381,15 @@ saveNewColBtn.addEventListener("click", async () => {
     static_value: (colType === "static_text")
       ? document.getElementById("newColStaticValue").value.trim() || null
       : null,
-    transform_rule: (() => {
+    transform_rule: colType === "conditional_value" ? null : (() => {
       const preset = document.getElementById("newColTransformPreset").value;
       if (!preset) return null;
       if (preset === "custom") return document.getElementById("newColTransformRule").value.trim() || null;
       return preset;
     })(),
+    condition_rules: colType === "conditional_value"
+      ? _buildConditionRules("newCondRows", "newCondDefault", "newCondDefaultUseField")
+      : null,
     notes: document.getElementById("newColNotes").value.trim() || null,
     column_order: 999,
     is_active: true,
@@ -287,6 +407,7 @@ saveNewColBtn.addEventListener("click", async () => {
     document.getElementById("newColTransformRule").value = "";
     document.getElementById("newColTransformRule").style.display = "none";
     document.getElementById("newColNotes").value = "";
+    _clearConditionBuilder("newCondRows", "newCondDefault", "newCondDefaultUseField");
     setMessage("columnEditorMessage", "Column added.", "success");
     await loadColumns(_editingTemplateId);
   } catch (err) {
@@ -379,6 +500,8 @@ function openEditColumn(colId) {
 
     document.getElementById("editColNotes").value = col.notes || "";
 
+    _populateConditionBuilder("editCondRows", "editCondDefault", "editCondDefaultUseField", col.condition_rules || null);
+
     updateEditColFormVisibility();
     document.getElementById("addColumnForm").style.display = "none";
     const editForm = document.getElementById("editColumnForm");
@@ -394,6 +517,10 @@ function updateEditColFormVisibility() {
   document.getElementById("editColMappedRow").style.display = "";
   sfEl.style.display = (t === "mapped_field" || t === "derived_value" || t === "conditional_value") ? "" : "none";
   svEl.style.display = (t === "static_text") ? "" : "none";
+  const isCondVal = t === "conditional_value";
+  document.getElementById("editConditionBuilder").style.display = isCondVal ? "" : "none";
+  const editTransWrap = document.getElementById("editColTransformPreset")?.parentElement;
+  if (editTransWrap) editTransWrap.style.display = isCondVal ? "none" : "";
 }
 
 document.getElementById("editColType").addEventListener("change", updateEditColFormVisibility);
@@ -406,6 +533,7 @@ document.getElementById("editColTransformPreset").addEventListener("change", fun
 
 document.getElementById("cancelEditColBtn").addEventListener("click", () => {
   document.getElementById("editColumnForm").style.display = "none";
+  _clearConditionBuilder("editCondRows", "editCondDefault", "editCondDefaultUseField");
   _editingColId = null;
 });
 
@@ -427,7 +555,10 @@ document.getElementById("saveEditColBtn").addEventListener("click", async () => 
       ? document.getElementById("editColSourceField").value || null : null,
     static_value: colType === "static_text"
       ? document.getElementById("editColStaticValue").value.trim() || null : null,
-    transform_rule: transformRule,
+    transform_rule: colType === "conditional_value" ? null : transformRule,
+    condition_rules: colType === "conditional_value"
+      ? _buildConditionRules("editCondRows", "editCondDefault", "editCondDefaultUseField")
+      : null,
     notes: document.getElementById("editColNotes").value.trim() || null,
   };
 

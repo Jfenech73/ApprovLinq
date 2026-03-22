@@ -10,6 +10,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    JSON,
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -261,6 +262,7 @@ class ExportTemplateColumn(Base):
     source_field: Mapped[str | None] = mapped_column(String(100), nullable=True)
     static_value: Mapped[str | None] = mapped_column(String(500), nullable=True)
     transform_rule: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    condition_rules: Mapped[list | None] = mapped_column(JSON, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
