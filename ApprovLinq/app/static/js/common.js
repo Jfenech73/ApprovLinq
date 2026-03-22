@@ -66,6 +66,10 @@ async function apiFetch(path, options = {}) {
       } else if (data?.detail) {
         if (typeof data.detail === "string") {
           message = data.detail;
+        } else if (Array.isArray(data.detail) && data.detail.length > 0) {
+          const first = data.detail[0];
+          const loc = (first.loc || []).slice(1).join(" → ");
+          message = loc ? `${loc}: ${first.msg}` : first.msg || "The request could not be completed.";
         } else {
           message = "The request could not be completed.";
         }

@@ -81,6 +81,12 @@ def apply_transform(value, rule: str | None):
                 return value.strftime(fmt)
             except ValueError:
                 return value
+        if isinstance(value, str) and value.strip():
+            for parser_fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+                try:
+                    return datetime.strptime(value.strip(), parser_fmt).strftime(fmt)
+                except ValueError:
+                    continue
         return value
 
     if rl == "number_format":

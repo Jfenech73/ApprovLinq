@@ -315,20 +315,136 @@ function renderColumnsTable(cols) {
         : escapeHtml(col.source_field || "—");
     return `
       <tr id="col-row-${col.id}">
-        <td>
+        <td style="white-space:nowrap">
           <button class="move-btn" onclick="moveColumn(${col.id},'up',${idx})" title="Move up">↑</button>
           <button class="move-btn" onclick="moveColumn(${col.id},'down',${idx})" title="Move down">↓</button>
         </td>
         <td><strong>${escapeHtml(col.column_heading)}</strong>${col.notes ? `<br><small style="color:var(--muted)">${escapeHtml(col.notes)}</small>` : ""}</td>
         <td><span class="col-type-badge">${escapeHtml(col.column_type)}</span></td>
         <td>${sourceDesc}</td>
-        <td>${escapeHtml(col.transform_rule || "—")}</td>
-        <td><input type="checkbox" ${col.is_active ? "checked" : ""} onchange="toggleColActive(${col.id},this.checked)" /></td>
-        <td><button class="btn btn-secondary" style="font-size:11px;padding:3px 8px;color:var(--danger-text)" onclick="deleteColumn(${col.id})">Remove</button></td>
+        <td style="font-size:12px;color:var(--muted)">${escapeHtml(col.transform_rule || "—")}</td>
+        <td style="text-align:center"><input type="checkbox" ${col.is_active ? "checked" : ""} onchange="toggleColActive(${col.id},this.checked)" /></td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-secondary" style="font-size:11px;padding:3px 7px" onclick="openEditColumn(${col.id})">Edit</button>
+          <button class="btn btn-secondary" style="font-size:11px;padding:3px 7px;color:var(--danger-text)" onclick="deleteColumn(${col.id})">Remove</button>
+        </td>
       </tr>
     `;
   }).join("");
 }
+
+let _editingColId = null;
+
+function openEditColumn(colId) {
+  const row = document.getElementById(`col-row-${colId}`);
+  if (!row) return;
+
+  const tpl = apiFetch(`/admin/export-templates/${_editingTemplateId}`).then((t) => {
+    const col = (t.columns || []).find((c) => c.id === colId);
+    if (!col) return;
+
+    _editingColId = colId;
+
+    document.getElementById("editColHeading").value = col.column_heading || "";
+    document.getElementById("editColType").value = col.column_type || "mapped_field";
+
+    const sfSel = document.getElementById("editColSourceField");
+    sfSel.innerHTML = '<option value="">— select field —</option>';
+    for (const f of _availableFields) {
+      const opt = document.createElement("option");
+      opt.value = f;
+      opt.textContent = f;
+      if (f === col.source_field) opt.selected = true;
+      sfSel.appendChild(opt);
+    }
+
+    document.getElementById("editColStaticValue").value = col.static_value || "";
+
+    const preset = document.getElementById("editColTransformPreset");
+    const customInput = document.getElementById("editColTransformRule");
+    const knownPresets = Array.from(preset.options).map((o) => o.value).filter(Boolean).filter((v) => v !== "custom");
+    if (!col.transform_rule) {
+      preset.value = "";
+      customInput.style.display = "none";
+      customInput.value = "";
+    } else if (knownPresets.includes(col.transform_rule)) {
+      preset.value = col.transform_rule;
+      customInput.style.display = "none";
+      customInput.value = "";
+    } else {
+      preset.value = "custom";
+      customInput.style.display = "";
+      customInput.value = col.transform_rule;
+    }
+
+    document.getElementById("editColNotes").value = col.notes || "";
+
+    updateEditColFormVisibility();
+    document.getElementById("addColumnForm").style.display = "none";
+    const editForm = document.getElementById("editColumnForm");
+    editForm.style.display = "block";
+    editForm.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }).catch((e) => setMessage("columnEditorMessage", e.message));
+}
+
+function updateEditColFormVisibility() {
+  const t = document.getElementById("editColType").value;
+  const sfEl = document.getElementById("editColSourceField");
+  const svEl = document.getElementById("editColStaticValue");
+  document.getElementById("editColMappedRow").style.display = "";
+  sfEl.style.display = (t === "mapped_field" || t === "derived_value" || t === "conditional_value") ? "" : "none";
+  svEl.style.display = (t === "static_text") ? "" : "none";
+}
+
+document.getElementById("editColType").addEventListener("change", updateEditColFormVisibility);
+
+document.getElementById("editColTransformPreset").addEventListener("change", function () {
+  const ci = document.getElementById("editColTransformRule");
+  if (this.value === "custom") { ci.style.display = ""; ci.focus(); }
+  else { ci.style.display = "none"; ci.value = ""; }
+});
+
+document.getElementById("cancelEditColBtn").addEventListener("click", () => {
+  document.getElementById("editColumnForm").style.display = "none";
+  _editingColId = null;
+});
+
+document.getElementById("saveEditColBtn").addEventListener("click", async () => {
+  if (!_editingColId || !_editingTemplateId) return;
+  const heading = document.getElementById("editColHeading").value.trim();
+  if (!heading) { setMessage("columnEditorMessage", "Column heading is required."); return; }
+
+  const colType = document.getElementById("editColType").value;
+  const presetVal = document.getElementById("editColTransformPreset").value;
+  const transformRule = !presetVal ? null
+    : presetVal === "custom" ? (document.getElementById("editColTransformRule").value.trim() || null)
+    : presetVal;
+
+  const payload = {
+    column_heading: heading,
+    column_type: colType,
+    source_field: (colType !== "static_text" && colType !== "empty_column")
+      ? document.getElementById("editColSourceField").value || null : null,
+    static_value: colType === "static_text"
+      ? document.getElementById("editColStaticValue").value.trim() || null : null,
+    transform_rule: transformRule,
+    notes: document.getElementById("editColNotes").value.trim() || null,
+  };
+
+  try {
+    await apiFetch(`/admin/export-templates/${_editingTemplateId}/columns/${_editingColId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    document.getElementById("editColumnForm").style.display = "none";
+    _editingColId = null;
+    setMessage("columnEditorMessage", "Column updated.", "success");
+    await loadColumns(_editingTemplateId);
+  } catch (err) {
+    setMessage("columnEditorMessage", err.message);
+  }
+});
 
 async function toggleColActive(colId, isActive) {
   try {
