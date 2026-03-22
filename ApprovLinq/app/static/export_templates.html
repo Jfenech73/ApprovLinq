@@ -147,7 +147,21 @@
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px" id="colMappedRow">
           <select id="newColSourceField"><option value="">— select field —</option></select>
           <input id="newColStaticValue" type="text" placeholder="Static value" maxlength="500" />
-          <input id="newColTransformRule" type="text" placeholder="Transform rule (e.g. uppercase)" maxlength="200" />
+          <div id="newColTransformWrap">
+            <select id="newColTransformPreset">
+              <option value="">— No transform —</option>
+              <option value="uppercase">UPPERCASE</option>
+              <option value="lowercase">lowercase</option>
+              <option value="number_format">Number (2 d.p.)</option>
+              <option value="date_format:%d/%m/%Y">Date: DD/MM/YYYY</option>
+              <option value="date_format:%Y-%m-%d">Date: YYYY-MM-DD</option>
+              <option value="date_format:%d-%m-%Y">Date: DD-MM-YYYY</option>
+              <option value="date_format:%d %b %Y">Date: DD Mon YYYY</option>
+              <option value="date_format:%m/%d/%Y">Date: MM/DD/YYYY</option>
+              <option value="custom">Custom rule…</option>
+            </select>
+            <input id="newColTransformRule" type="text" placeholder="e.g. default:N/A" maxlength="200" style="display:none;margin-top:4px;width:100%;box-sizing:border-box" />
+          </div>
         </div>
         <textarea id="newColNotes" placeholder="Notes (optional)" rows="1" maxlength="500"></textarea>
         <div style="display:flex;gap:8px">

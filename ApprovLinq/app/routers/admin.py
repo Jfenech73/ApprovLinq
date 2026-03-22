@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -26,6 +28,7 @@ from app.schemas import (
     IssueUpdate,
     IssueOut,
     CapacityRow,
+    CompanyOut,
 )
 from app.utils.security import hash_password
 
@@ -45,6 +48,15 @@ def require_admin(user: User = Depends(current_user)) -> User:
 @router.get("/tenants", response_model=list[TenantOut])
 def list_tenants(_user: User = Depends(require_admin), db: Session = Depends(get_db)):
     return db.query(Tenant).order_by(Tenant.tenant_name.asc()).all()
+
+
+@router.get("/companies", response_model=list[CompanyOut])
+def admin_list_companies(
+    tenant_id: UUID = Query(..., description="Tenant UUID to list companies for"),
+    _user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    return db.query(Company).filter(Company.tenant_id == tenant_id).order_by(Company.company_name.asc()).all()
 
 
 @router.post("/tenants", response_model=TenantOut)

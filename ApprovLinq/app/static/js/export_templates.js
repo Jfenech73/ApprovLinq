@@ -228,6 +228,17 @@ cancelNewColBtn.addEventListener("click", () => {
 
 document.getElementById("newColType").addEventListener("change", updateColFormVisibility);
 
+document.getElementById("newColTransformPreset").addEventListener("change", function () {
+  const customInput = document.getElementById("newColTransformRule");
+  if (this.value === "custom") {
+    customInput.style.display = "";
+    customInput.focus();
+  } else {
+    customInput.style.display = "none";
+    customInput.value = "";
+  }
+});
+
 function updateColFormVisibility() {
   const t = document.getElementById("newColType").value;
   const sfEl = document.getElementById("newColSourceField");
@@ -253,7 +264,12 @@ saveNewColBtn.addEventListener("click", async () => {
     static_value: (colType === "static_text")
       ? document.getElementById("newColStaticValue").value.trim() || null
       : null,
-    transform_rule: document.getElementById("newColTransformRule").value.trim() || null,
+    transform_rule: (() => {
+      const preset = document.getElementById("newColTransformPreset").value;
+      if (!preset) return null;
+      if (preset === "custom") return document.getElementById("newColTransformRule").value.trim() || null;
+      return preset;
+    })(),
     notes: document.getElementById("newColNotes").value.trim() || null,
     column_order: 999,
     is_active: true,
@@ -267,7 +283,9 @@ saveNewColBtn.addEventListener("click", async () => {
     document.getElementById("addColumnForm").style.display = "none";
     document.getElementById("newColHeading").value = "";
     document.getElementById("newColStaticValue").value = "";
+    document.getElementById("newColTransformPreset").value = "";
     document.getElementById("newColTransformRule").value = "";
+    document.getElementById("newColTransformRule").style.display = "none";
     document.getElementById("newColNotes").value = "";
     setMessage("columnEditorMessage", "Column added.", "success");
     await loadColumns(_editingTemplateId);
@@ -396,7 +414,7 @@ document.getElementById("assignTenantId").addEventListener("change", async funct
   _currentCompanies = [];
   if (!tenantId) return;
   try {
-    const companies = await apiFetch(`/tenant/companies?tenant_id=${tenantId}`);
+    const companies = await apiFetch(`/admin/companies?tenant_id=${tenantId}`);
     _currentCompanies = companies;
     for (const c of companies) {
       const opt = document.createElement("option");

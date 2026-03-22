@@ -301,6 +301,27 @@ def add_column(
     return col
 
 
+@router.put("/{template_id}/columns/reorder", response_model=list[ExportTemplateColumnOut])
+def reorder_columns(
+    template_id: UUID,
+    items: list[ColumnReorderItem],
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    _get_template_or_404(db, template_id)
+    for item in items:
+        col = db.get(ExportTemplateColumn, item.id)
+        if col and col.template_id == template_id:
+            col.column_order = item.column_order
+    db.commit()
+    return (
+        db.query(ExportTemplateColumn)
+        .filter(ExportTemplateColumn.template_id == template_id)
+        .order_by(ExportTemplateColumn.column_order.asc())
+        .all()
+    )
+
+
 @router.put("/{template_id}/columns/{column_id}", response_model=ExportTemplateColumnOut)
 def update_column(
     template_id: UUID,
@@ -344,27 +365,6 @@ def delete_column(
         raise HTTPException(status_code=404, detail="Column not found")
     db.delete(col)
     db.commit()
-
-
-@router.put("/{template_id}/columns/reorder", response_model=list[ExportTemplateColumnOut])
-def reorder_columns(
-    template_id: UUID,
-    items: list[ColumnReorderItem],
-    user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    _get_template_or_404(db, template_id)
-    for item in items:
-        col = db.get(ExportTemplateColumn, item.id)
-        if col and col.template_id == template_id:
-            col.column_order = item.column_order
-    db.commit()
-    return (
-        db.query(ExportTemplateColumn)
-        .filter(ExportTemplateColumn.template_id == template_id)
-        .order_by(ExportTemplateColumn.column_order.asc())
-        .all()
-    )
 
 
 # ── Template Preview ──────────────────────────────────────────────────────────
