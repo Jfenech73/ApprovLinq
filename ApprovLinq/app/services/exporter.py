@@ -49,6 +49,7 @@ def workbook_from_rows(
     rows,
     batch_metadata: dict | None = None,
     nominal_account_map: dict[str, str] | None = None,
+    template_sheet: tuple[str, "pd.DataFrame"] | None = None,
 ) -> BytesIO:
     row_dicts = [_row_to_dict(r) for r in rows]
     df = pd.DataFrame(row_dicts)
@@ -163,6 +164,9 @@ def workbook_from_rows(
         review_df.to_excel(writer, index=False, sheet_name="Needs Review")
         summary_df.to_excel(writer, index=False, sheet_name="Summary")
         evidence_df.to_excel(writer, index=False, sheet_name="Evidence")
+        if template_sheet is not None:
+            sheet_name, tdf = template_sheet
+            tdf.to_excel(writer, index=False, sheet_name=sheet_name)
 
     out.seek(0)
     return out

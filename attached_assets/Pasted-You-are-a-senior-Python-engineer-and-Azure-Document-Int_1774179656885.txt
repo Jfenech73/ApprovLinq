@@ -1,0 +1,392 @@
+You are a senior Python engineer and Azure Document Intelligence / OpenAI document-understanding specialist.
+
+I have an existing multi-tenant invoice extraction platform with:
+
+admin-only areas
+tenant/company management
+invoice extraction to Excel
+review workflows
+export logic that already generates workbook sheets from extracted invoice data
+
+I now need a new Admin-only Export Template module to support different downstream accounting-system import formats.
+
+Implement this as a safe, production-friendly feature addition without breaking current extraction, review, or export behavior.
+
+Objective
+
+Add an Admin-only feature that allows administrators to define, manage, assign, and export custom accounting export templates.
+
+Different accounting systems require different import column structures. Some columns should map to extracted invoice/database fields, while others should be static text, blank placeholders, or formula-ready empty columns.
+
+The selected template must be exported as an additional sheet in the generated Excel workbook.
+
+Core business requirements
+1) Admin-only Export Template page
+
+Create a new Admin-only page where templates can be created and managed.
+
+The page must allow an admin to define an export template made of ordered columns.
+
+Each template column should support one of these types:
+
+mapped_field = value pulled from database / extracted invoice data
+static_text = fixed value entered by admin
+empty_column = blank column with a heading
+derived_value = optional calculated/transformed output based on existing fields
+conditional_value = optional value based on simple rules, if feasible without overcomplicating v1
+
+Each template column must include:
+
+column heading
+column type
+source field or rule if applicable
+default/static value if applicable
+column order
+active/inactive flag
+optional notes/description
+2) Multiple templates
+
+The system must allow creation of multiple templates.
+
+Each template must support:
+
+template name
+description
+target accounting system name
+version or revision label
+active / inactive status
+duplicate / clone option
+created by / updated by
+created date / updated date
+
+Required behaviors:
+
+admin can create a new template from scratch
+admin can duplicate an existing template
+admin can activate or deactivate a template
+admin can edit a template without breaking historical exports
+if helpful, use versioning or soft version history
+3) Assignment of templates
+
+Admin must be able to assign a template to:
+
+a tenant
+or a company within a tenant
+
+This is because one tenant may use multiple accounting systems across companies.
+
+Assignment rules:
+
+one default template per company
+tenant-level fallback template if no company-specific template is assigned
+clear precedence:
+company assigned template
+tenant assigned template
+system default / no template
+
+The UI and backend must make this assignment visible and easy to manage.
+
+4) Excel export integration
+
+When invoices are exported, the selected assigned template must be rendered as an additional sheet in the workbook.
+
+Requirements:
+
+keep current workbook sheets intact
+add one new sheet for the selected export template
+sheet name should be template-driven but sanitized for Excel length/rules
+output rows should be built from extracted invoice data according to the template definition
+static text columns must repeat the static value for each exported row where applicable
+empty columns should appear with heading but blank values
+mapped columns should pull from the proper processed data field
+if no template is assigned, current export should still work normally
+Functional requirements
+Admin UI
+
+Create a new Admin-only section, for example:
+
+Export Templates
+Template Assignments
+
+Suggested screens:
+
+Template list page
+Template create/edit page
+Template column builder page
+Assignment page for tenant/company mapping
+Template list page must support
+search
+filter by active/inactive
+filter by accounting system
+duplicate action
+activate/deactivate action
+edit action
+preview action if feasible
+Template builder must support
+add/remove/reorder columns
+choose column type
+choose source field for mapped fields
+input static value for static columns
+define header name
+drag/drop reorder if feasible, otherwise move up/down
+preview resulting export structure
+Assignment page must support
+assign template to tenant
+assign template to company
+show effective template
+warn when company template overrides tenant template
+Data model requirements
+
+Add backend models/tables for something like:
+
+export_templates
+
+Fields:
+
+id
+name
+description
+accounting_system
+version_label
+is_active
+is_system_default optional
+created_at
+updated_at
+created_by
+updated_by
+export_template_columns
+
+Fields:
+
+id
+template_id
+column_order
+column_heading
+column_type
+source_field
+static_value
+transform_rule
+is_active
+notes
+template_assignments
+
+Fields:
+
+id
+template_id
+tenant_id
+company_id nullable
+is_active
+assigned_at
+assigned_by
+
+Use proper foreign keys and uniqueness constraints where appropriate.
+
+Suggested constraints:
+
+only one active default assignment per company
+avoid duplicate active tenant/company-template assignments
+preserve history where practical
+Relevant feature additions that should be included
+1) Template preview
+
+Add a preview function so Admin can see:
+
+resulting sheet headers
+one or more sample rows using real or mocked invoice data
+whether required mapped fields are available
+2) Field catalog / mapping catalog
+
+Expose a list of available mapped fields pulled from the platform data model, such as:
+
+supplier_name
+supplier_vat
+invoice_number
+invoice_date
+due_date
+net_amount
+vat_amount
+total_amount
+currency
+nominal_code
+nominal_name
+line_description
+quantity
+unit_price
+line_total
+company_name
+tenant_name
+review_status
+document_id
+batch_id
+
+This field catalog should drive template column mapping so admins do not enter raw field names blindly.
+
+3) Validation rules
+
+Before saving a template:
+
+validate duplicate headings if needed
+validate mapped field exists
+validate required columns if an accounting-system profile requires them
+validate column order integrity
+validate no broken references
+4) Safe export fallback
+
+If template rendering fails:
+
+current export should still complete
+log the template export error
+flag the workbook/export status appropriately
+do not destroy the base invoice export sheets
+5) Audit logging
+
+Because this is an Admin-only feature, record:
+
+template created
+template edited
+template duplicated
+template activated/deactivated
+template assigned/unassigned
+template used in export
+6) Permissions
+
+This module must be accessible only to platform admins or equivalent authorized admin role.
+Non-admin users must not see these pages or endpoints.
+
+Export behavior requirements
+
+When generating the template sheet:
+
+support one row per invoice by default
+optionally architect for future support of one row per invoice line
+column values must resolve consistently
+blank values should remain blank, not "None"
+static text must export exactly as configured
+date formatting should be standardized
+numeric formatting should remain Excel-friendly
+boolean/status values should be normalized if needed
+
+Add a clear export service flow:
+
+resolve tenant/company effective template
+load template definition
+build export rows from processed invoice dataset
+create additional workbook sheet
+write ordered headers and rows
+log template usage
+Architecture requirements
+
+Implement this cleanly and modularly.
+
+Suggested files/modules:
+
+models/export_template.py
+services/export_template_service.py
+services/template_assignment_service.py
+services/template_render_service.py
+routes/admin_export_templates.py
+templates/admin/export_templates_list.html
+templates/admin/export_template_edit.html
+templates/admin/template_assignments.html
+schemas/export_template.py
+migrations/...
+
+If the app uses FastAPI, Flask, Django, or similar, adapt to the existing project conventions.
+
+Template rendering requirements
+
+The renderer must support:
+
+direct field extraction from invoice/export dataset
+static values
+blank columns
+simple transforms such as:
+date format normalization
+uppercase/lowercase
+concatenation
+number formatting
+fallback value if null
+
+Keep v1 transform logic simple and safe.
+
+Example:
+
+Heading: Account Code
+Type: mapped_field
+Source: nominal_code
+
+Example:
+
+Heading: Journal
+Type: static_text
+Value: PURCHASES
+
+Example:
+
+Heading: Reference 2
+Type: empty_column
+Acceptance criteria
+UI and permissions
+only admins can access template pages
+admins can create, edit, duplicate, activate, deactivate templates
+admins can assign templates to tenants or companies
+Data and logic
+templates and columns persist correctly
+assignment precedence works: company over tenant
+inactive templates cannot be assigned unless explicitly allowed by admin flow
+duplicate template creates a new independent copy including columns
+Export
+exports continue working without a template
+when a template is assigned, a new sheet is added to the workbook
+the template sheet respects defined column order and mappings
+static text and blank columns render correctly
+mapped fields resolve from invoice data correctly
+Reliability
+template rendering errors do not break the base workbook export
+all admin actions are audited
+tests cover creation, assignment precedence, and workbook generation
+Testing requirements
+
+Add automated tests for:
+
+admin-only access protection
+template create/edit/duplicate
+template activation/deactivation
+template assignment precedence
+mapped field validation
+template preview generation
+workbook additional sheet creation
+fallback behavior when template sheet rendering fails
+
+Add regression tests to ensure:
+
+current workbook export still works unchanged when no template is assigned
+existing invoice extraction/export functionality is not broken
+Safety and implementation guardrails
+do not break current workbook structure
+do not hardcode one accounting system
+keep templates config/data-driven
+avoid coupling template rendering directly to raw OCR output; use processed normalized invoice data
+design with future expansion in mind for line-level exports and system-specific profiles
+preserve tenant isolation and admin authorization boundaries
+Deliverables
+
+Provide:
+
+backend model changes
+migrations
+admin routes/pages
+template rendering service
+assignment logic
+Excel export integration
+tests
+short migration notes
+example of one configured template and resulting sheet structure
+
+Before coding:
+
+inspect the current project structure
+identify how admin pages, tenants, companies, and exports currently work
+integrate with existing auth, DB, and Excel export patterns
+reuse existing UI styles and conventions where possible

@@ -85,9 +85,61 @@ Secrets:
 - `invoice_rows.supplier_match_method` — vat_match/alias_match/fuzzy_match/unmatched
 - `invoice_rows.totals_reconciliation_status` — ok/ok_with_deposit/totals_mismatch/vat_anomaly/etc.
 
-## Tests (77 cases)
+## Export Templates Module (Admin-only)
+
+### Data Models (4 new tables)
+| Table | Purpose |
+|---|---|
+| `export_templates` | Template header — name, accounting system, version, active flag |
+| `export_template_columns` | Ordered column definitions per template |
+| `template_assignments` | Maps templates to tenant or company (company wins over tenant) |
+| `admin_audit_logs` | Immutable audit trail for all admin template actions |
+
+### Services
+| File | Purpose |
+|---|---|
+| `services/template_render_service.py` | `render_template_sheet` — resolves column values from row dicts; `resolve_effective_template` — company→tenant precedence; `apply_transform` — uppercase/lowercase/date_format/number_format/default rules |
+
+### Column Types
+- `mapped_field` — pulls value from invoice/DB field by name
+- `static_text` — fixed value repeated on every row
+- `empty_column` — blank column with heading only
+- `derived_value` — mapped field with a transform rule applied
+- `conditional_value` — mapped field with a fallback default rule
+
+### API Routes (all require admin role)
+- `GET  /admin/export-templates/fields` — field catalogue
+- `GET  /admin/export-templates` — list with search/filter
+- `POST /admin/export-templates` — create
+- `GET  /admin/export-templates/{id}` — get with columns
+- `PUT  /admin/export-templates/{id}` — update metadata
+- `PATCH /admin/export-templates/{id}/status` — activate/deactivate
+- `POST /admin/export-templates/{id}/duplicate` — clone (new copy, inactive)
+- `POST /admin/export-templates/{id}/columns` — add column
+- `PUT  /admin/export-templates/{id}/columns/{col_id}` — update column
+- `DELETE /admin/export-templates/{id}/columns/{col_id}` — remove column
+- `PUT  /admin/export-templates/{id}/columns/reorder` — reorder
+- `POST /admin/export-templates/{id}/preview` — preview against sample row
+- `GET  /admin/export-templates/assignments` — list assignments
+- `POST /admin/export-templates/assignments` — create/update assignment
+- `GET  /admin/export-templates/assignments/effective` — resolve effective template
+- `DELETE /admin/export-templates/assignments/{id}` — remove assignment
+- `GET  /admin/export-templates/audit` — audit log
+
+### Frontend
+- `/static/export_templates.html` — linked from Platform Admin nav; contains template CRUD, column builder, assignment management, audit log
+
+### Export Integration (batches.py)
+When `GET /batches/{id}/export` is called:
+1. `resolve_effective_template(db, tenant_id, company_id)` — company-level assignment → tenant-level → None
+2. If template found: `render_template_sheet(tpl, row_dicts, enrichment)` → `(sheet_name, rows)`
+3. Pass `template_sheet=(sheet_name, DataFrame)` to `workbook_from_rows`
+4. Audit log entry written (`template_used_in_export`)
+5. Any render failure is caught and logged; base workbook always exported
+
+## Tests (114 cases)
 `ApprovLinq/tests/` — pytest suite covering all pipeline modules:
-- `test_parse_dates.py`, `test_normalize_suppliers.py`, `test_validate_invoice.py`, `test_classify_lines.py`, `test_review_engine.py`
+- `test_parse_dates.py`, `test_normalize_suppliers.py`, `test_validate_invoice.py`, `test_classify_lines.py`, `test_review_engine.py`, `test_export_templates.py`
 
 ## Deployment
 Configured for autoscale deployment on Replit.

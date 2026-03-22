@@ -27,6 +27,7 @@ from app.routers.auth import current_tenant_id, current_user
 from app.schemas import BatchCreate, BatchUpdate, BatchDetailOut, BatchFileOut, BatchOut, InvoiceRowOut
 from app.services.exporter import workbook_from_rows
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
+from app.services.template_render_service import render_template_sheet, resolve_effective_template
 
 logger = logging.getLogger(__name__)
 
@@ -994,17 +995,22 @@ def get_batch_progress(batch_id: UUID, db: Session = Depends(get_db), tenant_id=
 
 @router.get("/{batch_id}/export")
 def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
+    import pandas as pd
+    from app.db.models import Company, Tenant
+
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)
     rows = db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch_id).order_by(InvoiceRow.id.asc()).all()
     if not rows:
         raise HTTPException(status_code=400, detail="No rows available to export")
+
+    company_id = batch.company_id
     batch_metadata = {
         "batch_name": batch.batch_name or "",
         "batch_id": str(batch.id),
         "scan_mode": batch.scan_mode or "summary",
     }
-    # Build a code→name lookup for nominal accounts so the export shows readable names
-    company_id = batch.company_id
+
+    # Build nominal account code→name lookup
     nominal_accounts = db.query(TenantNominalAccount).filter(
         TenantNominalAccount.tenant_id == tenant_id,
         TenantNominalAccount.company_id == company_id,
@@ -1013,10 +1019,52 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
         str(a.account_code).strip(): a.account_name
         for a in nominal_accounts
     }
+
+    # Resolve and render accounting export template (safe fallback if absent/errored)
+    template_sheet_arg = None
+    try:
+        tpl = resolve_effective_template(db, tenant_id, company_id)
+        if tpl:
+            company = db.get(Company, company_id) if company_id else None
+            tenant = db.get(Tenant, tenant_id)
+            enrichment = {
+                "company_name": company.company_name if company else "",
+                "tenant_name": tenant.tenant_name if tenant else "",
+                "batch_id": str(batch.id),
+                "nominal_account_name": "",
+            }
+            # Build per-row enrichment with nominal account names
+            row_dicts = []
+            for row in rows:
+                rd = {col: getattr(row, col, None) for col in row.__table__.columns.keys()}
+                code = str(rd.get("nominal_account_code") or "").strip()
+                rd["nominal_account_name"] = nominal_account_map.get(code, "")
+                row_dicts.append({**enrichment, **rd})
+
+            sheet_name, rendered_rows = render_template_sheet(tpl, row_dicts)
+            tpl_df = pd.DataFrame(rendered_rows)
+            tpl_df = tpl_df.fillna("")
+            template_sheet_arg = (sheet_name, tpl_df)
+
+            from app.db.models import AdminAuditLog
+            audit = AdminAuditLog(
+                event_type="template_used_in_export",
+                entity_type="export_template",
+                entity_id=str(tpl.id),
+                user_id=_user.id,
+                notes=f"Batch {batch_id}",
+            )
+            db.add(audit)
+            db.commit()
+    except Exception as tpl_exc:
+        logger.warning("Template rendering failed for batch %s (export will continue without it): %s", batch_id, tpl_exc)
+        template_sheet_arg = None
+
     workbook_bytes = workbook_from_rows(
         rows,
         batch_metadata=batch_metadata,
         nominal_account_map=nominal_account_map,
+        template_sheet=template_sheet_arg,
     )
     safe_name = re.sub(r"[^\w\-. ]", "_", batch.batch_name or "batch").strip()
     filename = f"{safe_name}_{batch.id}.xlsx"

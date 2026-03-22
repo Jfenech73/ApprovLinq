@@ -224,6 +224,75 @@ class InvoiceRow(Base):
     source_file: Mapped["InvoiceFile | None"] = relationship(back_populates="rows")
 
 
+class ExportTemplate(Base):
+    __tablename__ = "export_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    accounting_system: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    version_label: Mapped[str] = mapped_column(String(50), default="v1", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_system_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    columns: Mapped[list["ExportTemplateColumn"]] = relationship(
+        back_populates="template",
+        cascade="all, delete-orphan",
+        order_by="ExportTemplateColumn.column_order",
+    )
+    assignments: Mapped[list["TemplateAssignment"]] = relationship(
+        back_populates="template",
+        cascade="all, delete-orphan",
+    )
+
+
+class ExportTemplateColumn(Base):
+    __tablename__ = "export_template_columns"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    template_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("export_templates.id", ondelete="CASCADE"), nullable=False)
+    column_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    column_heading: Mapped[str] = mapped_column(String(255), nullable=False)
+    column_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    source_field: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    static_value: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    transform_rule: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    template: Mapped["ExportTemplate"] = relationship(back_populates="columns")
+
+
+class TemplateAssignment(Base):
+    __tablename__ = "template_assignments"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    template_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("export_templates.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    company_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    assigned_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    template: Mapped["ExportTemplate"] = relationship(back_populates="assignments")
+
+
+class AdminAuditLog(Base):
+    __tablename__ = "admin_audit_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    entity_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
 class SupplierPattern(Base):
     """Stores keyword fingerprints extracted from successfully matched invoices so
     that future invoices from the same supplier can be identified without relying

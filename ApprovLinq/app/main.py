@@ -11,7 +11,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.db import models
 from app.db.session import engine
-from app.routers import analytics, auth, admin, batches, health, tenant
+from app.routers import analytics, auth, admin, admin_export_templates, batches, health, tenant
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,65 @@ def ensure_runtime_schema() -> None:
             "CONSTRAINT uq_supplier_pattern UNIQUE (tenant_id, company_id, supplier_id)"
             ")"
         ),
+
+        # ── export_templates ──────────────────────────────────────────────────
+        (
+            "CREATE TABLE IF NOT EXISTS export_templates ("
+            "id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+            "name VARCHAR(255) NOT NULL,"
+            "description TEXT,"
+            "accounting_system VARCHAR(100),"
+            "version_label VARCHAR(50) NOT NULL DEFAULT 'v1',"
+            "is_active BOOLEAN NOT NULL DEFAULT TRUE,"
+            "is_system_default BOOLEAN NOT NULL DEFAULT FALSE,"
+            "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+            "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+            "created_by UUID REFERENCES users(id) ON DELETE SET NULL,"
+            "updated_by UUID REFERENCES users(id) ON DELETE SET NULL"
+            ")"
+        ),
+
+        # ── export_template_columns ───────────────────────────────────────────
+        (
+            "CREATE TABLE IF NOT EXISTS export_template_columns ("
+            "id SERIAL PRIMARY KEY,"
+            "template_id UUID NOT NULL REFERENCES export_templates(id) ON DELETE CASCADE,"
+            "column_order INTEGER NOT NULL DEFAULT 0,"
+            "column_heading VARCHAR(255) NOT NULL,"
+            "column_type VARCHAR(50) NOT NULL,"
+            "source_field VARCHAR(100),"
+            "static_value VARCHAR(500),"
+            "transform_rule VARCHAR(200),"
+            "is_active BOOLEAN NOT NULL DEFAULT TRUE,"
+            "notes TEXT"
+            ")"
+        ),
+
+        # ── template_assignments ──────────────────────────────────────────────
+        (
+            "CREATE TABLE IF NOT EXISTS template_assignments ("
+            "id SERIAL PRIMARY KEY,"
+            "template_id UUID NOT NULL REFERENCES export_templates(id) ON DELETE CASCADE,"
+            "tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,"
+            "company_id UUID REFERENCES companies(id) ON DELETE CASCADE,"
+            "is_active BOOLEAN NOT NULL DEFAULT TRUE,"
+            "assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+            "assigned_by UUID REFERENCES users(id) ON DELETE SET NULL"
+            ")"
+        ),
+
+        # ── admin_audit_logs ──────────────────────────────────────────────────
+        (
+            "CREATE TABLE IF NOT EXISTS admin_audit_logs ("
+            "id SERIAL PRIMARY KEY,"
+            "event_type VARCHAR(100) NOT NULL,"
+            "entity_type VARCHAR(100) NOT NULL,"
+            "entity_id VARCHAR(255),"
+            "user_id UUID REFERENCES users(id) ON DELETE SET NULL,"
+            "notes TEXT,"
+            "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+            ")"
+        ),
     ]
 
     ok = skipped = 0
@@ -178,5 +237,6 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(batches.router)
 app.include_router(admin.router)
+app.include_router(admin_export_templates.router)
 app.include_router(tenant.router)
 app.include_router(analytics.router)

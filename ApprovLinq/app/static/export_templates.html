@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Approvlinq — Export Templates</title>
+  <link rel="stylesheet" href="/static/css/app.css" />
+  <style>
+    .tpl-badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .tpl-badge.active   { background: var(--success-bg); color: var(--success-text); }
+    .tpl-badge.inactive { background: var(--danger-bg);  color: var(--danger-text);  }
+
+    .col-type-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      background: #eef4fc;
+      color: var(--primary-dark);
+    }
+
+    .col-builder { width: 100%; border-collapse: collapse; }
+    .col-builder th, .col-builder td { padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .col-builder th { background: var(--surface-soft); font-weight: 600; color: var(--muted); text-align: left; }
+    .col-builder td input, .col-builder td select { width: 100%; font-size: 13px; padding: 4px 6px; }
+
+    .move-btn { background: none; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; padding: 2px 7px; font-size: 14px; color: var(--muted); }
+    .move-btn:hover { background: var(--surface-soft); }
+
+    .preview-grid { display: flex; flex-direction: column; gap: 6px; }
+    .preview-header { display: flex; gap: 6px; flex-wrap: wrap; }
+    .preview-header span { background: var(--primary); color: #fff; padding: 3px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+    .preview-row { display: flex; gap: 6px; flex-wrap: wrap; border-top: 1px solid var(--border); padding-top: 4px; }
+    .preview-row span { font-size: 12px; color: var(--text); padding: 2px 8px; background: var(--surface-soft); border-radius: 4px; }
+
+    .assign-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--surface-soft); border: 1px solid var(--border);
+      border-radius: 20px; padding: 4px 12px; font-size: 13px;
+    }
+    .assign-pill button { background: none; border: none; cursor: pointer; color: var(--danger-text); font-size: 14px; padding: 0; }
+
+    #columnEditorSection { display: none; }
+    #columnEditorSection.visible { display: block; }
+
+    .section-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .filter-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+    .filter-row input, .filter-row select { font-size: 13px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; }
+  </style>
+</head>
+<body>
+<div class="page-shell">
+
+  <header class="hero admin-hero">
+    <div class="hero-copy">
+      <div class="hero-copy-top">
+        <h1>Export Templates</h1>
+        <div class="version-badge">v3.61.0</div>
+      </div>
+      <p style="margin-top:10px;opacity:.85;max-width:480px">
+        Define reusable column layouts for accounting system imports. Assign templates to tenants or companies. Templates render as an extra sheet on each batch export.
+      </p>
+    </div>
+    <div class="hero-actions">
+      <div class="hero-logo-wrap">
+        <img src="/static/img/approvlinq-logo.png" alt="Approvlinq" class="hero-logo" />
+      </div>
+      <div class="hero-toolbar">
+        <div class="hero-toolbar-left"></div>
+        <div class="hero-toolbar-right">
+          <a class="btn btn-secondary" href="/static/admin.html">Platform Admin</a>
+          <a class="btn btn-secondary" href="/static/tenant.html">Tenant Admin</a>
+          <button id="logoutBtn" class="btn btn-secondary" type="button">Logout</button>
+          <button id="helpBtn" class="btn btn-secondary help-btn" type="button">?</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div id="pageMessage" class="message"></div>
+
+  <main class="grid">
+
+    <!-- ── CREATE / EDIT TEMPLATE ────────────────────────────────────────── -->
+    <section class="card">
+      <div class="section-head">
+        <h2 id="formTitle">Create Template</h2>
+        <span class="muted">Basic template details. Add columns after saving.</span>
+      </div>
+      <form id="templateForm" class="stack">
+        <input id="tplId" type="hidden" value="" />
+        <input id="tplName" type="text" placeholder="Template name *" required maxlength="255" />
+        <input id="tplAccountingSystem" type="text" placeholder="Target accounting system (e.g. Sage 50, Xero)" maxlength="100" />
+        <input id="tplVersionLabel" type="text" placeholder="Version / revision label" value="v1" maxlength="50" />
+        <textarea id="tplDescription" placeholder="Description (optional)" rows="2"></textarea>
+        <div style="display:flex;gap:12px;align-items:center">
+          <label style="display:flex;gap:6px;align-items:center;font-size:14px">
+            <input id="tplIsActive" type="checkbox" checked /> Active
+          </label>
+          <label style="display:flex;gap:6px;align-items:center;font-size:14px">
+            <input id="tplIsSystemDefault" type="checkbox" /> System default
+          </label>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" type="submit" id="tplSubmitBtn">Create Template</button>
+          <button class="btn btn-secondary" type="button" id="tplCancelBtn" style="display:none">Cancel edit</button>
+        </div>
+      </form>
+      <div id="templateFormMessage" class="message"></div>
+    </section>
+
+    <!-- ── COLUMN EDITOR ──────────────────────────────────────────────────── -->
+    <section class="card full-width" id="columnEditorSection">
+      <div class="section-head">
+        <div>
+          <h2>Column Builder — <span id="editingTemplateName" style="color:var(--primary)"></span></h2>
+          <span class="muted">Drag columns up/down to reorder. Inactive columns are skipped during export.</span>
+        </div>
+        <div class="section-toolbar">
+          <button class="btn btn-primary" id="addColumnBtn" type="button">+ Add Column</button>
+          <button class="btn btn-secondary" id="previewBtn" type="button">Preview</button>
+          <button class="btn btn-secondary" id="closeEditorBtn" type="button">Close</button>
+        </div>
+      </div>
+      <div id="columnEditorMessage" class="message"></div>
+
+      <!-- New column inline form -->
+      <div id="addColumnForm" class="stack" style="display:none;background:var(--surface-soft);padding:14px;border-radius:var(--radius-sm);border:1px solid var(--border);margin-bottom:16px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <input id="newColHeading" type="text" placeholder="Column heading *" maxlength="255" />
+          <select id="newColType">
+            <option value="mapped_field">Mapped field</option>
+            <option value="static_text">Static text</option>
+            <option value="empty_column">Empty column</option>
+            <option value="derived_value">Derived value</option>
+            <option value="conditional_value">Conditional value</option>
+          </select>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px" id="colMappedRow">
+          <select id="newColSourceField"><option value="">— select field —</option></select>
+          <input id="newColStaticValue" type="text" placeholder="Static value" maxlength="500" />
+          <input id="newColTransformRule" type="text" placeholder="Transform rule (e.g. uppercase)" maxlength="200" />
+        </div>
+        <textarea id="newColNotes" placeholder="Notes (optional)" rows="1" maxlength="500"></textarea>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" type="button" id="saveNewColBtn">Add Column</button>
+          <button class="btn btn-secondary" type="button" id="cancelNewColBtn">Cancel</button>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="col-builder">
+          <thead>
+            <tr>
+              <th style="width:40px">Order</th>
+              <th>Heading</th>
+              <th>Type</th>
+              <th>Source / Value</th>
+              <th>Transform</th>
+              <th style="width:60px">Active</th>
+              <th style="width:80px">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="columnTableBody"></tbody>
+        </table>
+      </div>
+
+      <div id="previewPanel" style="display:none;margin-top:16px">
+        <h3 style="margin-bottom:8px">Preview — <span id="previewSheetName" style="color:var(--primary)"></span></h3>
+        <div class="preview-grid">
+          <div class="preview-header" id="previewHeaders"></div>
+          <div class="preview-row" id="previewRow"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── TEMPLATE LIST ──────────────────────────────────────────────────── -->
+    <section class="card full-width">
+      <div class="section-head">
+        <h2>Template List</h2>
+        <button class="btn btn-secondary" id="refreshTemplatesBtn" type="button">Refresh</button>
+      </div>
+      <div class="filter-row">
+        <input id="searchInput" type="text" placeholder="Search templates…" style="flex:1;min-width:180px" />
+        <select id="filterActive">
+          <option value="">All statuses</option>
+          <option value="true">Active only</option>
+          <option value="false">Inactive only</option>
+        </select>
+        <input id="filterSystem" type="text" placeholder="Filter by accounting system" style="min-width:200px" />
+        <button class="btn btn-secondary" type="button" id="applyFilterBtn">Filter</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Accounting System</th>
+              <th>Version</th>
+              <th>Status</th>
+              <th>Columns</th>
+              <th>Created</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="templatesTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── ASSIGNMENTS ────────────────────────────────────────────────────── -->
+    <section class="card full-width">
+      <div class="section-head">
+        <h2>Template Assignments</h2>
+        <span class="muted">Assign templates to tenants or companies. Company assignment takes priority over tenant-level.</span>
+      </div>
+      <form id="assignmentForm" class="stack" style="max-width:600px">
+        <select id="assignTenantId"><option value="">— Select tenant —</option></select>
+        <select id="assignCompanyId"><option value="">Tenant-level (no company)</option></select>
+        <select id="assignTemplateId"><option value="">— Select template —</option></select>
+        <div id="assignEffective" class="message" style="background:var(--surface-soft);display:none"></div>
+        <button class="btn btn-primary" type="submit" id="assignSubmitBtn">Assign Template</button>
+      </form>
+      <div id="assignmentMessage" class="message"></div>
+      <div class="table-wrap" style="margin-top:16px">
+        <table>
+          <thead>
+            <tr>
+              <th>Template</th>
+              <th>Tenant</th>
+              <th>Company</th>
+              <th>Level</th>
+              <th>Status</th>
+              <th>Assigned</th>
+              <th>Remove</th>
+            </tr>
+          </thead>
+          <tbody id="assignmentsTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── AUDIT LOG ──────────────────────────────────────────────────────── -->
+    <section class="card full-width">
+      <div class="section-head">
+        <h2>Audit Log</h2>
+        <button class="btn btn-secondary" id="refreshAuditBtn" type="button">Refresh</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Event</th>
+              <th>Entity</th>
+              <th>ID</th>
+              <th>Notes</th>
+              <th>When</th>
+            </tr>
+          </thead>
+          <tbody id="auditTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script src="/static/js/export_templates.js"></script>
+</body>
+</html>

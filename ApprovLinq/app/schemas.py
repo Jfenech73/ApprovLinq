@@ -221,6 +221,123 @@ class CapacityRow(BaseModel):
     storage_mb: float
 
 
+class ExportTemplateColumnCreate(BaseModel):
+    column_heading: str = Field(min_length=1, max_length=255)
+    column_type: str = Field(pattern="^(mapped_field|static_text|empty_column|derived_value|conditional_value)$")
+    source_field: str | None = Field(default=None, max_length=100)
+    static_value: str | None = Field(default=None, max_length=500)
+    transform_rule: str | None = Field(default=None, max_length=200)
+    column_order: int = Field(default=0, ge=0)
+    is_active: bool = True
+    notes: str | None = None
+
+
+class ExportTemplateColumnUpdate(BaseModel):
+    column_heading: str | None = Field(default=None, max_length=255)
+    column_type: str | None = Field(default=None, pattern="^(mapped_field|static_text|empty_column|derived_value|conditional_value)$")
+    source_field: str | None = None
+    static_value: str | None = None
+    transform_rule: str | None = None
+    column_order: int | None = Field(default=None, ge=0)
+    is_active: bool | None = None
+    notes: str | None = None
+
+
+class ExportTemplateColumnOut(BaseModel):
+    id: int
+    template_id: UUID
+    column_order: int
+    column_heading: str
+    column_type: str
+    source_field: str | None = None
+    static_value: str | None = None
+    transform_rule: str | None = None
+    is_active: bool
+    notes: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class ExportTemplateCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    accounting_system: str | None = Field(default=None, max_length=100)
+    version_label: str = Field(default="v1", max_length=50)
+    is_active: bool = True
+    is_system_default: bool = False
+
+
+class ExportTemplateUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=255)
+    description: str | None = None
+    accounting_system: str | None = Field(default=None, max_length=100)
+    version_label: str | None = Field(default=None, max_length=50)
+    is_active: bool | None = None
+    is_system_default: bool | None = None
+
+
+class ExportTemplateOut(BaseModel):
+    id: UUID
+    name: str
+    description: str | None = None
+    accounting_system: str | None = None
+    version_label: str
+    is_active: bool
+    is_system_default: bool
+    created_at: datetime
+    updated_at: datetime
+    created_by: UUID | None = None
+    updated_by: UUID | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class ExportTemplateDetailOut(ExportTemplateOut):
+    columns: list[ExportTemplateColumnOut] = Field(default_factory=list)
+
+
+class ColumnReorderItem(BaseModel):
+    id: int
+    column_order: int = Field(ge=0)
+
+
+class TemplateAssignmentCreate(BaseModel):
+    template_id: UUID
+    tenant_id: UUID
+    company_id: UUID | None = None
+    is_active: bool = True
+
+
+class TemplateAssignmentOut(BaseModel):
+    id: int
+    template_id: UUID
+    tenant_id: UUID
+    company_id: UUID | None = None
+    is_active: bool
+    assigned_at: datetime
+    assigned_by: UUID | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class AdminAuditLogOut(BaseModel):
+    id: int
+    event_type: str
+    entity_type: str
+    entity_id: str | None = None
+    user_id: UUID | None = None
+    notes: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TemplatePreviewOut(BaseModel):
+    sheet_name: str
+    columns: list[str]
+    sample_rows: list[dict]
+
+
 class BatchCreate(BaseModel):
     batch_name: str = Field(min_length=1, max_length=255)
     company_id: UUID
