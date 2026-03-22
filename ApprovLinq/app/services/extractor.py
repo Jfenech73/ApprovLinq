@@ -44,16 +44,26 @@ def count_meaningful_chars(text: str) -> int:
 
 
 def preprocess_page_image(jpeg_bytes: bytes) -> tuple[bytes, float]:
-    """Stage 1 image preprocessing: enhance contrast, reduce bleed-through noise,
-    and score page quality.
+    """Stage 1 image preprocessing: adaptive 2-level darkening, bleed-through
+    suppression, and page quality scoring.
+
+    Darkening levels are chosen based on measured page brightness BEFORE any
+    enhancement — so the decision is made on the raw scan with no extra API
+    calls:
+
+        Level 0 (quality ≥ 0.68) — Good scan: minimal touch-up only.
+            Contrast ×1.25, Sharpness ×1.15. No brightness adjustment.
+        Level 1 (0.40 ≤ quality < 0.68) — Medium scan: standard darkening.
+            Contrast ×1.55, Sharpness ×1.30, optional gentle brightness lift.
+        Level 2 (quality < 0.40) — Faded/light scan: aggressive darkening.
+            Contrast ×1.90, Sharpness ×1.50, stronger brightness correction,
+            unsharp-mask to recover soft edges.
+
+    Quality score returned is computed on the RAW image (pre-enhancement) so
+    it reflects actual scan quality, not the artificially boosted result.
 
     Returns:
         (processed_jpeg_bytes, quality_score 0.0–1.0)
-
-    Quality score:
-        • 0.8–1.0 — clear, high-contrast scan
-        • 0.5–0.8 — usable but may have noise or low contrast
-        • 0.0–0.5 — poor quality; likely bleed-through, rotation, or low ink
     """
     try:
         import io
@@ -66,43 +76,64 @@ def preprocess_page_image(jpeg_bytes: bytes) -> tuple[bytes, float]:
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
 
-        # ── Quality scoring (from grayscale pixel distribution) ────────────
+        # ── Quality scoring on the RAW image (before any enhancement) ──────
         gray = img.convert("L")
         pixels = list(gray.getdata())
-        mean_px = sum(pixels) / max(len(pixels), 1)
+        mean_px   = sum(pixels) / max(len(pixels), 1)
         try:
             std_px = statistics.stdev(pixels)
         except statistics.StatisticsError:
             std_px = 0.0
-        # High std = high contrast = good scan; mid-range brightness is ideal
-        contrast_score = min(std_px / 75.0, 1.0)
+
+        # High std → high contrast → good scan
+        # Brightness ideally around 128 (not too dark, not too washed out)
+        contrast_score   = min(std_px / 75.0, 1.0)
         brightness_score = 1.0 - abs(mean_px - 128.0) / 128.0
-        quality_score = round(contrast_score * 0.65 + brightness_score * 0.35, 2)
+        quality_score    = round(contrast_score * 0.65 + brightness_score * 0.35, 2)
 
-        # ── Enhancement pass ───────────────────────────────────────────────
-        # 1. Contrast boost — helps faded/low-ink scans
-        img = ImageEnhance.Contrast(img).enhance(1.45)
-
-        # 2. Sharpness boost — helps blurry or low-res scans
-        img = ImageEnhance.Sharpness(img).enhance(1.25)
-
-        # 3. Bleed-through suppression — a median filter reduces the
-        #    fine-grained noise caused by ink from the reverse side of
-        #    thin paper showing through.  Size=3 is fast and effective.
+        # ── Bleed-through suppression (always) ─────────────────────────────
+        # A small median filter knocks out fine ink-bleed noise from thin paper
+        # without affecting character edges.  Applied before enhancement so the
+        # noise is removed before we amplify contrast.
         img = img.filter(ImageFilter.MedianFilter(size=3))
 
-        # 4. Brightness normalisation — very dark scans get a gentle lift
-        if mean_px < 100:
-            img = ImageEnhance.Brightness(img).enhance(1.2)
+        # ── Adaptive enhancement — 2 levels based on raw quality ───────────
+        if quality_score >= 0.68:
+            # Level 0 — good scan: conservative touch-up
+            img = ImageEnhance.Contrast(img).enhance(1.25)
+            img = ImageEnhance.Sharpness(img).enhance(1.15)
+            level = 0
+
+        elif quality_score >= 0.40:
+            # Level 1 — medium scan: standard darkening
+            img = ImageEnhance.Contrast(img).enhance(1.55)
+            img = ImageEnhance.Sharpness(img).enhance(1.30)
+            if mean_px > 180:          # washed-out / very bright page
+                img = ImageEnhance.Brightness(img).enhance(0.88)
+            elif mean_px < 100:        # unusually dark scan
+                img = ImageEnhance.Brightness(img).enhance(1.18)
+            level = 1
+
+        else:
+            # Level 2 — faded / very light scan: aggressive darkening
+            img = ImageEnhance.Contrast(img).enhance(1.90)
+            img = ImageEnhance.Sharpness(img).enhance(1.50)
+            if mean_px > 160:          # faded page
+                img = ImageEnhance.Brightness(img).enhance(0.80)
+            elif mean_px < 90:         # very dark scan (inverted / over-exposed)
+                img = ImageEnhance.Brightness(img).enhance(1.25)
+            # Unsharp mask to recover soft letter edges on very faded originals
+            img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=120, threshold=3))
+            level = 2
 
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=88, optimize=True)
         processed = buf.getvalue()
 
         logger.debug(
-            "preprocess_page_image: quality=%.2f (contrast=%.2f brightness=%.2f) "
-            "input=%d bytes output=%d bytes",
-            quality_score, contrast_score, brightness_score,
+            "preprocess_page_image: level=%d quality=%.2f (contrast=%.2f "
+            "brightness=%.2f mean_px=%.0f) input=%d bytes output=%d bytes",
+            level, quality_score, contrast_score, brightness_score, mean_px,
             len(jpeg_bytes), len(processed),
         )
         return processed, quality_score
@@ -957,10 +988,19 @@ def simple_extract(
 
     _curr = r"(?:EUR|GBP|USD|€|£|\$)?"
     net_raw = first_match([
-        rf"(?:subtotal|sub total|net amount|amount excl(?:uding)? vat|taxable amount)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)"
+        rf"(?:subtotal|sub[\s\-]?total|net[\s\-]?amount|amount\s+excl(?:uding)?\.?\s*(?:vat|tax)?|excl(?:uding)?\.?\s*(?:vat|tax)|net\s+total|taxable[\s\-]?amount|amount\s+before\s+(?:vat|tax))\s*[:\-]?\s*{_curr}\s*([0-9.,]+)"
     ], text)
+    # VAT / tax patterns — covers V.A.T., VAT@rate%, IVA, tax amount, value added tax,
+    # and standalone "vat" or "tax" followed by a currency amount.
     vat_raw = first_match([
-        rf"(?:vat|tax|iva)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)"
+        # Most specific: "V.A.T" / "VAT" with optional rate% prefix then amount
+        rf"v\.?a\.?t\.?\s*(?:@\s*\d{{1,2}}\s*%\s*)?[:\-]?\s*{_curr}\s*([0-9.,]+)",
+        # value added tax / vat amount / tax amount
+        rf"(?:value\s+added\s+tax|vat\s+amount|tax\s+amount)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)",
+        # IVA (EU/IE terminology)
+        rf"(?:iva|gst)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)",
+        # Bare "tax" on a line with number following
+        rf"(?:^|\n)\s*tax\s*[:\-]?\s*{_curr}\s*([0-9.,]+)",
     ], text)
     total_raw = first_match([
         # Specific multi-word labels first (more precise)
@@ -1468,6 +1508,47 @@ def azure_di_extract_invoice(
         if line_items:
             items_conf = min(0.95, 0.70 + 0.05 * len(line_items))
 
+    # ── VAT recovery when TotalTax field is absent ──────────────────────────
+    # Azure DI's TotalTax field can be unpopulated on some invoice layouts even
+    # when VAT is clearly printed.  Two structured fallbacks recover the value
+    # without any additional API calls:
+    #
+    # 1. Sum line-level Tax values — most accurate; each line carries its own
+    #    tax amount which Azure DI often reads from the table body correctly.
+    # 2. Implied arithmetic — total − net when the result is within a plausible
+    #    VAT range (1 %–40 %) and both total & net were extracted confidently.
+    if vat_amount is None and line_items:
+        line_tax_total = sum(
+            float(it["tax_amount"])
+            for it in line_items
+            if it.get("tax_amount") is not None and float(it["tax_amount"]) > 0
+        )
+        if line_tax_total >= 0.01:
+            vat_amount = round(line_tax_total, 2)
+            t_conf_tax = round(items_conf * 0.90, 2)
+            logger.info(
+                "Azure DI: VAT recovered from line-level Tax sum = %.2f", vat_amount
+            )
+
+    if vat_amount is None and net_amount is not None and total_amount is not None:
+        implied_vat = round(float(total_amount) - float(net_amount), 2)
+        net_f = float(net_amount)
+        # Accept only if the implied rate is within a plausible range (1–40%)
+        # and both figures were extracted with reasonable confidence.
+        if (
+            implied_vat > 0.01
+            and net_f > 0
+            and 0.01 <= implied_vat / net_f <= 0.40
+            and t_conf_sub >= 0.50
+            and t_conf_tot >= 0.50
+        ):
+            vat_amount = implied_vat
+            t_conf_tax = round((t_conf_sub + t_conf_tot) / 2 * 0.75, 2)
+            logger.info(
+                "Azure DI: VAT inferred from total−net = %.2f (rate=%.1f%%)",
+                vat_amount, implied_vat / net_f * 100,
+            )
+
     # ── Description: derive from line items ─────────────────────────────────
     descs = [it["description"] for it in line_items if it.get("description")]
     description = limit_to_20_words("; ".join(descs)) if descs else None
@@ -1798,19 +1879,36 @@ def merge_ai_fields(
 
     ai_supplier_conf = float((ai.get("ai_confidence") or {}).get("supplier", 0.0))
     is_azure_di = ai.get("extraction_source") == "azure_di"
-    conf_threshold = 0.6 if is_azure_di else 0.85
     rule_supplier_ok = bool(
         merged.get("supplier_name")
         and not suspicious_supplier_name(merged.get("supplier_name"))
     )
-    if not rule_supplier_ok:
-        # Rule-based found nothing useful — take AI regardless of confidence
-        if ai_supplier and not suspicious_supplier_name(ai_supplier):
+
+    if ai_supplier and not suspicious_supplier_name(ai_supplier):
+        if is_azure_di:
+            # Azure DI uses a dedicated VendorName field from its prebuilt-invoice
+            # model — a semantically trained slot, not a free-text scan.  Its
+            # confidence score can be low for stylised logos / unusual fonts, but
+            # the extracted value is almost always more reliable than position-
+            # heuristic rule-based detection.
+            # Policy: always prefer Azure DI's VendorName over rule-based,
+            # even when rule-based found something plausible.  The account-company
+            # hard-block above is the sufficient guard against the customer-name
+            # confusion case.
             merged["supplier_name"] = ai_supplier
-    else:
-        # Rule-based found something — upgrade to AI result if AI is sufficiently confident
-        if ai_supplier and not suspicious_supplier_name(ai_supplier) and ai_supplier_conf >= conf_threshold:
-            merged["supplier_name"] = ai_supplier
+            if rule_supplier_ok and merged["supplier_name"] != ai_supplier:
+                logger.info(
+                    "merge_ai_fields: Azure DI VendorName '%s' overrides rule-based '%s'",
+                    ai_supplier, merged.get("supplier_name"),
+                )
+        else:
+            # OpenAI vision / text: free-form reading — keep the stricter gate
+            # (≥ 0.85) to prevent picking up customer name printed elsewhere.
+            if not rule_supplier_ok:
+                merged["supplier_name"] = ai_supplier
+            elif ai_supplier_conf >= 0.85:
+                merged["supplier_name"] = ai_supplier
+
     # Clean OCR artefacts (embedded newlines, leading junk chars) then normalise casing.
     merged["supplier_name"] = normalise_company_name(
         _clean_ocr_supplier_name(merged.get("supplier_name"))
@@ -1828,12 +1926,25 @@ def merge_ai_fields(
         merged["due_date"] = ai.get("due_date")
 
     # -- Amounts ---------------------------------------------------------------
-    if merged.get("net_amount") is None and ai.get("net_amount") is not None:
-        merged["net_amount"] = ai.get("net_amount")
-    if merged.get("vat_amount") is None and ai.get("vat_amount") is not None:
-        merged["vat_amount"] = ai.get("vat_amount")
-    if merged.get("total_amount") is None and ai.get("total_amount") is not None:
-        merged["total_amount"] = ai.get("total_amount")
+    # Azure DI reads SubTotal / TotalTax / InvoiceTotal as dedicated semantic
+    # fields from its prebuilt-invoice model and is significantly more reliable
+    # than position-heuristic rule-based regex on multi-column invoice layouts.
+    # Policy: if Azure DI returned a value, it REPLACES the rule-based value
+    # (not just fills gaps).  OpenAI vision/text only fills gaps.
+    if is_azure_di:
+        if ai.get("net_amount") is not None:
+            merged["net_amount"] = ai["net_amount"]
+        if ai.get("vat_amount") is not None:
+            merged["vat_amount"] = ai["vat_amount"]
+        if ai.get("total_amount") is not None:
+            merged["total_amount"] = ai["total_amount"]
+    else:
+        if merged.get("net_amount") is None and ai.get("net_amount") is not None:
+            merged["net_amount"] = ai.get("net_amount")
+        if merged.get("vat_amount") is None and ai.get("vat_amount") is not None:
+            merged["vat_amount"] = ai.get("vat_amount")
+        if merged.get("total_amount") is None and ai.get("total_amount") is not None:
+            merged["total_amount"] = ai.get("total_amount")
 
     # -- Metadata --------------------------------------------------------------
     if not merged.get("currency") and ai.get("currency"):
