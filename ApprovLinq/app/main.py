@@ -132,6 +132,9 @@ def ensure_runtime_schema() -> None:
             ")"
         ),
 
+        # ── export_template_columns — new columns ─────────────────────────────
+        "ALTER TABLE export_template_columns ADD COLUMN IF NOT EXISTS condition_rules JSONB",
+
         # ── template_assignments ──────────────────────────────────────────────
         (
             "CREATE TABLE IF NOT EXISTS template_assignments ("
