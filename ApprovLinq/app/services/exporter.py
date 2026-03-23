@@ -141,9 +141,14 @@ def workbook_from_rows(
     )
 
     meta = batch_metadata or {}
+    _filenames = (
+        sorted(df["source_filename"].dropna().replace("", pd.NA).dropna().unique())
+        if "source_filename" in df.columns else []
+    )
     summary = {
         "batch_name":           [meta.get("batch_name", "")],
         "batch_id":             [meta.get("batch_id", "")],
+        "uploaded_files":       [", ".join(_filenames)],
         "scan_mode":            [meta.get("scan_mode", "")],
         "total_rows":           [len(df)],
         "needs_review":         [len(review_df)],
