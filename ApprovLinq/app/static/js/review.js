@@ -11,8 +11,9 @@ const batchId = params.get("batch_id");
 let state = { batch: null, rows: [], filter: "all", selected: null, page: 1, fileId: null };
 
 const $ = (id) => document.getElementById(id);
-const tok = () => localStorage.getItem("token") || localStorage.getItem("access_token") || "";
-const hdrs = () => ({ "Content-Type": "application/json", "Authorization": "Bearer " + tok() });
+// Use the existing app's auth helpers from common.js — token key is "approvlinq_token"
+// and authHeaders() also adds the X-Tenant-Id header that tenant-scoped routes require.
+const hdrs = () => authHeaders({ "Content-Type": "application/json" });
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -216,4 +217,8 @@ $("previewImg").addEventListener("mouseup", async (e) => {
   msg("Remap saved", "success");
 });
 
-load();
+if (typeof ensureAuth === "function" && !ensureAuth()) {
+  // ensureAuth() will redirect to /login
+} else {
+  load();
+}
