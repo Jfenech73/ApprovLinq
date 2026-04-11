@@ -8,7 +8,7 @@ const FIELDS = [
 ];
 const params = new URLSearchParams(location.search);
 const batchId = params.get("batch_id");
-let state = { batch: null, rows: [], filter: "all", selected: null, page: 1, fileId: null };
+let state = { batch: null, rows: [], filter: "all", selected: null, page: 1, fileId: null, pageCount: 1 };
 
 const $ = (id) => document.getElementById(id);
 // Use the existing app's auth helpers from common.js — token key is "approvlinq_token"
@@ -38,7 +38,7 @@ async function load() {
       state.page = state.rows[0].page_no || 1;
     }
     render();
-    if (state.selected != null) { loadAudit(state.selected); refreshPreview(); }
+    if (state.selected != null) { loadAudit(state.selected); await ensurePageCount(); refreshPreview(); }
   } catch (e) { msg("Load failed: " + e.message, "error"); }
 }
 
@@ -71,9 +71,9 @@ function render() {
     d.innerHTML =
       `<div><strong>${esc(r.current.supplier_name) || "<no supplier>"}</strong> · ${esc(r.current.total_amount) || ""}</div>
        <div class="meta">${esc(r.source_filename || "file")} · page ${r.page_no} · row #${r.id}${r.confidence_score != null ? " · conf " + r.confidence_score.toFixed(2) : ""}</div>`;
-    d.onclick = () => {
+    d.onclick = async () => {
       state.selected = r.id; state.fileId = r.source_file_id; state.page = r.page_no || 1;
-      render(); loadAudit(r.id); refreshPreview();
+      render(); loadAudit(r.id); await ensurePageCount(); refreshPreview();
     };
     list.appendChild(d);
   });
@@ -162,14 +162,51 @@ async function loadAudit(rowId) {
   } catch (e) { /* ignore */ }
 }
 
-function refreshPreview() {
-  if (!state.fileId) { $("previewImg").src = ""; return; }
-  $("previewImg").src = `/review/files/${state.fileId}/preview?page=${state.page}&t=${Date.now()}`;
-  $("pageLabel").textContent = "page " + state.page;
+async function fetchPageCount() {
+  if (!state.fileId) { state.pageCount = 1; return; }
+  try {
+    const r = await fetch(`/review/files/${state.fileId}/info`, { headers: hdrs() });
+    if (r.ok) {
+      const d = await r.json();
+      state.pageCount = Math.max(1, d.page_count || 1);
+    } else { state.pageCount = 1; }
+  } catch { state.pageCount = 1; }
+  if (state.page > state.pageCount) state.page = state.pageCount;
+  if (state.page < 1) state.page = 1;
+  updatePageControls();
 }
 
-$("prevPageBtn").onclick = () => { if (state.page > 1) { state.page--; refreshPreview(); } };
-$("nextPageBtn").onclick = () => { state.page++; refreshPreview(); };
+function updatePageControls() {
+  $("pageLabel").textContent = `page ${state.page} / ${state.pageCount}`;
+  $("prevPageBtn").disabled = state.page <= 1;
+  $("nextPageBtn").disabled = state.page >= state.pageCount;
+}
+
+function refreshPreview() {
+  if (!state.fileId) { $("previewImg").src = ""; $("pageLabel").textContent = "page — / —"; return; }
+  $("previewImg").src = `/review/files/${state.fileId}/preview?page=${state.page}&t=${Date.now()}`;
+  updatePageControls();
+}
+
+// Re-fetch page count whenever the file changes
+let _lastFileId = null;
+async function ensurePageCount() {
+  if (state.fileId !== _lastFileId) {
+    _lastFileId = state.fileId;
+    await fetchPageCount();
+  }
+}
+
+$("prevPageBtn").onclick = async () => {
+  await ensurePageCount();
+  if (state.page > 1) { state.page--; refreshPreview(); }
+};
+$("nextPageBtn").onclick = async () => {
+  await ensurePageCount();
+  if (state.page < state.pageCount) { state.page++; refreshPreview(); }
+};
+
+
 
 document.querySelectorAll(".filter-chips .btn").forEach(b => {
   b.onclick = () => { state.filter = b.dataset.filter; render(); };
@@ -216,51 +253,70 @@ document.addEventListener("click", (e) => {
   if (el) setRemapField(el.getAttribute("data-field"));
 });
 
-$("remapMode").addEventListener("change", (e) => {
+$("remapMode").addEventListener("change", async (e) => {
   const on = e.target.checked;
   previewWrap.classList.toggle("remap-active", on);
   remapHint.hidden = !on;
-  if (!on) { remapSel.hidden = true; dragStart = null; }
+  if (!on) { remapSel.hidden = true; dragStart = null; return; }
+  // If no row / file loaded yet, auto-select first row so the preview opens.
+  if (!state.fileId && state.rows.length) {
+    const r0 = state.rows[0];
+    state.selected = r0.id; state.fileId = r0.source_file_id; state.page = r0.page_no || 1;
+    render(); loadAudit(r0.id); await ensurePageCount(); refreshPreview();
+  } else if (state.fileId && !previewImg.src) {
+    refreshPreview();
+  }
+  if (!remapField) msg("Click a field in the editor, then drag on the preview.", "");
 });
 
-let dragStart = null;
-function pctFromEvent(e) {
+let dragStart = null;        // {xPx, yPx} pixel coords relative to image top-left
+let imgRectCache = null;     // cached image getBoundingClientRect
+
+function imgPxFromEvent(e) {
   const r = previewImg.getBoundingClientRect();
-  return {
-    x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
-    y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
-  };
+  const x = Math.min(r.width,  Math.max(0, e.clientX - r.left));
+  const y = Math.min(r.height, Math.max(0, e.clientY - r.top));
+  return { xPx: x, yPx: y, w: r.width, h: r.height };
 }
 function drawSel(a, b) {
-  const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
-  const w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
-  remapSel.style.left = (x * 100) + "%";
-  remapSel.style.top = (y * 100) + "%";
-  remapSel.style.width = (w * 100) + "%";
-  remapSel.style.height = (h * 100) + "%";
+  // Position the overlay in pixel coordinates relative to the WRAPPER,
+  // by computing the image's offset inside the wrapper. This guarantees the
+  // rectangle aligns to the rendered image regardless of wrapper padding/margins.
+  const imgRect = previewImg.getBoundingClientRect();
+  const wrapRect = previewWrap.getBoundingClientRect();
+  const offX = imgRect.left - wrapRect.left;
+  const offY = imgRect.top  - wrapRect.top;
+  const x = Math.min(a.xPx, b.xPx);
+  const y = Math.min(a.yPx, b.yPx);
+  const w = Math.abs(b.xPx - a.xPx);
+  const h = Math.abs(b.yPx - a.yPx);
+  remapSel.style.left   = (offX + x) + "px";
+  remapSel.style.top    = (offY + y) + "px";
+  remapSel.style.width  = w + "px";
+  remapSel.style.height = h + "px";
   remapSel.hidden = false;
-  return { x, y, w, h };
+  return { x: x / a.w, y: y / a.h, wN: w / a.w, hN: h / a.h };
 }
 
 previewImg.addEventListener("mousedown", (e) => {
   if (!$("remapMode").checked) return;
   if (!remapField) { msg("Click a field in the editor first, then drag on the preview.", "error"); return; }
   e.preventDefault();
-  dragStart = pctFromEvent(e);
+  dragStart = imgPxFromEvent(e);
   drawSel(dragStart, dragStart);
 });
 previewWrap.addEventListener("mousemove", (e) => {
   if (!dragStart) return;
-  drawSel(dragStart, pctFromEvent(e));
+  drawSel(dragStart, imgPxFromEvent(e));
 });
 window.addEventListener("mouseup", async (e) => {
   if (!dragStart) return;
-  const end = pctFromEvent(e);
+  const end = imgPxFromEvent(e);
   const region = drawSel(dragStart, end);
   dragStart = null;
-  if (region.w < 0.005 || region.h < 0.005) {
+  if (region.wN < 0.01 || region.hN < 0.01) {
     remapSel.hidden = true;
-    return; // accidental click
+    return; // accidental click / too-small
   }
   const row = state.rows.find(x => x.id === state.selected);
   if (!row) { msg("Select a row first.", "error"); return; }
@@ -273,7 +329,7 @@ window.addEventListener("mouseup", async (e) => {
     body: JSON.stringify({
       field_name: remapField,
       page_no: state.page,
-      x: region.x, y: region.y, w: region.w, h: region.h,
+      x: region.x, y: region.y, w: region.wN, h: region.hN,
       file_id: state.fileId,
     }),
   });

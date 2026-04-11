@@ -764,9 +764,11 @@ tr:last-child td {
 /* ── Review preview + remap mode ────────────────────────────────────────── */
 .preview-wrap {
   position: relative;
-  display: block;
+  display: inline-block;
+  max-width: 100%;
   margin-top: 12px;
   user-select: none;
+  line-height: 0;   /* kill inline-block whitespace under img */
 }
 .preview-img {
   display: block;
@@ -805,4 +807,45 @@ tr:last-child td {
   content: "no field selected";
   color: #8a95a8;
   font-weight: 400;
+}
+
+/* ── Row editor field grid ──────────────────────────────────────────────── */
+.field-grid {
+  display: grid;
+  grid-template-columns: 140px 1fr auto auto;
+  gap: 6px 10px;
+  align-items: center;
+}
+.field-grid > label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+}
+.field-grid > input {
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid #d7e1ec;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.field-grid > .rule-cb {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #475569;
+  white-space: nowrap;
+}
+.field-grid > .rule-cb input { margin: 0; }
+.field-grid > button[data-revert] {
+  padding: 4px 10px;
+  font-size: 14px;
+  line-height: 1;
+  min-width: 34px;
+}
+.field-grid > .orig {
+  grid-column: 2 / -1;
+  font-size: 11px;
+  color: #64748b;
+  margin: -2px 0 4px 0;
 }

@@ -181,6 +181,24 @@ def reopen(batch_id: UUID, db: Session = Depends(get_db), user=Depends(current_u
     return {"status": batch.status}
 
 
+# ── PDF file info (page count) ────────────────────────────────────────────────
+@router.get("/files/{file_id}/info")
+def file_info(file_id: int, db: Session = Depends(get_db), user=Depends(current_user)):
+    f = db.get(M.InvoiceFile, file_id)
+    if not f:
+        raise HTTPException(404, "File not found")
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(f.file_path)
+        pc = doc.page_count
+        doc.close()
+    except ImportError:
+        pc = 1
+    except Exception:
+        pc = 1
+    return {"file_id": file_id, "page_count": pc}
+
+
 # ── PDF preview (on-demand, not stored) ───────────────────────────────────────
 @router.get("/files/{file_id}/preview")
 def preview(file_id: int, page: int = 1, db: Session = Depends(get_db), user=Depends(current_user)):
