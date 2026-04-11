@@ -329,6 +329,14 @@ $("exportBtn").addEventListener("click", async () => {
 });
 
 $("refreshRowsBtn").addEventListener("click", loadRows);
+
+$("reviewBtn").addEventListener("click", () => {
+  if (!state.selectedBatchId) {
+    alert("Select a batch first.");
+    return;
+  }
+  window.location.href = `/static/review.html?batch_id=${state.selectedBatchId}`;
+});
 const logoutBtn = document.getElementById("logoutBtn");
 if (logoutBtn) {
   logoutBtn.addEventListener("click", logoutAndGo);

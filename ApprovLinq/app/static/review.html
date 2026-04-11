@@ -1,50 +1,128 @@
-<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Review Batch - ApprovLinq</title>
-<link rel="stylesheet" href="/static/css/app.css">
-<style>
-.review-wrap{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px}
-.panel{background:#fff;border:1px solid #e3e3e3;border-radius:8px;padding:12px;overflow:auto;max-height:90vh}
-.row-card{padding:8px;border-bottom:1px solid #eee;cursor:pointer}
-.row-card.flagged{background:#fff7e6}.row-card.corrected{background:#e6f7ff}
-.row-card.selected{background:#dff0d8}
-.field-row{display:grid;grid-template-columns:140px 1fr auto auto;gap:6px;align-items:center;margin:4px 0}
-.status-pill{display:inline-block;padding:2px 10px;border-radius:12px;background:#eee;font-size:12px}
-.status-pill.in_review{background:#ffe7a3}.status-pill.approved{background:#c6f0c8}.status-pill.exported{background:#cfe2ff}
-.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
-.toolbar button,.actions button{padding:6px 12px;border:1px solid #aaa;border-radius:4px;background:#f7f7f7;cursor:pointer}
-.actions{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}
-.preview-img{max-width:100%;border:1px solid #ddd}
-.note-area{width:100%;min-height:50px;margin-top:6px}
-.force-add{color:#c00;font-size:12px}
-.rule-cb{font-size:11px;color:#555}
-</style></head>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Approvlinq — Batch Review</title>
+  <link rel="stylesheet" href="/static/css/app.css" />
+  <style>
+    /* Page-specific layout only — colours/buttons/cards inherited from app.css */
+    .review-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px; }
+    @media (max-width: 1100px) { .review-grid { grid-template-columns: 1fr; } }
+    .review-row { padding: 10px 12px; border: 1px solid #e3e6ea; border-radius: 6px;
+                  margin-bottom: 8px; cursor: pointer; background: #fff; }
+    .review-row:hover { border-color: #1f4e8c; }
+    .review-row.selected { border-color: #1f4e8c; background: #f3f7fc; }
+    .review-row.flagged { border-left: 4px solid #d97706; }
+    .review-row.corrected { border-left: 4px solid #2563eb; }
+    .review-row .meta { font-size: 12px; color: #6b7280; margin-top: 2px; }
+    .field-grid { display: grid; grid-template-columns: 160px 1fr auto auto; gap: 6px 10px;
+                  align-items: center; }
+    .field-grid label { font-size: 13px; color: #374151; }
+    .field-grid input { width: 100%; padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 4px;
+                        font-size: 13px; }
+    .field-grid .orig { grid-column: 2 / 5; font-size: 11px; color: #9ca3af; margin: -2px 0 4px; }
+    .field-grid .rule-cb { font-size: 11px; color: #4b5563; white-space: nowrap; }
+    .preview-img { width: 100%; max-width: 100%; border: 1px solid #d1d5db; border-radius: 4px;
+                   margin-top: 8px; }
+    .pill.scanned   { background: #e5e7eb; color: #374151; }
+    .pill.in_review { background: #fef3c7; color: #92400e; }
+    .pill.approved  { background: #d1fae5; color: #065f46; }
+    .pill.exported  { background: #dbeafe; color: #1e40af; }
+    .audit-entry { font-size: 12px; padding: 6px 0; border-bottom: 1px solid #e5e7eb; }
+    .audit-entry .badge { font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-left: 4px; }
+    .audit-entry .badge.rule  { background: #d1fae5; color: #065f46; }
+    .audit-entry .badge.force { background: #fee2e2; color: #991b1b; }
+    .filter-chips .btn.active { background: #1f4e8c; color: #fff; }
+    .row-list { max-height: 480px; overflow-y: auto; }
+  </style>
+</head>
 <body>
-<div id="header"></div>
-<div class="review-wrap">
-  <div class="panel" id="left">
-    <div id="batch-header"></div>
-    <div class="toolbar">
-      <button data-filter="all">All</button>
-      <button data-filter="needs_review">Needs review</button>
-      <button data-filter="corrected">Corrected</button>
-      <button data-filter="low_conf">Low confidence</button>
-    </div>
-    <div id="row-list"></div>
-    <div id="row-editor"></div>
-    <div class="actions">
-      <button id="btn-approve">Approve</button>
-      <button id="btn-export">Export</button>
-      <button id="btn-reopen">Reopen (if exported)</button>
+  <div class="page-shell">
+    <div class="page">
+      <header class="hero scanner-hero">
+        <div class="hero-copy">
+          <div class="hero-copy-top">
+            <h1>Batch Review</h1>
+            <div class="version-badge" id="batchStatusPill">—</div>
+          </div>
+          <div class="hero-copy-bottom">
+            <a class="btn btn-secondary" href="/static/scanner.html">← Back to Scanner</a>
+          </div>
+        </div>
+        <div class="hero-actions">
+          <div class="hero-logo-wrap">
+            <img src="/static/img/approvlinq-logo.png" alt="Approvlinq" class="hero-logo" />
+          </div>
+          <div class="hero-toolbar">
+            <div class="hero-toolbar-right">
+              <a class="btn btn-secondary" href="/static/tenant.html">Tenant Admin</a>
+              <a class="btn btn-secondary" href="/static/analytics.html">Analytics</a>
+              <button id="logoutBtn" class="btn btn-secondary" type="button">Logout</button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div id="pageMessage" class="message"></div>
+
+      <main class="stack-lg">
+        <section class="card">
+          <div class="section-head">
+            <h2 id="batchTitle">Loading…</h2>
+            <div class="row gap-sm wrap">
+              <button id="approveBtn" class="btn btn-secondary" type="button">Approve</button>
+              <button id="exportBtn"  class="btn btn-primary"   type="button">Export Excel</button>
+              <button id="reopenBtn"  class="btn btn-secondary" type="button">Reopen</button>
+            </div>
+          </div>
+          <div class="batch-meta">
+            <div><span class="label">Rows</span><span id="statRows">-</span></div>
+            <div><span class="label">Corrected</span><span id="statCorrected">-</span></div>
+            <div><span class="label">Flagged</span><span id="statFlagged">-</span></div>
+            <div><span class="label">Export version</span><span id="statVersion">-</span></div>
+          </div>
+        </section>
+
+        <div class="review-grid">
+          <section class="card">
+            <div class="section-head">
+              <h2>Rows</h2>
+              <div class="row gap-sm wrap filter-chips">
+                <button class="btn btn-secondary active" data-filter="all" type="button">All</button>
+                <button class="btn btn-secondary"        data-filter="needs_review" type="button">Needs review</button>
+                <button class="btn btn-secondary"        data-filter="corrected"    type="button">Corrected</button>
+                <button class="btn btn-secondary"        data-filter="low_conf"     type="button">Low confidence</button>
+              </div>
+            </div>
+            <div id="rowList" class="row-list"></div>
+          </section>
+
+          <section class="card">
+            <div class="section-head">
+              <h2>Edit selected row</h2>
+              <div class="row gap-sm wrap">
+                <button id="prevPageBtn" class="btn btn-secondary" type="button">◀</button>
+                <span id="pageLabel" class="muted">page 1</span>
+                <button id="nextPageBtn" class="btn btn-secondary" type="button">▶</button>
+                <label class="row gap-sm" style="align-items:center;font-size:12px">
+                  <input type="checkbox" id="remapMode" /> Remap mode
+                </label>
+              </div>
+            </div>
+            <div id="rowEditor" class="stack"></div>
+            <img id="previewImg" class="preview-img" alt="" />
+            <div class="stack" style="margin-top:12px">
+              <h3>Row history</h3>
+              <div id="auditList"></div>
+            </div>
+          </section>
+        </div>
+      </main>
     </div>
   </div>
-  <div class="panel" id="right">
-    <h3>Invoice preview</h3>
-    <div><button id="prev-page">◀</button> <span id="page-label">page 1</span> <button id="next-page">▶</button>
-      <label style="margin-left:12px"><input type="checkbox" id="remap-mode"> Remap mode</label>
-    </div>
-    <img id="preview-img" class="preview-img" alt="preview">
-    <div id="audit-panel"><h4>Row history</h4><div id="audit-list"></div></div>
-  </div>
-</div>
-<script src="/static/js/review.js"></script>
-</body></html>
+
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/review.js"></script>
+</body>
+</html>

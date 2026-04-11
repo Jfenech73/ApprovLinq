@@ -1,138 +1,219 @@
-// Review workspace JS — talks to /review/* endpoints
-const FIELDS = ["supplier_name","supplier_posting_account","nominal_account_code",
-  "invoice_number","invoice_date","description","net_amount","vat_amount","total_amount","currency","tax_code"];
+// Review workspace JS — talks to /review/* endpoints. Uses element IDs from the
+// restyled review.html. Auth token comes from common.js (window.api/getToken)
+// when available; otherwise falls back to localStorage.
+const FIELDS = [
+  "supplier_name", "supplier_posting_account", "nominal_account_code",
+  "invoice_number", "invoice_date", "description",
+  "net_amount", "vat_amount", "total_amount", "currency", "tax_code",
+];
 const params = new URLSearchParams(location.search);
 const batchId = params.get("batch_id");
-let state = { batch:null, rows:[], filter:"all", selected:null, page:1, fileId:null };
-const tok = () => localStorage.getItem("token") || "";
-const hdrs = () => ({"Content-Type":"application/json","Authorization":"Bearer "+tok()});
+let state = { batch: null, rows: [], filter: "all", selected: null, page: 1, fileId: null };
 
-async function load(){
-  const r = await fetch(`/review/batches/${batchId}`,{headers:hdrs()});
-  if(!r.ok){alert("Load failed");return;}
-  const d = await r.json(); state.batch=d.batch; state.rows=d.rows;
-  if(state.rows.length){state.selected=state.rows[0].id; state.fileId=state.rows[0].source_file_id;}
-  render();
+const $ = (id) => document.getElementById(id);
+const tok = () => localStorage.getItem("token") || localStorage.getItem("access_token") || "";
+const hdrs = () => ({ "Content-Type": "application/json", "Authorization": "Bearer " + tok() });
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function msg(text, kind) {
+  const m = $("pageMessage");
+  if (!m) return;
+  m.textContent = text || "";
+  m.className = "message" + (kind ? " " + kind : "");
 }
 
-function rowMatches(r){
-  if(state.filter==="needs_review") return r.review_required;
-  if(state.filter==="corrected")    return r.is_corrected;
-  if(state.filter==="low_conf")     return r.confidence_score!=null && r.confidence_score<0.7;
+async function load() {
+  if (!batchId) { msg("Missing batch_id in URL", "error"); return; }
+  try {
+    const r = await fetch(`/review/batches/${batchId}`, { headers: hdrs() });
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    state.batch = d.batch;
+    state.rows = d.rows;
+    if (state.rows.length && state.selected == null) {
+      state.selected = state.rows[0].id;
+      state.fileId = state.rows[0].source_file_id;
+      state.page = state.rows[0].page_no || 1;
+    }
+    render();
+    if (state.selected != null) { loadAudit(state.selected); refreshPreview(); }
+  } catch (e) { msg("Load failed: " + e.message, "error"); }
+}
+
+function rowMatches(r) {
+  if (state.filter === "needs_review") return r.review_required;
+  if (state.filter === "corrected")    return r.is_corrected;
+  if (state.filter === "low_conf")     return r.confidence_score != null && r.confidence_score < 0.7;
   return true;
 }
 
-function render(){
+function render() {
   const b = state.batch;
-  document.getElementById("batch-header").innerHTML =
-    `<h2>${b.name}</h2><span class="status-pill ${b.status}">${b.status}</span>
-     <p>${b.row_count} rows · ${b.corrected_count} corrected · ${b.flagged_count} flagged · v${b.current_export_version}</p>`;
-  const list = document.getElementById("row-list"); list.innerHTML="";
-  state.rows.filter(rowMatches).forEach(r=>{
-    const d=document.createElement("div");
-    d.className="row-card"+(r.review_required?" flagged":"")+(r.is_corrected?" corrected":"")+(r.id===state.selected?" selected":"");
-    d.innerHTML=`<b>${r.source_filename||"file"}</b> · p${r.page_no} · ${r.current.supplier_name||"<no supplier>"} · ${r.current.total_amount||""}`;
-    d.onclick=()=>{state.selected=r.id; state.fileId=r.source_file_id; state.page=r.page_no; render(); loadAudit(r.id); refreshPreview();};
+  $("batchTitle").textContent = b.name;
+  const pill = $("batchStatusPill");
+  pill.textContent = b.status;
+  pill.className = "version-badge pill " + b.status;
+  $("statRows").textContent      = b.row_count;
+  $("statCorrected").textContent = b.corrected_count;
+  $("statFlagged").textContent   = b.flagged_count;
+  $("statVersion").textContent   = "v" + (b.current_export_version || 0);
+
+  const list = $("rowList");
+  list.innerHTML = "";
+  state.rows.filter(rowMatches).forEach(r => {
+    const d = document.createElement("div");
+    d.className = "review-row" +
+      (r.review_required ? " flagged" : "") +
+      (r.is_corrected ? " corrected" : "") +
+      (r.id === state.selected ? " selected" : "");
+    d.innerHTML =
+      `<div><strong>${esc(r.current.supplier_name) || "<no supplier>"}</strong> · ${esc(r.current.total_amount) || ""}</div>
+       <div class="meta">${esc(r.source_filename || "file")} · page ${r.page_no} · row #${r.id}${r.confidence_score != null ? " · conf " + r.confidence_score.toFixed(2) : ""}</div>`;
+    d.onclick = () => {
+      state.selected = r.id; state.fileId = r.source_file_id; state.page = r.page_no || 1;
+      render(); loadAudit(r.id); refreshPreview();
+    };
     list.appendChild(d);
   });
+
+  document.querySelectorAll(".filter-chips .btn").forEach(b => {
+    b.classList.toggle("active", b.dataset.filter === state.filter);
+  });
+
   renderEditor();
 }
 
-function renderEditor(){
-  const r = state.rows.find(x=>x.id===state.selected);
-  const ed = document.getElementById("row-editor");
-  if(!r){ed.innerHTML="";return;}
-  let html = `<h3>Edit row ${r.id}</h3><div id="fields">`;
-  FIELDS.forEach(f=>{
-    const cur = r.current[f]??""; const orig = r.original[f]??"";
-    const flagged = (r.review_fields||[]).includes(f);
-    html += `<div class="field-row">
-      <label>${f}${flagged?" ⚠":""}</label>
-      <input data-field="${f}" value="${cur===null?"":String(cur).replace(/"/g,'&quot;')}">
-      <label class="rule-cb"><input type="checkbox" data-rule="${f}"> rule</label>
-      <button data-revert="${f}">↶</button></div>
-      <div style="font-size:11px;color:#666;margin-left:140px">orig: ${orig===null?"":orig}</div>`;
+function renderEditor() {
+  const r = state.rows.find(x => x.id === state.selected);
+  const ed = $("rowEditor");
+  if (!r) { ed.innerHTML = '<div class="muted">Select a row from the left.</div>'; return; }
+  let html = '<div class="field-grid">';
+  FIELDS.forEach(f => {
+    const cur = r.current[f] == null ? "" : r.current[f];
+    const orig = r.original[f] == null ? "" : r.original[f];
+    const flagged = (r.review_fields || []).includes(f);
+    html +=
+      `<label>${esc(f)}${flagged ? " ⚠" : ""}</label>
+       <input data-field="${esc(f)}" value="${esc(cur)}" />
+       <label class="rule-cb"><input type="checkbox" data-rule="${esc(f)}" /> rule</label>
+       <button class="btn btn-secondary" data-revert="${esc(f)}" type="button" title="Revert to original">↶</button>
+       <div class="orig">original: ${esc(orig) || "—"}</div>`;
   });
-  html += `</div>
-    <label><input type="checkbox" id="force-add"> Force add new supplier/nominal (requires note)</label>
-    <textarea class="note-area" id="note" placeholder="Reason / note (required for force-add)"></textarea>
-    <button id="btn-save">Save corrections</button>`;
+  html += "</div>";
+  html +=
+    `<div class="stack" style="margin-top:10px">
+      <label class="row gap-sm" style="align-items:center">
+        <input type="checkbox" id="forceAdd" /> Force add new supplier/nominal (note required)
+      </label>
+      <textarea id="note" class="message" placeholder="Reason / note (required for force-add)" style="min-height:50px"></textarea>
+      <div class="row gap-sm wrap">
+        <button id="saveBtn" class="btn btn-primary" type="button">Save corrections</button>
+      </div>
+    </div>`;
   ed.innerHTML = html;
-  ed.querySelector("#btn-save").onclick = saveRow;
-  ed.querySelectorAll("[data-revert]").forEach(b=>b.onclick=()=>revertField(b.dataset.revert));
+  $("saveBtn").onclick = saveRow;
+  ed.querySelectorAll("[data-revert]").forEach(b => b.onclick = () => revertField(b.dataset.revert));
 }
 
-async function saveRow(){
-  const r = state.rows.find(x=>x.id===state.selected);
+async function saveRow() {
+  const r = state.rows.find(x => x.id === state.selected);
   const changes = {}; const ruleFields = [];
-  document.querySelectorAll("[data-field]").forEach(i=>{
-    const f=i.dataset.field; const v=i.value===""?null:i.value;
-    if(String(v??"")!==String(r.current[f]??"")) changes[f]=v;
+  document.querySelectorAll("#rowEditor [data-field]").forEach(i => {
+    const f = i.dataset.field;
+    const v = i.value === "" ? null : i.value;
+    if (String(v == null ? "" : v) !== String(r.current[f] == null ? "" : r.current[f])) changes[f] = v;
   });
-  document.querySelectorAll("[data-rule]:checked").forEach(c=>ruleFields.push(c.dataset.rule));
-  const body={changes,note:document.getElementById("note").value||null,
-    force_add:document.getElementById("force-add").checked,save_as_rule_fields:ruleFields};
-  const res = await fetch(`/review/batches/${batchId}/rows/${r.id}`,{method:"PATCH",headers:hdrs(),body:JSON.stringify(body)});
-  if(!res.ok){alert("Save failed: "+(await res.text()));return;}
+  document.querySelectorAll("#rowEditor [data-rule]:checked").forEach(c => ruleFields.push(c.dataset.rule));
+  const body = {
+    changes,
+    note: $("note").value || null,
+    force_add: $("forceAdd").checked,
+    save_as_rule_fields: ruleFields,
+  };
+  try {
+    const res = await fetch(`/review/batches/${batchId}/rows/${r.id}`, {
+      method: "PATCH", headers: hdrs(), body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    msg("Saved", "success");
+    await load();
+  } catch (e) { msg("Save failed: " + e.message, "error"); }
+}
+
+async function revertField(f) {
+  const r = state.rows.find(x => x.id === state.selected);
+  await fetch(`/review/batches/${batchId}/rows/${r.id}/revert/${f}`, { method: "POST", headers: hdrs() });
   await load();
 }
 
-async function revertField(f){
-  const r = state.rows.find(x=>x.id===state.selected);
-  await fetch(`/review/batches/${batchId}/rows/${r.id}/revert/${f}`,{method:"POST",headers:hdrs()});
-  await load();
+async function loadAudit(rowId) {
+  try {
+    const r = await fetch(`/review/batches/${batchId}/rows/${rowId}/audit`, { headers: hdrs() });
+    const list = await r.json();
+    $("auditList").innerHTML = list.map(a =>
+      `<div class="audit-entry">
+        <strong>${esc(a.field)}</strong> ${esc(a.action)}: ${esc(a.old) || "∅"} → ${esc(a.new) || "∅"}
+        <span class="muted">(${esc(a.username) || "?"})</span>
+        ${a.rule_created ? '<span class="badge rule">+rule</span>' : ""}
+        ${a.force_added ? '<span class="badge force">+force</span>' : ""}
+      </div>`).join("") || '<div class="muted">No history yet.</div>';
+  } catch (e) { /* ignore */ }
 }
 
-async function loadAudit(rowId){
-  const r = await fetch(`/review/batches/${batchId}/rows/${rowId}/audit`,{headers:hdrs()});
-  const list = await r.json();
-  document.getElementById("audit-list").innerHTML = list.map(a=>
-    `<div style="border-bottom:1px solid #eee;padding:4px;font-size:12px">
-      <b>${a.field}</b> ${a.action}: ${a.old||"∅"} → ${a.new||"∅"} <i>(${a.username||"?"})</i>
-      ${a.rule_created?'<span style="color:#070">+rule</span>':''}${a.force_added?'<span style="color:#c00">+force</span>':''}
-    </div>`).join("");
+function refreshPreview() {
+  if (!state.fileId) { $("previewImg").src = ""; return; }
+  $("previewImg").src = `/review/files/${state.fileId}/preview?page=${state.page}&t=${Date.now()}`;
+  $("pageLabel").textContent = "page " + state.page;
 }
 
-function refreshPreview(){
-  if(!state.fileId) return;
-  document.getElementById("preview-img").src = `/review/files/${state.fileId}/preview?page=${state.page}&t=${Date.now()}`;
-  document.getElementById("page-label").textContent = "page "+state.page;
-}
-document.getElementById("prev-page").onclick=()=>{if(state.page>1){state.page--;refreshPreview();}};
-document.getElementById("next-page").onclick=()=>{state.page++;refreshPreview();};
+$("prevPageBtn").onclick = () => { if (state.page > 1) { state.page--; refreshPreview(); } };
+$("nextPageBtn").onclick = () => { state.page++; refreshPreview(); };
 
-document.querySelectorAll("[data-filter]").forEach(b=>b.onclick=()=>{state.filter=b.dataset.filter;render();});
-
-document.getElementById("btn-approve").onclick=async()=>{
-  const r = await fetch(`/review/batches/${batchId}/transition`,{method:"POST",headers:hdrs(),body:JSON.stringify({target:"approved"})});
-  if(!r.ok)alert(await r.text()); else load();
-};
-document.getElementById("btn-export").onclick=async()=>{
-  // Existing export endpoint in batches.py should be wired to call corrected_exporter — see rollout note.
-  window.location.href=`/batches/${batchId}/export?corrected=1`;
-};
-document.getElementById("btn-reopen").onclick=async()=>{
-  const r = await fetch(`/review/batches/${batchId}/reopen`,{method:"POST",headers:hdrs()});
-  if(!r.ok)alert(await r.text()); else load();
-};
-
-// Remap mode: drag to select region on preview
-let dragStart=null;
-document.getElementById("preview-img").addEventListener("mousedown",e=>{
-  if(!document.getElementById("remap-mode").checked) return;
-  const r=e.target.getBoundingClientRect(); dragStart={x:(e.clientX-r.left)/r.width,y:(e.clientY-r.top)/r.height,w:r.width,h:r.height};
+document.querySelectorAll(".filter-chips .btn").forEach(b => {
+  b.onclick = () => { state.filter = b.dataset.filter; render(); };
 });
-document.getElementById("preview-img").addEventListener("mouseup",async e=>{
-  if(!dragStart) return;
-  const r=e.target.getBoundingClientRect();
-  const x2=(e.clientX-r.left)/r.width, y2=(e.clientY-r.top)/r.height;
-  const field=prompt("Which field is this region for?"); if(!field){dragStart=null;return;}
-  const row=state.rows.find(x=>x.id===state.selected);
-  await fetch(`/review/batches/${batchId}/rows/${row.id}/remap`,{method:"POST",headers:hdrs(),
-    body:JSON.stringify({field_name:field,page_no:state.page,
-      x:Math.min(dragStart.x,x2),y:Math.min(dragStart.y,y2),
-      w:Math.abs(x2-dragStart.x),h:Math.abs(y2-dragStart.y),file_id:state.fileId})});
-  dragStart=null; alert("Remap saved");
+
+$("approveBtn").onclick = async () => {
+  const r = await fetch(`/review/batches/${batchId}/transition`, {
+    method: "POST", headers: hdrs(), body: JSON.stringify({ target: "approved" }),
+  });
+  if (!r.ok) msg(await r.text(), "error"); else load();
+};
+$("exportBtn").onclick = () => {
+  // Trigger the existing /batches/{id}/export endpoint (now corrected-aware)
+  window.location.href = `/batches/${batchId}/export`;
+};
+$("reopenBtn").onclick = async () => {
+  const r = await fetch(`/review/batches/${batchId}/reopen`, { method: "POST", headers: hdrs() });
+  if (!r.ok) msg(await r.text(), "error"); else load();
+};
+
+// Remap mode: drag a region on the preview to mark it for a field
+let dragStart = null;
+$("previewImg").addEventListener("mousedown", (e) => {
+  if (!$("remapMode").checked) return;
+  const r = e.target.getBoundingClientRect();
+  dragStart = { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+});
+$("previewImg").addEventListener("mouseup", async (e) => {
+  if (!dragStart) return;
+  const r = e.target.getBoundingClientRect();
+  const x2 = (e.clientX - r.left) / r.width, y2 = (e.clientY - r.top) / r.height;
+  const field = prompt("Which field is this region for?");
+  if (!field) { dragStart = null; return; }
+  const row = state.rows.find(x => x.id === state.selected);
+  await fetch(`/review/batches/${batchId}/rows/${row.id}/remap`, {
+    method: "POST", headers: hdrs(),
+    body: JSON.stringify({
+      field_name: field, page_no: state.page,
+      x: Math.min(dragStart.x, x2), y: Math.min(dragStart.y, y2),
+      w: Math.abs(x2 - dragStart.x), h: Math.abs(y2 - dragStart.y),
+      file_id: state.fileId,
+    }),
+  });
+  dragStart = null;
+  msg("Remap saved", "success");
 });
 
 load();
