@@ -26,6 +26,9 @@ from app.db.session import engine, get_db
 from app.routers.auth import current_tenant_id, current_user
 from app.schemas import BatchCreate, BatchUpdate, BatchDetailOut, BatchFileOut, BatchOut, InvoiceRowOut
 from app.services.exporter import workbook_from_rows
+# >>> REVIEW_PACK corrected_export_import
+from app.services.corrected_exporter import export_batch_corrected
+# <<< REVIEW_PACK corrected_export_import
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
 from app.services.template_render_service import render_template_sheet, resolve_effective_template
 
@@ -1060,12 +1063,17 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
         logger.warning("Template rendering failed for batch %s (export will continue without it): %s", batch_id, tpl_exc)
         template_sheet_arg = None
 
-    workbook_bytes = workbook_from_rows(
-        rows,
-        batch_metadata=batch_metadata,
-        nominal_account_map=nominal_account_map,
+    # >>> REVIEW_PACK export_wiring
+    workbook_bytes = export_batch_corrected(
+        db,
+        batch=batch,
+        user=_user,
         template_sheet=template_sheet_arg,
+        nominal_account_map=nominal_account_map,
+        batch_metadata=batch_metadata,
     )
+    db.commit()
+    # <<< REVIEW_PACK export_wiring
     safe_name = re.sub(r"[^\w\-. ]", "_", batch.batch_name or "batch").strip()
     filename = f"{safe_name}_{batch.id}.xlsx"
     encoded = urllib.parse.quote(filename, safe="")

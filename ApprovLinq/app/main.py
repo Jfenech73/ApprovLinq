@@ -99,6 +99,80 @@ def ensure_runtime_schema() -> None:
             ")"
         ),
 
+        # >>> REVIEW_PACK startup_alters
+        "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ",
+        "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS approved_by UUID REFERENCES users(id)",
+        "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS exported_at TIMESTAMPTZ",
+        "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS exported_by UUID REFERENCES users(id)",
+        "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS reopened_at TIMESTAMPTZ",
+        "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS reopened_by UUID REFERENCES users(id)",
+        "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS current_export_version INTEGER NOT NULL DEFAULT 0",
+        """CREATE TABLE IF NOT EXISTS invoice_row_corrections (
+            row_id BIGINT PRIMARY KEY REFERENCES invoice_rows(id) ON DELETE CASCADE,
+            batch_id UUID NOT NULL REFERENCES invoice_batches(id) ON DELETE CASCADE,
+            supplier_name TEXT, supplier_posting_account VARCHAR(100),
+            nominal_account_code VARCHAR(100), invoice_number TEXT,
+            invoice_date DATE, description TEXT,
+            net_amount NUMERIC(14,2), vat_amount NUMERIC(14,2), total_amount NUMERIC(14,2),
+            currency VARCHAR(20), tax_code VARCHAR(50),
+            reviewed_fields TEXT, row_reviewed BOOLEAN NOT NULL DEFAULT FALSE,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_by UUID REFERENCES users(id))""",
+        "CREATE INDEX IF NOT EXISTS ix_corrections_batch ON invoice_row_corrections(batch_id)",
+        """CREATE TABLE IF NOT EXISTS invoice_row_field_audits (
+            id BIGSERIAL PRIMARY KEY,
+            batch_id UUID NOT NULL REFERENCES invoice_batches(id) ON DELETE CASCADE,
+            row_id BIGINT NOT NULL,
+            field_name VARCHAR(80) NOT NULL,
+            old_value TEXT, new_value TEXT,
+            action VARCHAR(40) NOT NULL, note TEXT,
+            rule_created BOOLEAN NOT NULL DEFAULT FALSE,
+            force_added BOOLEAN NOT NULL DEFAULT FALSE,
+            user_id UUID REFERENCES users(id), username VARCHAR(255),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        "CREATE INDEX IF NOT EXISTS ix_audits_batch_row ON invoice_row_field_audits(batch_id, row_id)",
+        """CREATE TABLE IF NOT EXISTS correction_rules (
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            company_id UUID REFERENCES companies(id) ON DELETE CASCADE,
+            rule_type VARCHAR(40) NOT NULL,
+            field_name VARCHAR(80) NOT NULL,
+            source_pattern TEXT NOT NULL,
+            target_value TEXT NOT NULL,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_by UUID REFERENCES users(id),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            disabled_by UUID REFERENCES users(id),
+            disabled_at TIMESTAMPTZ,
+            origin_batch_id UUID,
+            origin_row_id BIGINT)""",
+        "CREATE INDEX IF NOT EXISTS ix_rules_lookup ON correction_rules(tenant_id, rule_type, field_name, source_pattern, active)",
+        """CREATE TABLE IF NOT EXISTS remap_hints (
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            company_id UUID REFERENCES companies(id) ON DELETE CASCADE,
+            supplier_id BIGINT REFERENCES tenant_suppliers(id) ON DELETE CASCADE,
+            supplier_name_snapshot TEXT,
+            field_name VARCHAR(80) NOT NULL,
+            page_no INTEGER,
+            x NUMERIC(8,4), y NUMERIC(8,4), w NUMERIC(8,4), h NUMERIC(8,4),
+            source_batch_id UUID, source_file_id BIGINT, source_row_id BIGINT,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_by UUID REFERENCES users(id),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        "CREATE INDEX IF NOT EXISTS ix_remap_lookup ON remap_hints(supplier_id, field_name, active)",
+        """CREATE TABLE IF NOT EXISTS batch_export_events (
+            id BIGSERIAL PRIMARY KEY,
+            batch_id UUID NOT NULL REFERENCES invoice_batches(id) ON DELETE CASCADE,
+            export_version INTEGER NOT NULL,
+            template_id BIGINT,
+            exported_by UUID REFERENCES users(id),
+            exported_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            file_path TEXT, row_count INTEGER)""",
+        "CREATE INDEX IF NOT EXISTS ix_export_events_batch ON batch_export_events(batch_id)",
+        # <<< REVIEW_PACK startup_alters
+
+
         # ── export_templates ──────────────────────────────────────────────────
         (
             "CREATE TABLE IF NOT EXISTS export_templates ("
@@ -239,6 +313,10 @@ def frontend():
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(batches.router)
+# >>> REVIEW_PACK router_register
+from app.routers import review as _review_router
+app.include_router(_review_router.router)
+# <<< REVIEW_PACK router_register
 app.include_router(admin.router)
 app.include_router(admin_export_templates.router)
 app.include_router(tenant.router)

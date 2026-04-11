@@ -31,3 +31,9 @@ COPY ApprovLinq /app
 EXPOSE 8000
 
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# >>> REVIEW_PACK dockerfile
+# Review pack: no Dockerfile changes required — existing
+# `COPY ApprovLinq /app` already includes new files. To run
+# Alembic at container start instead of in-app ALTERs, change CMD to:
+#   CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# <<< REVIEW_PACK dockerfile

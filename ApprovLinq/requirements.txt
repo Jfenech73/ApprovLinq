@@ -25,3 +25,7 @@ paddlepaddle==3.2.0
 paddleocr==3.2.0
 numpy==1.26.4
 opencv-python-headless==4.10.0.84
+
+# >>> REVIEW_PACK requirements
+alembic==1.13.2
+# <<< REVIEW_PACK requirements
