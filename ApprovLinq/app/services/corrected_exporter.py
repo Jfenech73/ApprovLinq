@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.db import models as M
 from app.db.review_models import InvoiceRowFieldAudit, BatchExportEvent
 from app.services import correction_service as cs
-from app.services.exporter import workbook_from_rows, CORRECTABLE_FIELDS_ALIAS  # noqa: F401  (alias may not exist)
+from app.services.exporter import workbook_from_rows
 
 
 def _build_corrected_rows(db: Session, batch: M.InvoiceBatch) -> list[dict]:
