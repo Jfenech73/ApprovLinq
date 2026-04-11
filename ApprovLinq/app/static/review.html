@@ -46,9 +46,6 @@
             <h1>Batch Review</h1>
             <div class="version-badge" id="batchStatusPill">—</div>
           </div>
-          <div class="hero-copy-bottom">
-            <a class="btn btn-secondary" href="/static/scanner.html">← Back to Scanner</a>
-          </div>
         </div>
         <div class="hero-actions">
           <div class="hero-logo-wrap">
@@ -56,6 +53,7 @@
           </div>
           <div class="hero-toolbar">
             <div class="hero-toolbar-right">
+              <a class="btn btn-secondary" href="/static/scanner.html">← Back to Scanner</a>
               <a class="btn btn-secondary" href="/static/tenant.html">Tenant Admin</a>
               <a class="btn btn-secondary" href="/static/analytics.html">Analytics</a>
               <button id="logoutBtn" class="btn btn-secondary" type="button">Logout</button>
@@ -111,7 +109,14 @@
               </div>
             </div>
             <div id="rowEditor" class="stack"></div>
-            <img id="previewImg" class="preview-img" alt="" />
+            <div id="remapHint" class="remap-hint" hidden>
+              <span>Remap mode: click a field above, then drag on the preview to mark its region.</span>
+              <span id="remapTargetLabel" class="remap-target"></span>
+            </div>
+            <div id="previewWrap" class="preview-wrap">
+              <img id="previewImg" class="preview-img" alt="" draggable="false" />
+              <div id="remapSelection" class="remap-selection" hidden></div>
+            </div>
             <div class="stack" style="margin-top:12px">
               <h3>Row history</h3>
               <div id="auditList"></div>

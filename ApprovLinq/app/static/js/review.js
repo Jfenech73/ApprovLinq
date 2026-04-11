@@ -190,31 +190,96 @@ $("reopenBtn").onclick = async () => {
   if (!r.ok) msg(await r.text(), "error"); else load();
 };
 
-// Remap mode: drag a region on the preview to mark it for a field
-let dragStart = null;
-$("previewImg").addEventListener("mousedown", (e) => {
-  if (!$("remapMode").checked) return;
-  const r = e.target.getBoundingClientRect();
-  dragStart = { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+// ── Remap mode ──────────────────────────────────────────────────────────────
+// Track which field the user last clicked/focused in the row editor so we
+// don't have to prompt for a name on every drag.
+let remapField = null;
+const remapHint = $("remapHint");
+const remapTargetLabel = $("remapTargetLabel");
+const previewWrap = $("previewWrap");
+const previewImg = $("previewImg");
+const remapSel = $("remapSelection");
+
+function setRemapField(name) {
+  remapField = name || null;
+  remapTargetLabel.textContent = remapField ? `field: ${remapField}` : "";
+}
+
+// Any input/select/textarea inside the row editor with a data-field attribute
+// becomes a remap target when focused or clicked.
+document.addEventListener("focusin", (e) => {
+  const el = e.target.closest("#rowEditor [data-field]");
+  if (el) setRemapField(el.getAttribute("data-field"));
 });
-$("previewImg").addEventListener("mouseup", async (e) => {
+document.addEventListener("click", (e) => {
+  const el = e.target.closest("#rowEditor [data-field]");
+  if (el) setRemapField(el.getAttribute("data-field"));
+});
+
+$("remapMode").addEventListener("change", (e) => {
+  const on = e.target.checked;
+  previewWrap.classList.toggle("remap-active", on);
+  remapHint.hidden = !on;
+  if (!on) { remapSel.hidden = true; dragStart = null; }
+});
+
+let dragStart = null;
+function pctFromEvent(e) {
+  const r = previewImg.getBoundingClientRect();
+  return {
+    x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+    y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
+  };
+}
+function drawSel(a, b) {
+  const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+  const w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
+  remapSel.style.left = (x * 100) + "%";
+  remapSel.style.top = (y * 100) + "%";
+  remapSel.style.width = (w * 100) + "%";
+  remapSel.style.height = (h * 100) + "%";
+  remapSel.hidden = false;
+  return { x, y, w, h };
+}
+
+previewImg.addEventListener("mousedown", (e) => {
+  if (!$("remapMode").checked) return;
+  if (!remapField) { msg("Click a field in the editor first, then drag on the preview.", "error"); return; }
+  e.preventDefault();
+  dragStart = pctFromEvent(e);
+  drawSel(dragStart, dragStart);
+});
+previewWrap.addEventListener("mousemove", (e) => {
   if (!dragStart) return;
-  const r = e.target.getBoundingClientRect();
-  const x2 = (e.clientX - r.left) / r.width, y2 = (e.clientY - r.top) / r.height;
-  const field = prompt("Which field is this region for?");
-  if (!field) { dragStart = null; return; }
+  drawSel(dragStart, pctFromEvent(e));
+});
+window.addEventListener("mouseup", async (e) => {
+  if (!dragStart) return;
+  const end = pctFromEvent(e);
+  const region = drawSel(dragStart, end);
+  dragStart = null;
+  if (region.w < 0.005 || region.h < 0.005) {
+    remapSel.hidden = true;
+    return; // accidental click
+  }
   const row = state.rows.find(x => x.id === state.selected);
-  await fetch(`/review/batches/${batchId}/rows/${row.id}/remap`, {
+  if (!row) { msg("Select a row first.", "error"); return; }
+  if (!confirm(`Save region for field "${remapField}" on page ${state.page}?`)) {
+    remapSel.hidden = true;
+    return;
+  }
+  const r = await fetch(`/review/batches/${batchId}/rows/${row.id}/remap`, {
     method: "POST", headers: hdrs(),
     body: JSON.stringify({
-      field_name: field, page_no: state.page,
-      x: Math.min(dragStart.x, x2), y: Math.min(dragStart.y, y2),
-      w: Math.abs(x2 - dragStart.x), h: Math.abs(y2 - dragStart.y),
+      field_name: remapField,
+      page_no: state.page,
+      x: region.x, y: region.y, w: region.w, h: region.h,
       file_id: state.fileId,
     }),
   });
-  dragStart = null;
-  msg("Remap saved", "success");
+  if (!r.ok) { msg(await r.text(), "error"); return; }
+  msg(`Remap saved for ${remapField}`, "success");
+  setTimeout(() => { remapSel.hidden = true; }, 800);
 });
 
 if (typeof ensureAuth === "function" && !ensureAuth()) {
