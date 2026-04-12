@@ -849,3 +849,24 @@ tr:last-child td {
   color: #64748b;
   margin: -2px 0 4px 0;
 }
+
+/* Low-confidence / flagged fields in the row editor */
+.field-grid > input.flagged-field {
+  background: #fff6dc;
+  border-color: #f0c36d;
+}
+.field-grid > input.flagged-field:focus {
+  outline: 2px solid #e8a93a;
+  outline-offset: 1px;
+}
+
+/* ── Review-as-you-go ───────────────────────────────────────────────────── */
+tr.needs-review { background: #fffbea; }
+tr.needs-review td { border-top-color: #f0c36d; border-bottom-color: #f0c36d; }
+tr.row-flash { animation: rowFlash 2.2s ease-out; }
+@keyframes rowFlash {
+  0%   { background: #ffe28a; }
+  100% { background: #fffbea; }
+}
+.pill-ok { background: #dcfce7; color: #166534; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }

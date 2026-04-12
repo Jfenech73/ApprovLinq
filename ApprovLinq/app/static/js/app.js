@@ -163,12 +163,13 @@ function renderFiles(files) {
   tbody.innerHTML = "";
 
   if (!files.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="muted">No files uploaded yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">No files uploaded yet.</td></tr>';
     return;
   }
 
   for (const file of files) {
     const tr = document.createElement("tr");
+    tr.setAttribute("data-filename", file.original_filename);
     const errorText = file.error_message ? truncate(file.error_message, 160) : "-";
     tr.innerHTML = `
       <td>${escapeHtml(file.original_filename)}</td>
@@ -176,9 +177,15 @@ function renderFiles(files) {
       <td>${file.page_count ?? "-"}</td>
       <td title="${escapeHtml(file.error_message || "")}">${escapeHtml(errorText)}</td>
       <td>${formatDate(file.uploaded_at)}</td>
+      <td class="review-cell">-</td>
     `;
     tbody.appendChild(tr);
   }
+  // If we already have a recent progress snapshot, paint review cells now.
+  try {
+    const progress = await api(`/batches/${state.selectedBatchId}/progress`);
+    applyReviewStates(progress.files || []);
+  } catch {}
 }
 
 async function loadRows() {
@@ -223,12 +230,101 @@ function startProgressPolling() {
     const progress = await api(`/batches/${state.selectedBatchId}/progress`);
     $("selectedBatchStatus").textContent = progress.status;
     $("selectedBatchNotes").textContent = `${progress.notes || ""} (${progress.percent}%)`;
+    // Review-as-you-go: update per-file review badges and fire toast on any
+    // new file transitioning to "needs_review".
+    applyReviewStates(progress.files || []);
     if (progress.status !== "processing") {
       stopProgressPolling();
       await selectBatch(state.selectedBatchId, { preservePolling: true });
       await loadBatches();
+      // After processing ends, re-fetch once more so the UI reflects final
+      // per-file review states even if the user hasn't clicked anything.
+      try {
+        const final = await api(`/batches/${state.selectedBatchId}/progress`);
+        applyReviewStates(final.files || []);
+      } catch {}
     }
   }, 3000);
+}
+
+// Track which files have already been announced via toast so each transition
+// to needs_review fires exactly once, no matter how many poll cycles run.
+const _announcedReviewFiles = new Set();
+
+function applyReviewStates(fileStates) {
+  const tbody = $("filesTableBody");
+  if (!tbody) return;
+  const byFilename = new Map();
+  for (const fs of fileStates) byFilename.set(fs.filename, fs);
+  const rows = tbody.querySelectorAll("tr[data-filename]");
+  rows.forEach((tr) => {
+    const fn = tr.getAttribute("data-filename");
+    const fs = byFilename.get(fn);
+    if (!fs) return;
+    const cell = tr.querySelector(".review-cell");
+    if (!cell) return;
+    cell.innerHTML = renderReviewCell(fs, state.selectedBatchId);
+    tr.classList.toggle("needs-review", fs.review_state === "needs_review");
+    // Announce newly-flagged files exactly once (per browser session per file).
+    const key = `${state.selectedBatchId}|${fs.file_id}`;
+    if (fs.review_state === "needs_review" && !_announcedReviewFiles.has(key)) {
+      _announcedReviewFiles.add(key);
+      showToast(`Low-confidence fields detected in ${fn} — review recommended.`, "warn",
+                { label: "Review now", href: reviewUrl(state.selectedBatchId, fs.file_id) });
+      // Briefly highlight the row so the user can see which file landed.
+      tr.classList.add("row-flash");
+      setTimeout(() => tr.classList.remove("row-flash"), 2500);
+    }
+  });
+}
+
+function renderReviewCell(fs, batchId) {
+  if (fs.review_state === "needs_review") {
+    const url = reviewUrl(batchId, fs.file_id);
+    const fields = fs.flagged_fields && fs.flagged_fields.length
+      ? ` (${fs.flagged_fields.slice(0, 3).join(", ")}${fs.flagged_fields.length > 3 ? "…" : ""})` : "";
+    return `<a class="btn btn-primary btn-sm" href="${url}" target="_blank" rel="noopener">Review now</a>` +
+           `<div class="muted" style="font-size:11px;margin-top:2px">${fs.outstanding_row_count} row(s) low conf${escapeHtml(fields)}</div>`;
+  }
+  if (fs.review_state === "reviewed") return '<span class="pill pill-ok">reviewed</span>';
+  if (fs.review_state === "clean") return '<span class="pill pill-ok">ok</span>';
+  return "-";
+}
+
+function reviewUrl(batchId, fileId) {
+  return `/static/review.html?batch_id=${encodeURIComponent(batchId)}&file=${encodeURIComponent(fileId)}`;
+}
+
+// Minimal toast implementation that stacks, auto-dismisses, and supports an
+// action link. Uses a single container that we create on demand.
+function showToast(message, kind, action) {
+  let host = document.getElementById("toastHost");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "toastHost";
+    host.style.cssText = "position:fixed;top:16px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;";
+    document.body.appendChild(host);
+  }
+  const t = document.createElement("div");
+  t.className = `toast toast-${kind || "info"}`;
+  t.style.cssText = "background:#fffbea;border:1px solid #f0c36d;color:#663c00;padding:10px 14px;border-radius:8px;box-shadow:0 4px 10px rgba(0,0,0,.08);min-width:260px;max-width:360px;font-size:13px;display:flex;gap:10px;align-items:center;";
+  const msg = document.createElement("div");
+  msg.style.flex = "1"; msg.textContent = message;
+  t.appendChild(msg);
+  if (action && action.href) {
+    const a = document.createElement("a");
+    a.href = action.href; a.target = "_blank"; a.rel = "noopener";
+    a.textContent = action.label || "Open";
+    a.style.cssText = "font-weight:600;color:#1a46b8;text-decoration:underline;";
+    t.appendChild(a);
+  }
+  const x = document.createElement("button");
+  x.type = "button"; x.textContent = "×";
+  x.style.cssText = "background:none;border:0;font-size:18px;cursor:pointer;color:#663c00;";
+  x.onclick = () => t.remove();
+  t.appendChild(x);
+  host.appendChild(t);
+  setTimeout(() => t.remove(), 12000);
 }
 
 $("createBatchForm").addEventListener("submit", async (event) => {

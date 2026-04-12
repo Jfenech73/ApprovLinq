@@ -8,6 +8,7 @@ const FIELDS = [
 ];
 const params = new URLSearchParams(location.search);
 const batchId = params.get("batch_id");
+const fileFilterId = params.get("file") ? parseInt(params.get("file"), 10) : null;
 let state = { batch: null, rows: [], filter: "all", selected: null, page: 1, fileId: null, pageCount: 1 };
 
 const $ = (id) => document.getElementById(id);
@@ -32,17 +33,38 @@ async function load() {
     const d = await r.json();
     state.batch = d.batch;
     state.rows = d.rows;
-    if (state.rows.length && state.selected == null) {
-      state.selected = state.rows[0].id;
-      state.fileId = state.rows[0].source_file_id;
-      state.page = state.rows[0].page_no || 1;
+    // If we arrived with ?file=... pre-select the first flagged row of that
+    // file so the editor and preview land on the spot that needs attention.
+    let initial = null;
+    if (fileFilterId) {
+      const fileRows = state.rows.filter(r => r.source_file_id === fileFilterId);
+      initial = fileRows.find(r => r.review_required)
+             || fileRows.find(r => r.confidence_score != null && r.confidence_score < 0.55)
+             || fileRows[0];
+    } else if (state.rows.length) {
+      initial = state.rows[0];
+    }
+    if (initial && state.selected == null) {
+      state.selected = initial.id;
+      state.fileId = initial.source_file_id;
+      state.page = initial.page_no || 1;
     }
     render();
-    if (state.selected != null) { loadAudit(state.selected); await ensurePageCount(); }
+    if (state.selected != null) {
+      loadAudit(state.selected);
+      await ensurePageCount();
+      // When arriving from "Review now", auto-enable remap mode so the PDF
+      // preview opens immediately and the user can start region-selecting.
+      if (fileFilterId) {
+        const cb = $("remapMode");
+        if (cb && !cb.checked) { cb.checked = true; cb.dispatchEvent(new Event("change")); }
+      }
+    }
   } catch (e) { msg("Load failed: " + e.message, "error"); }
 }
 
 function rowMatches(r) {
+  if (fileFilterId && r.source_file_id !== fileFilterId) return false;
   if (state.filter === "needs_review") return r.review_required;
   if (state.filter === "corrected")    return r.is_corrected;
   if (state.filter === "low_conf")     return r.confidence_score != null && r.confidence_score < 0.7;
@@ -98,7 +120,7 @@ function renderEditor() {
     const flagged = (r.review_fields || []).includes(f);
     html +=
       `<label>${esc(f)}${flagged ? " ⚠" : ""}</label>
-       <input data-field="${esc(f)}" value="${esc(cur)}" />
+       <input data-field="${esc(f)}"${flagged ? ' class="flagged-field"' : ''} value="${esc(cur)}" />
        <label class="rule-cb"><input type="checkbox" data-rule="${esc(f)}" /> rule</label>
        <button class="btn btn-secondary" data-revert="${esc(f)}" type="button" title="Revert to original">↶</button>
        <div class="orig">original: ${esc(orig) || "—"}</div>`;
@@ -184,13 +206,29 @@ function updatePageControls() {
   $("nextPageBtn").disabled = state.page >= state.pageCount;
 }
 
-function refreshPreview() {
-  if (!state.fileId) { $("previewImg").src = ""; $("pageLabel").textContent = "page — / —"; return; }
-  const tok = (typeof getToken === "function") ? getToken() : "";
-  // <img> cannot send custom headers, so pass the token as a query parameter.
-  $("previewImg").src =
-    `/review/files/${state.fileId}/preview?page=${state.page}&token=${encodeURIComponent(tok)}&t=${Date.now()}`;
+let _previewBlobUrl = null;
+async function refreshPreview() {
+  const img = $("previewImg");
+  if (!state.fileId) { img.src = ""; $("pageLabel").textContent = "page — / —"; return; }
   updatePageControls();
+  try {
+    // Fetch with auth headers so the Bearer token travels normally.
+    const r = await fetch(`/review/files/${state.fileId}/preview?page=${state.page}`, { headers: hdrs() });
+    if (!r.ok) {
+      let detail = `${r.status} ${r.statusText}`;
+      try { const j = await r.json(); if (j && j.detail) detail = j.detail; } catch {}
+      msg(`Preview failed: ${detail}`, "error");
+      img.src = "";
+      return;
+    }
+    const blob = await r.blob();
+    if (_previewBlobUrl) { URL.revokeObjectURL(_previewBlobUrl); }
+    _previewBlobUrl = URL.createObjectURL(blob);
+    img.src = _previewBlobUrl;
+  } catch (e) {
+    msg(`Preview failed: ${e}`, "error");
+    img.src = "";
+  }
 }
 
 // Re-fetch page count whenever the file changes
@@ -258,16 +296,7 @@ const previewWrap = $("previewWrap");
 const previewImg = $("previewImg");
 const remapSel = $("remapSelection");
 
-// Surface a clear message if the preview image can't load (e.g. auth failure,
-// missing PDF, PyMuPDF not installed) instead of leaving a blank panel.
-previewImg.addEventListener("error", () => {
-  if (previewImg.src) msg("Could not load page preview — check that the file exists and PyMuPDF is installed.", "error");
-});
-previewImg.addEventListener("load", () => {
-  // Clear any previous error message once a new page successfully loads.
-  const m = $("pageMessage");
-  if (m && m.classList.contains("error") && m.textContent.startsWith("Could not load page")) msg("", "");
-});
+// refreshPreview() now surfaces exact server errors via msg(); no <img> onerror needed.
 
 function setRemapField(name) {
   remapField = name || null;
@@ -286,7 +315,14 @@ document.addEventListener("focusin", (e) => {
 });
 document.addEventListener("click", (e) => {
   const el = e.target.closest("#rowEditor [data-field]");
-  if (el) setRemapField(el.getAttribute("data-field"));
+  if (!el) return;
+  setRemapField(el.getAttribute("data-field"));
+  // If the user clicked a low-confidence / flagged field, auto-activate remap
+  // mode so the PDF preview opens and they can re-select the region directly.
+  if (el.classList.contains("flagged-field")) {
+    const cb = $("remapMode");
+    if (!cb.checked) { cb.checked = true; cb.dispatchEvent(new Event("change")); }
+  }
 });
 
 $("remapMode").addEventListener("change", async (e) => {
@@ -397,3 +433,28 @@ if (typeof ensureAuth === "function" && !ensureAuth()) {
 } else {
   load();
 }
+
+// ── File-scoped "Mark file reviewed" (review-as-you-go) ─────────────────────
+// When the review page was opened from the scanner's "Review now" button
+// (?file=<id>), we show a dedicated button that flips all flagged rows in
+// that single file to reviewed=true in one shot, then closes the tab so the
+// user can return to the scanner and tackle the next invoice.
+(function wireMarkFileReviewed() {
+  const btn = $("markFileReviewedBtn");
+  if (!btn) return;
+  if (fileFilterId) btn.hidden = false;
+  btn.onclick = async () => {
+    if (!fileFilterId) return;
+    if (!confirm("Mark every flagged row in this file as reviewed?")) return;
+    try {
+      const r = await fetch(`/review/batches/${batchId}/files/${fileFilterId}/reviewed`,
+                            { method: "POST", headers: hdrs() });
+      if (!r.ok) { msg(await r.text(), "error"); return; }
+      const d = await r.json().catch(() => ({}));
+      msg(`File marked reviewed (${d.marked_rows || 0} row(s) updated).`, "success");
+      setTimeout(() => { try { window.close(); } catch {} }, 900);
+    } catch (e) {
+      msg(String(e), "error");
+    }
+  };
+})();

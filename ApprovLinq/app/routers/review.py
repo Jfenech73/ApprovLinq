@@ -209,6 +209,46 @@ def reopen(batch_id: UUID, db: Session = Depends(get_db), user=Depends(current_u
     return {"status": batch.status}
 
 
+# ── Mark a file's flagged rows as reviewed (review-as-you-go) ────────────────
+@router.post("/batches/{batch_id}/files/{file_id}/reviewed")
+def mark_file_reviewed(batch_id: UUID, file_id: int,
+                       db: Session = Depends(get_db), user=Depends(current_user)):
+    """Create a zero-change correction record on every flagged row in this file
+    that doesn't yet have one. This flips the file's review_state on /progress
+    from 'needs_review' to 'reviewed' without requiring any edits."""
+    batch = _get_batch(db, batch_id)
+    f = db.get(M.InvoiceFile, file_id)
+    if not f or f.batch_id != batch.id:
+        raise HTTPException(404, "File not found in batch")
+    rows = db.query(M.InvoiceRow).filter(M.InvoiceRow.source_file_id == file_id).all()
+    flagged = [r for r in rows
+               if (r.confidence_score is not None and float(r.confidence_score) < 0.55)
+               or r.review_required]
+    existing = {c.row_id for c in db.query(InvoiceRowCorrection).filter(
+        InvoiceRowCorrection.row_id.in_([r.id for r in flagged])
+    ).all()} if flagged else set()
+    created = 0
+    for r in flagged:
+        if r.id in existing:
+            # Already has a correction record — just ensure row_reviewed is True.
+            corr = db.get(InvoiceRowCorrection, r.id)
+            if corr and not corr.row_reviewed:
+                corr.row_reviewed = True
+                created += 1
+            continue
+        corr = InvoiceRowCorrection(row_id=r.id, batch_id=batch.id, row_reviewed=True)
+        db.add(corr)
+        db.flush()
+        db.add(InvoiceRowFieldAudit(
+            batch_id=batch.id, row_id=r.id, field_name="_file_reviewed",
+            old_value=None, new_value="marked_reviewed",
+            action_type="mark_reviewed", user_id=user.id, note=None,
+        ))
+        created += 1
+    db.commit()
+    return {"file_id": file_id, "marked_rows": created, "already_reviewed": len(flagged) - created}
+
+
 # ── PDF file info (page count) ────────────────────────────────────────────────
 def _open_pdf_page_count(path: str) -> int:
     try:
@@ -258,7 +298,11 @@ def preview(
     f = db.get(M.InvoiceFile, file_id)
     if not f:
         raise HTTPException(404, "File not found")
+    import os
+    if not os.path.exists(f.file_path):
+        raise HTTPException(404, f"PDF missing from disk: {f.file_path}")
     # Prefer pypdfium2 (already a project dependency); fall back to PyMuPDF.
+    errors = []
     try:
         import pypdfium2 as pdfium
         pdf = pdfium.PdfDocument(f.file_path)
@@ -277,8 +321,8 @@ def preview(
         return StreamingResponse(io.BytesIO(buf.getvalue()), media_type="image/png")
     except HTTPException:
         raise
-    except Exception:
-        pass
+    except Exception as e:
+        errors.append(f"pypdfium2: {e}")
     try:
         import fitz
         doc = fitz.open(f.file_path)
@@ -292,7 +336,8 @@ def preview(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"Preview failed: {e}")
+        errors.append(f"PyMuPDF: {e}")
+    raise HTTPException(500, "Preview rendering failed. Tried: " + " | ".join(errors))
 
 
 # ── Read text from a region of a page ─────────────────────────────────────────

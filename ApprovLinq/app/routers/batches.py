@@ -983,6 +983,56 @@ def get_batch_progress(batch_id: UUID, db: Session = Depends(get_db), tenant_id=
     total_pages = sum((f.page_count or 0) for f in files)
     processed_pages = batch.page_count or 0
     percent = int(min(100, round((processed_pages / total_pages) * 100))) if total_pages > 0 else 0
+
+    # ── Per-file review state (review-as-you-go) ─────────────────────────────
+    # A file "needs review" when any of its rows has confidence below the
+    # configured threshold (0.55). This is computed live, not stored, so there
+    # is no migration burden. Once all flagged rows have a saved correction or
+    # have been explicitly marked reviewed, the file flips to "reviewed".
+    from app.db.review_models import InvoiceRowCorrection  # local import to avoid cycles
+    THRESHOLD = 0.55
+    file_states: list[dict] = []
+    for f in files:
+        rows = db.query(InvoiceRow).filter(InvoiceRow.source_file_id == f.id).all()
+        flagged_rows = [r for r in rows
+                        if (r.confidence_score is not None and float(r.confidence_score) < THRESHOLD)
+                        or r.review_required]
+        flagged_ids = [r.id for r in flagged_rows]
+        corrected_ids: set = set()
+        if flagged_ids:
+            # A flagged row is satisfied when it has a correction record with
+            # row_reviewed=True (set either by saving corrections or by the
+            # explicit "Mark file reviewed" action).
+            corrs = db.query(InvoiceRowCorrection).filter(
+                InvoiceRowCorrection.row_id.in_(flagged_ids)
+            ).all()
+            corrected_ids = {c.row_id for c in corrs if c.row_reviewed}
+        # Aggregate flagged field names across rows (deduped)
+        flagged_fields_set = set()
+        for r in flagged_rows:
+            if r.review_fields:
+                for fn in (r.review_fields or "").split(","):
+                    fn = fn.strip()
+                    if fn:
+                        flagged_fields_set.add(fn)
+        outstanding = [rid for rid in flagged_ids if rid not in corrected_ids]
+        if not flagged_rows:
+            review_state = "clean"      # no low-conf rows
+        elif outstanding:
+            review_state = "needs_review"
+        else:
+            review_state = "reviewed"
+        file_states.append({
+            "file_id": f.id,
+            "filename": f.original_filename,
+            "status": f.status,
+            "page_count": f.page_count or 0,
+            "review_state": review_state,
+            "flagged_row_count": len(flagged_rows),
+            "outstanding_row_count": len(outstanding),
+            "flagged_fields": sorted(flagged_fields_set),
+        })
+
     return {
         "batch_id": str(batch.id),
         "status": batch.status,
@@ -993,6 +1043,7 @@ def get_batch_progress(batch_id: UUID, db: Session = Depends(get_db), tenant_id=
         "failed_files": failed_files,
         "total_files": total_files,
         "percent": percent,
+        "files": file_states,
     }
 
 
