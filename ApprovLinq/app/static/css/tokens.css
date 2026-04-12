@@ -16,6 +16,15 @@ html[data-theme="light"] {
   --ap-navy:         #1f4e79;
   --ap-navy-hover:   #163a5a;
   --ap-accent:       #3ea3d9;
+  /* Logo-specific brand colours. Separate from the UI navy so dark mode
+     can use a distinct two-tone without fighting button/link contrast. */
+  --ap-logo-1:       #1f4e79;   /* "Approv" half */
+  --ap-logo-2:       #3ea3d9;   /* "linq" half  */
+  /* Logo-specific colours. In dark mode we need a near-white for the dark
+     half of the wordmark so the two-tone reads clearly; a tinted navy
+     disappears against an almost-black background. */
+  --ap-logo-dark:    #1f4e79;
+  --ap-logo-light:   #3ea3d9;
 
   /* Surfaces — page background is the LIGHTEST, cards sit ON TOP as white */
   --ap-bg-page:      #f8fafc;
@@ -77,6 +86,13 @@ html[data-theme="dark"] {
   --ap-navy:         #60a5fa;
   --ap-navy-hover:   #3b82f6;
   --ap-accent:       #3ea3d9;
+  /* Two-tone logo in dark mode: deeper sky-blue + pale cyan for clear contrast */
+  --ap-logo-1:       #60a5fa;
+  --ap-logo-2:       #67e8f9;
+  /* Logo: the "Approv" half stays near-white for contrast against
+     near-black surfaces; the "linq" half uses the accent blue. */
+  --ap-logo-dark:    #f1f5f9;
+  --ap-logo-light:   #3ea3d9;
 
   --ap-bg-page:      #020617;
   --ap-bg-surface:   #0f172a;
@@ -105,6 +121,10 @@ html[data-theme="dark"] {
   html:not([data-theme]) {
     --ap-navy:         #60a5fa;
     --ap-navy-hover:   #3b82f6;
+    --ap-logo-1:       #60a5fa;
+    --ap-logo-2:       #67e8f9;
+    --ap-logo-dark:    #f1f5f9;
+    --ap-logo-light:   #3ea3d9;
     --ap-bg-page:      #020617;
     --ap-bg-surface:   #0f172a;
     --ap-bg-sub:       #1e293b;

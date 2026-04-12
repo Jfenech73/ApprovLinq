@@ -34,6 +34,23 @@
     } catch (e) { /* storage disabled */ }
   }
 
+  // Ensure the legacy app.css loads alongside the new tokens/components for
+  // any migrated page that still emits legacy class names (.stat-grid, .row,
+  // .pill, etc.). Kept as a link tag so it can be removed in one place later.
+  function ensureLegacyStylesheet() {
+    if (document.querySelector('link[data-ap-legacy-css]')) return;
+    const existing = Array.from(document.styleSheets || []).some(s => (s.href || "").endsWith("/static/css/app.css"));
+    if (existing) return;
+    const l = document.createElement("link");
+    l.rel = "stylesheet";
+    l.href = "/static/css/app.css";
+    l.setAttribute("data-ap-legacy-css", "true");
+    // Insert BEFORE any other <link> so components.css wins in cascade
+    const firstLink = document.head.querySelector('link[rel="stylesheet"]');
+    if (firstLink) document.head.insertBefore(l, firstLink);
+    else document.head.appendChild(l);
+  }
+
   function toggleTheme() {
     const next = currentTheme() === "dark" ? "light" : "dark";
     applyTheme(next);
@@ -63,12 +80,11 @@
   // ── Logo snippets ─────────────────────────────────────────────────────────
   // Inline SVG so the mark always renders, even if the static image route is
   // slow or the page is offline. Colours are CSS variables that track theme.
-  // Two-tone wordmark, works in both light and dark modes because both
-  // halves use CSS variables that shift with the theme.
-  const LOGO_WORDMARK = '<svg width="140" height="26" viewBox="0 0 600 110" fill="none" aria-label="Approvlinq"><text x="0" y="80" font-family="Inter,Helvetica,Arial,sans-serif" font-weight="700" font-size="84" letter-spacing="-0.025em"><tspan fill="var(--ap-navy)">Approv</tspan><tspan fill="var(--ap-accent)">linq</tspan></text></svg>';
+  // Two-tone wordmark. Uses brand-specific --ap-logo-1 / --ap-logo-2
+  // so the two halves stay visually distinct in BOTH light and dark modes.
+  const LOGO_WORDMARK = '<svg width="140" height="26" viewBox="0 0 600 110" fill="none" aria-label="Approvlinq"><text x="0" y="80" font-family="Inter,Helvetica,Arial,sans-serif" font-weight="700" font-size="84" letter-spacing="-0.025em"><tspan fill="var(--ap-logo-1)">Approv</tspan><tspan fill="var(--ap-logo-2)">linq</tspan></text></svg>';
 
-  // Larger version for the login page
-  const LOGO_WORDMARK_LG = '<svg width="180" height="34" viewBox="0 0 600 110" fill="none" aria-label="Approvlinq"><text x="0" y="80" font-family="Inter,Helvetica,Arial,sans-serif" font-weight="700" font-size="84" letter-spacing="-0.025em"><tspan fill="var(--ap-navy)">Approv</tspan><tspan fill="var(--ap-accent)">linq</tspan></text></svg>';
+  const LOGO_WORDMARK_LG = '<svg width="180" height="34" viewBox="0 0 600 110" fill="none" aria-label="Approvlinq"><text x="0" y="80" font-family="Inter,Helvetica,Arial,sans-serif" font-weight="700" font-size="84" letter-spacing="-0.025em"><tspan fill="var(--ap-logo-1)">Approv</tspan><tspan fill="var(--ap-logo-2)">linq</tspan></text></svg>';
 
   function renderLogos() {
     document.querySelectorAll("[data-ap-logo=wordmark]").forEach(el => { el.innerHTML = LOGO_WORDMARK; });
@@ -104,7 +120,10 @@
     const active = opts.active || "";
     const crumb = opts.crumb || [];
     const body = document.querySelector("[data-ap-page-body]");
-    const bodyHtml = body ? body.outerHTML : "";
+    const bodyHtml = body ? body.innerHTML : "";
+    // Remove the original body node so its content doesn't render twice —
+    // we're about to inject a fresh copy inside the shell.
+    if (body && body.parentNode) body.parentNode.removeChild(body);
 
     const navHtml = NAV.map(n => {
       if (n.section) return `<div class="ap-nav-section">${n.section}</div>`;
@@ -184,7 +203,7 @@
 
   applySavedThemeEarly();
 
-  function init() { renderShell(); renderLogos(); wireThemeToggle(); }
+  function init() { ensureLegacyStylesheet(); renderShell(); renderLogos(); wireThemeToggle(); }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {

@@ -19,6 +19,13 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* Until JS runs and injects the shell, hide the raw page-body element so
+   it doesn't flash OR duplicate if a stale ap-ui.js failed to remove it.
+   Once the shell is injected, the body HTML lives inside .ap-shell > .ap-main
+   and is no longer an [data-ap-page-body] attribute match — so this rule
+   stops applying and the content becomes visible. */
+.ap-app > [data-ap-page-body] { display: none; }
+
 /* ───── Shell layout ───── */
 .ap-shell {
   display: grid;
@@ -49,8 +56,8 @@
 .ap-brand-word {
   font-size: 17px; font-weight: 700; letter-spacing: -0.02em;
 }
-.ap-brand-word .a { color: var(--ap-navy); }
-.ap-brand-word .b { color: var(--ap-accent); }
+.ap-brand-word .a { color: var(--ap-logo-1); }
+.ap-brand-word .b { color: var(--ap-logo-2); }
 
 .ap-nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
 .ap-nav-section {
@@ -409,3 +416,32 @@
 .ap-app .scan-mode-card input { margin-top: 2px; }
 .ap-app .scan-mode-card strong { font-size: var(--ap-fs-13); font-weight: 500; color: var(--ap-text); display: block; }
 .ap-app .scan-mode-card .muted { font-size: var(--ap-fs-12); color: var(--ap-text-muted); margin-top: 2px; }
+
+/* Analytics page legacy classes */
+.ap-app .stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--ap-s-3);
+}
+.ap-app .stat-card {
+  background: var(--ap-bg-surface);
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-lg);
+  padding: var(--ap-s-3) var(--ap-s-4);
+}
+.ap-app .stat-label {
+  font-size: var(--ap-fs-11); color: var(--ap-text-muted);
+  text-transform: uppercase; letter-spacing: 0.04em; font-weight: 500;
+}
+.ap-app .stat-value {
+  font-size: var(--ap-fs-22); font-weight: 600; margin-top: var(--ap-s-1);
+  color: var(--ap-text);
+}
+
+/* Chart.js canvas parents need a bounded height; most analytics pages do
+   this inline, but ensure the default Chart canvas doesn't explode. */
+.ap-app canvas { max-width: 100%; }
+
+/* Admin & tenant forms often use .form-grid */
+.ap-app .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--ap-s-3); }
+.ap-app .section-divider { border: 0; border-top: 1px solid var(--ap-border); margin: var(--ap-s-5) 0; }
