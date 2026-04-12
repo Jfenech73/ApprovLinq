@@ -3,66 +3,19 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Approvlinq — Batch Review</title>
-  <link rel="stylesheet" href="/static/css/app.css" />
-  <style>
-    /* Page-specific layout only — colours/buttons/cards inherited from app.css */
-    .review-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px; }
-    @media (max-width: 1100px) { .review-grid { grid-template-columns: 1fr; } }
-    .review-row { padding: 10px 12px; border: 1px solid #e3e6ea; border-radius: 6px;
-                  margin-bottom: 8px; cursor: pointer; background: #fff; }
-    .review-row:hover { border-color: #1f4e8c; }
-    .review-row.selected { border-color: #1f4e8c; background: #f3f7fc; }
-    .review-row.flagged { border-left: 4px solid #d97706; }
-    .review-row.corrected { border-left: 4px solid #2563eb; }
-    .review-row .meta { font-size: 12px; color: #6b7280; margin-top: 2px; }
-    .field-grid { display: grid; grid-template-columns: 160px 1fr auto auto; gap: 6px 10px;
-                  align-items: center; }
-    .field-grid label { font-size: 13px; color: #374151; }
-    .field-grid input { width: 100%; padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 4px;
-                        font-size: 13px; }
-    .field-grid .orig { grid-column: 2 / 5; font-size: 11px; color: #9ca3af; margin: -2px 0 4px; }
-    .field-grid .rule-cb { font-size: 11px; color: #4b5563; white-space: nowrap; }
-    .preview-img { width: 100%; max-width: 100%; border: 1px solid #d1d5db; border-radius: 4px;
-                   margin-top: 8px; }
-    .pill.scanned   { background: #e5e7eb; color: #374151; }
-    .pill.in_review { background: #fef3c7; color: #92400e; }
-    .pill.approved  { background: #d1fae5; color: #065f46; }
-    .pill.exported  { background: #dbeafe; color: #1e40af; }
-    .audit-entry { font-size: 12px; padding: 6px 0; border-bottom: 1px solid #e5e7eb; }
-    .audit-entry .badge { font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-left: 4px; }
-    .audit-entry .badge.rule  { background: #d1fae5; color: #065f46; }
-    .audit-entry .badge.force { background: #fee2e2; color: #991b1b; }
-    .filter-chips .btn.active { background: #1f4e8c; color: #fff; }
-    .row-list { max-height: 480px; overflow-y: auto; }
-  </style>
+  <title>Review — Approvlinq</title>
+  <script>
+    (function(){ try { var t = localStorage.getItem("ap_theme"); if (t==="light"||t==="dark") document.documentElement.setAttribute("data-theme", t); } catch(e){} })();
+  </script>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/components.css" />
+  
 </head>
-<body>
-  <div class="page-shell">
-    <div class="page">
-      <header class="hero scanner-hero">
-        <div class="hero-copy">
-          <div class="hero-copy-top">
-            <h1>Batch Review</h1>
-            <div class="version-badge" id="batchStatusPill">—</div>
-          </div>
-        </div>
-        <div class="hero-actions">
-          <div class="hero-logo-wrap">
-            <img src="/static/img/approvlinq-logo.png" alt="Approvlinq" class="hero-logo" />
-          </div>
-          <div class="hero-toolbar">
-            <div class="hero-toolbar-right">
-              <a class="btn btn-secondary" href="/static/scanner.html">← Back to Scanner</a>
-              <a class="btn btn-secondary" href="/static/tenant.html">Tenant Admin</a>
-              <a class="btn btn-secondary" href="/static/analytics.html">Analytics</a>
-              <button id="logoutBtn" class="btn btn-secondary" type="button">Logout</button>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <div id="pageMessage" class="message"></div>
+<body class="ap-app">
+  <div data-ap-shell='{"active":"","crumb":[["Work",""],["Batches",""],["Review","cur"]]}'></div>
+  <div data-ap-page-body>
+    <div class="ap-page">
+<div id="pageMessage" class="message"></div>
 
       <main class="stack-lg">
         <section class="card">
@@ -127,8 +80,10 @@
       </main>
     </div>
   </div>
-
+    </div>
+  </div>
   <script src="/static/js/common.js"></script>
   <script src="/static/js/review.js"></script>
+  <script src="/static/js/ap-ui.js"></script>
 </body>
 </html>
