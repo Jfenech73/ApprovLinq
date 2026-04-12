@@ -150,6 +150,14 @@ async function selectBatch(batchId, options = {}) {
   renderFiles(batch.files || []);
   await loadRows();
 
+  // One-shot paint of review cells for batches that aren't actively polling
+  // (already completed batches). Safe even when mid-scan — the poller will
+  // keep updating on its own.
+  try {
+    const progress = await api(`/batches/${batchId}/progress`);
+    applyReviewStates(progress.files || []);
+  } catch {}
+
   if (batch.status === "processing") {
     startProgressPolling();
   } else if (!options.preservePolling) {
@@ -181,11 +189,8 @@ function renderFiles(files) {
     `;
     tbody.appendChild(tr);
   }
-  // If we already have a recent progress snapshot, paint review cells now.
-  try {
-    const progress = await api(`/batches/${state.selectedBatchId}/progress`);
-    applyReviewStates(progress.files || []);
-  } catch {}
+  // Review cells start as "-" and are populated by startProgressPolling()'s
+  // applyReviewStates call, or by selectBatch() which also triggers a poll.
 }
 
 async function loadRows() {
