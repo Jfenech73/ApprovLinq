@@ -210,6 +210,27 @@ def reopen(batch_id: UUID, db: Session = Depends(get_db), user=Depends(current_u
 
 
 # ── PDF file info (page count) ────────────────────────────────────────────────
+def _open_pdf_page_count(path: str) -> int:
+    try:
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(path)
+        try:
+            return len(pdf)
+        finally:
+            pdf.close()
+    except Exception:
+        pass
+    try:
+        import fitz
+        doc = fitz.open(path)
+        try:
+            return doc.page_count
+        finally:
+            doc.close()
+    except Exception:
+        return 1
+
+
 @router.get("/files/{file_id}/info")
 def file_info(
     file_id: int,
@@ -217,20 +238,11 @@ def file_info(
     authorization: str | None = None,
     db: Session = Depends(get_db),
 ):
-    user = current_user_flexible(token=token, authorization=authorization, db=db)
+    current_user_flexible(token=token, authorization=authorization, db=db)
     f = db.get(M.InvoiceFile, file_id)
     if not f:
         raise HTTPException(404, "File not found")
-    try:
-        import fitz
-        doc = fitz.open(f.file_path)
-        pc = doc.page_count
-        doc.close()
-    except ImportError:
-        pc = 1
-    except Exception:
-        pc = 1
-    return {"file_id": file_id, "page_count": pc}
+    return {"file_id": file_id, "page_count": _open_pdf_page_count(f.file_path)}
 
 
 # ── PDF preview (on-demand, not stored) ───────────────────────────────────────
@@ -242,92 +254,124 @@ def preview(
     authorization: str | None = None,
     db: Session = Depends(get_db),
 ):
-    user = current_user_flexible(token=token, authorization=authorization, db=db)
+    current_user_flexible(token=token, authorization=authorization, db=db)
     f = db.get(M.InvoiceFile, file_id)
     if not f:
         raise HTTPException(404, "File not found")
+    # Prefer pypdfium2 (already a project dependency); fall back to PyMuPDF.
     try:
-        import fitz  # PyMuPDF
-    except ImportError:
-        raise HTTPException(501, "PyMuPDF not installed")
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(f.file_path)
+        try:
+            if page < 1 or page > len(pdf):
+                raise HTTPException(400, "Page out of range")
+            pg = pdf.get_page(page - 1)
+            try:
+                img = pg.render(scale=1.5).to_pil().convert("RGB")
+            finally:
+                pg.close()
+        finally:
+            pdf.close()
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        return StreamingResponse(io.BytesIO(buf.getvalue()), media_type="image/png")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
     try:
+        import fitz
         doc = fitz.open(f.file_path)
         if page < 1 or page > doc.page_count:
+            doc.close()
             raise HTTPException(400, "Page out of range")
         pix = doc.load_page(page - 1).get_pixmap(dpi=110)
         png = pix.tobytes("png")
         doc.close()
+        return StreamingResponse(io.BytesIO(png), media_type="image/png")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(500, f"Preview failed: {e}")
-    return StreamingResponse(io.BytesIO(png), media_type="image/png")
 
 
 # ── Read text from a region of a page ─────────────────────────────────────────
 def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float, h: float) -> str:
-    """Return text contained in the normalized (0-1) rectangle on the given page.
-    Tries PyMuPDF's text layer first (works for digital PDFs); if empty, falls
-    back to rendering + OCR via the configured OCR backend."""
+    """Return text inside the normalized (0-1) rectangle on the page.
+    Tries PyMuPDF's text layer first (digital PDFs); if empty or unavailable,
+    falls back to rendering + OCR via the configured OCR backend."""
+    # 1) PyMuPDF text-layer extraction (fast, free, exact)
     try:
         import fitz
-    except ImportError:
-        raise HTTPException(501, "PyMuPDF not installed")
-    doc = fitz.open(file_path)
+        doc = fitz.open(file_path)
+        try:
+            if 1 <= page_no <= doc.page_count:
+                page = doc.load_page(page_no - 1)
+                pw, ph = page.rect.width, page.rect.height
+                rect = fitz.Rect(x * pw, y * ph, (x + w) * pw, (y + h) * ph)
+                text = (page.get_textbox(rect) or "").strip()
+                if text:
+                    return " ".join(text.split())
+        finally:
+            doc.close()
+    except Exception:
+        pass
+
+    # 2) OCR fallback: render crop with pypdfium2 and POST to OCR.space
     try:
-        if page_no < 1 or page_no > doc.page_count:
-            raise HTTPException(400, "Page out of range")
-        page = doc.load_page(page_no - 1)
-        pw, ph = page.rect.width, page.rect.height
-        rect = fitz.Rect(x * pw, y * ph, (x + w) * pw, (y + h) * ph)
-        # 1) Text layer
-        text = (page.get_textbox(rect) or "").strip()
-        if text:
-            return " ".join(text.split())
-        # 2) OCR fallback: render the crop region to a PNG and OCR it
+        import pypdfium2 as pdfium
+        from PIL import Image  # bundled with pypdfium2's deps
+        pdf = pdfium.PdfDocument(file_path)
         try:
-            from app.services.extractor import get_ocr_backend
-            backend = get_ocr_backend()
-        except Exception:
-            backend = None
-        if backend is None:
-            return ""
-        # Render just the clip region at a higher DPI for legibility
-        mat = fitz.Matrix(3.0, 3.0)  # ~216 dpi
-        pix = page.get_pixmap(matrix=mat, clip=rect)
-        img_bytes = pix.tobytes("jpeg")
-        # Call OCR.space directly if available, else give up gracefully
-        try:
-            import requests
-            from app.config import settings
-            if not getattr(settings, "ocr_space_api_key", None):
+            if page_no < 1 or page_no > len(pdf):
                 return ""
-            resp = requests.post(
-                settings.ocr_space_endpoint,
-                files={"file": ("region.jpg", img_bytes, "image/jpeg")},
-                data={
-                    "apikey": settings.ocr_space_api_key,
-                    "language": settings.ocr_space_language,
-                    "isOverlayRequired": "false",
-                    "scale": "true",
-                    "OCREngine": str(settings.ocr_space_ocr_engine),
-                },
-                timeout=settings.ocr_space_timeout_seconds,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-            if payload.get("IsErroredOnProcessing"):
-                return ""
-            out = []
-            for item in payload.get("ParsedResults") or []:
-                t = (item or {}).get("ParsedText") or ""
-                if t:
-                    out.append(t)
-            return " ".join(" ".join(out).split())
-        except Exception:
+            pg = pdf.get_page(page_no - 1)
+            try:
+                full = pg.render(scale=3.0).to_pil().convert("RGB")
+            finally:
+                pg.close()
+        finally:
+            pdf.close()
+        W, H = full.size
+        box = (int(x * W), int(y * H), int((x + w) * W), int((y + h) * H))
+        if box[2] - box[0] < 4 or box[3] - box[1] < 4:
             return ""
-    finally:
-        doc.close()
+        crop = full.crop(box)
+        buf = io.BytesIO()
+        crop.save(buf, format="JPEG", quality=80)
+        img_bytes = buf.getvalue()
+    except Exception:
+        return ""
+
+    try:
+        from app.config import settings
+        import requests
+        if not getattr(settings, "ocr_space_api_key", None):
+            return ""
+        resp = requests.post(
+            settings.ocr_space_endpoint,
+            files={"file": ("region.jpg", img_bytes, "image/jpeg")},
+            data={
+                "apikey": settings.ocr_space_api_key,
+                "language": settings.ocr_space_language,
+                "isOverlayRequired": "false",
+                "scale": "true",
+                "OCREngine": str(settings.ocr_space_ocr_engine),
+            },
+            timeout=settings.ocr_space_timeout_seconds,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("IsErroredOnProcessing"):
+            return ""
+        out = []
+        for item in payload.get("ParsedResults") or []:
+            t = (item or {}).get("ParsedText") or ""
+            if t:
+                out.append(t)
+        return " ".join(" ".join(out).split())
+    except Exception:
+        return ""
 
 
 # ── Remap hints (and optional read-back) ──────────────────────────────────────

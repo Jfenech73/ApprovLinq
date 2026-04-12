@@ -38,7 +38,7 @@ async function load() {
       state.page = state.rows[0].page_no || 1;
     }
     render();
-    if (state.selected != null) { loadAudit(state.selected); await ensurePageCount(); refreshPreview(); }
+    if (state.selected != null) { loadAudit(state.selected); await ensurePageCount(); }
   } catch (e) { msg("Load failed: " + e.message, "error"); }
 }
 
@@ -73,7 +73,9 @@ function render() {
        <div class="meta">${esc(r.source_filename || "file")} · page ${r.page_no} · row #${r.id}${r.confidence_score != null ? " · conf " + r.confidence_score.toFixed(2) : ""}</div>`;
     d.onclick = async () => {
       state.selected = r.id; state.fileId = r.source_file_id; state.page = r.page_no || 1;
-      render(); loadAudit(r.id); await ensurePageCount(); refreshPreview();
+      render(); loadAudit(r.id); await ensurePageCount();
+      // Only load the preview image if the user is actively in remap mode.
+      if ($("remapMode").checked) refreshPreview();
     };
     list.appendChild(d);
   });
@@ -221,9 +223,25 @@ $("approveBtn").onclick = async () => {
   });
   if (!r.ok) msg(await r.text(), "error"); else load();
 };
-$("exportBtn").onclick = () => {
-  // Trigger the existing /batches/{id}/export endpoint (now corrected-aware)
-  window.location.href = `/batches/${batchId}/export`;
+$("exportBtn").onclick = async () => {
+  // Use fetch with auth headers so the Bearer token is sent; <a href>/location
+  // cannot carry Authorization headers and would return "Missing Bearer token".
+  try {
+    const r = await fetch(`/batches/${batchId}/export`, { headers: hdrs() });
+    if (!r.ok) { msg(await r.text(), "error"); return; }
+    const blob = await r.blob();
+    const cd = r.headers.get("Content-Disposition") || "";
+    const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+    const name = m ? decodeURIComponent(m[1]) : `batch_${batchId}.xlsx`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name; document.body.appendChild(a); a.click();
+    a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+    msg("Export downloaded.", "success");
+    load();  // refresh batch state (status, version)
+  } catch (e) {
+    msg(String(e), "error");
+  }
 };
 $("reopenBtn").onclick = async () => {
   const r = await fetch(`/review/batches/${batchId}/reopen`, { method: "POST", headers: hdrs() });
@@ -254,6 +272,10 @@ previewImg.addEventListener("load", () => {
 function setRemapField(name) {
   remapField = name || null;
   remapTargetLabel.textContent = remapField ? `field: ${remapField}` : "";
+  // Only now (remap mode on + field chosen) do we load the preview image.
+  if ($("remapMode").checked && remapField && state.fileId && !previewImg.src) {
+    refreshPreview();
+  }
 }
 
 // Any input/select/textarea inside the row editor with a data-field attribute
@@ -271,16 +293,20 @@ $("remapMode").addEventListener("change", async (e) => {
   const on = e.target.checked;
   previewWrap.classList.toggle("remap-active", on);
   remapHint.hidden = !on;
-  if (!on) { remapSel.hidden = true; dragStart = null; return; }
-  // If no row / file loaded yet, auto-select first row so the preview opens.
+  if (!on) {
+    remapSel.hidden = true; dragStart = null;
+    previewImg.src = "";  // free memory; preview is meant to show only in remap mode
+    return;
+  }
+  // Ensure a row/file is selected so we know which PDF to preview.
   if (!state.fileId && state.rows.length) {
     const r0 = state.rows[0];
     state.selected = r0.id; state.fileId = r0.source_file_id; state.page = r0.page_no || 1;
-    render(); loadAudit(r0.id); await ensurePageCount(); refreshPreview();
-  } else if (state.fileId && !previewImg.src) {
-    refreshPreview();
+    render(); loadAudit(r0.id); await ensurePageCount();
   }
-  if (!remapField) msg("Click a field in the editor, then drag on the preview.", "");
+  // Do NOT load the preview image yet — wait until the user picks a field.
+  if (!remapField) msg("Click a field in the editor to load the invoice preview, then drag a region.", "");
+  else if (state.fileId) refreshPreview();
 });
 
 let dragStart = null;        // {xPx, yPx} pixel coords relative to image top-left
