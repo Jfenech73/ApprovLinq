@@ -3,44 +3,46 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Approvlinq Login</title>
-  <link rel="stylesheet" href="/static/css/app.css" />
+  <title>Sign in — Approvlinq</title>
+  <script>
+    (function(){ try { var t = localStorage.getItem("ap_theme"); if (t==="light"||t==="dark") document.documentElement.setAttribute("data-theme", t); } catch(e){} })();
+  </script>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/components.css" />
 </head>
-<body>
-  <div class="page-shell login-shell">
-    <section class="card login-card">
-      <div class="hero mini-hero login-hero">
-        <div class="hero-copy">
-          <div class="hero-copy-top">
-            <h1>Approvlinq</h1>
-            <div class="version-badge">v3.61.0</div>
-          </div>
-        </div>
-        <div class="hero-actions login-hero-actions">
-          <div class="hero-logo-wrap">
-            <img src="/static/img/approvlinq-logo.png" alt="Approvlinq" class="hero-logo" />
-          </div>
-          <div class="hero-toolbar-right">
-            <div class="hero-toolbar-right">
-            <div class="hero-toolbar-right">
-              <button id="helpBtn" class="btn btn-secondary help-btn" type="button" aria-label="Open help">?</button>
-            </div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <h2>Login</h2>
-      <form id="loginForm" class="stack">
-        <label for="email">Email</label>
-        <input id="email" type="text" placeholder="you@company.com" required />
-        <label for="password">Password</label>
-        <input id="password" type="password" placeholder="Enter password" required />
-        <button class="btn btn-primary" type="submit">Sign in</button>
-      </form>
-      <div id="loginMessage" class="message"></div>
-    </section>
+<body class="ap-app">
+  <div style="position:absolute; top:16px; right:16px;">
+    <button class="ap-theme-toggle" data-ap-theme-toggle type="button" aria-label="Toggle theme"></button>
   </div>
+
+  <div class="ap-login-wrap">
+    <div class="ap-login-card">
+      <div class="ap-login-logo" data-ap-logo="wordmark"></div>
+      <h1 class="ap-login-h">Welcome back</h1>
+      <p class="ap-login-s">Invoice scanning solution</p>
+
+      <form id="loginForm">
+        <div class="ap-field">
+          <label class="ap-label" for="email">Email</label>
+          <input id="email" class="ap-input" type="text" placeholder="you@company.com" autocomplete="username" required />
+        </div>
+        <div class="ap-field">
+          <label class="ap-label" for="password">Password</label>
+          <input id="password" class="ap-input" type="password" placeholder="••••••••" autocomplete="current-password" required />
+        </div>
+        <button class="ap-btn ap-btn-primary" type="submit" style="width:100%; margin-top:4px;">Sign in</button>
+      </form>
+
+      <div id="loginMessage" class="ap-message" style="margin-top:16px;"></div>
+
+      <p style="text-align:center; margin:20px 0 0;">
+        <button id="helpBtn" class="ap-btn ap-btn-ghost ap-btn-sm" type="button" aria-label="Open help">Need help?</button>
+      </p>
+    </div>
+  </div>
+
   <script src="/static/js/common.js"></script>
   <script src="/static/js/login.js"></script>
+  <script src="/static/js/ap-ui.js"></script>
 </body>
 </html>
