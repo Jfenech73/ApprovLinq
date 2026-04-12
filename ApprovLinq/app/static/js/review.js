@@ -184,7 +184,10 @@ function updatePageControls() {
 
 function refreshPreview() {
   if (!state.fileId) { $("previewImg").src = ""; $("pageLabel").textContent = "page — / —"; return; }
-  $("previewImg").src = `/review/files/${state.fileId}/preview?page=${state.page}&t=${Date.now()}`;
+  const tok = (typeof getToken === "function") ? getToken() : "";
+  // <img> cannot send custom headers, so pass the token as a query parameter.
+  $("previewImg").src =
+    `/review/files/${state.fileId}/preview?page=${state.page}&token=${encodeURIComponent(tok)}&t=${Date.now()}`;
   updatePageControls();
 }
 
@@ -236,6 +239,17 @@ const remapTargetLabel = $("remapTargetLabel");
 const previewWrap = $("previewWrap");
 const previewImg = $("previewImg");
 const remapSel = $("remapSelection");
+
+// Surface a clear message if the preview image can't load (e.g. auth failure,
+// missing PDF, PyMuPDF not installed) instead of leaving a blank panel.
+previewImg.addEventListener("error", () => {
+  if (previewImg.src) msg("Could not load page preview — check that the file exists and PyMuPDF is installed.", "error");
+});
+previewImg.addEventListener("load", () => {
+  // Clear any previous error message once a new page successfully loads.
+  const m = $("pageMessage");
+  if (m && m.classList.contains("error") && m.textContent.startsWith("Could not load page")) msg("", "");
+});
 
 function setRemapField(name) {
   remapField = name || null;
@@ -331,11 +345,25 @@ window.addEventListener("mouseup", async (e) => {
       page_no: state.page,
       x: region.x, y: region.y, w: region.wN, h: region.hN,
       file_id: state.fileId,
+      apply_as_value: true,
     }),
   });
   if (!r.ok) { msg(await r.text(), "error"); return; }
-  msg(`Remap saved for ${remapField}`, "success");
-  setTimeout(() => { remapSel.hidden = true; }, 800);
+  const data = await r.json().catch(() => ({}));
+  // If the backend was able to read text from the region, drop it straight
+  // into the field input so the correction can be saved normally.
+  if (data && data.read_text) {
+    const inp = document.querySelector(`#rowEditor [data-field="${remapField}"]`);
+    if (inp) {
+      inp.value = data.read_text;
+      inp.dispatchEvent(new Event("input", { bubbles: true }));
+      inp.focus();
+    }
+    msg(`Remap saved — read "${data.read_text}" into ${remapField}. Click Save corrections to apply.`, "success");
+  } else {
+    msg(`Remap saved for ${remapField} (no text detected — region stored for future learning).`, "success");
+  }
+  setTimeout(() => { remapSel.hidden = true; }, 1200);
 });
 
 if (typeof ensureAuth === "function" && !ensureAuth()) {

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select, desc
@@ -17,9 +17,36 @@ from app.db.review_models import (
 )
 from app.db.session import get_db
 from app.routers.auth import current_user
+from app.utils.security import session_token_hash
 from app.services import correction_service as cs
 
 router = APIRouter(prefix="/review", tags=["review"])
+
+
+def current_user_flexible(
+    token: str | None = Query(default=None),
+    authorization: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Resolve the current user from either the Authorization header (normal API
+    calls) or a ?token=... query parameter (for <img src> requests, which cannot
+    carry custom headers). Mirrors the logic in routers.auth.current_session."""
+    if authorization and authorization.lower().startswith("bearer "):
+        bearer = authorization.split(" ", 1)[1].strip()
+    else:
+        bearer = token
+    if not bearer:
+        raise HTTPException(status_code=401, detail="Missing token")
+    token_hash = session_token_hash(bearer)
+    session_row = db.execute(
+        select(M.UserSession).where(M.UserSession.token_hash == token_hash)
+    ).scalar_one_or_none()
+    if not session_row or (session_row.expires_at and session_row.expires_at < datetime.utcnow()):
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    user = db.get(M.User, session_row.user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -42,6 +69,7 @@ class RemapIn(BaseModel):
     w: float
     h: float
     file_id: int | None = None
+    apply_as_value: bool = False  # if True, also read text from region and return it
 
 
 def _get_batch(db: Session, batch_id: UUID) -> M.InvoiceBatch:
@@ -183,12 +211,18 @@ def reopen(batch_id: UUID, db: Session = Depends(get_db), user=Depends(current_u
 
 # ── PDF file info (page count) ────────────────────────────────────────────────
 @router.get("/files/{file_id}/info")
-def file_info(file_id: int, db: Session = Depends(get_db), user=Depends(current_user)):
+def file_info(
+    file_id: int,
+    token: str | None = Query(default=None),
+    authorization: str | None = None,
+    db: Session = Depends(get_db),
+):
+    user = current_user_flexible(token=token, authorization=authorization, db=db)
     f = db.get(M.InvoiceFile, file_id)
     if not f:
         raise HTTPException(404, "File not found")
     try:
-        import fitz  # PyMuPDF
+        import fitz
         doc = fitz.open(f.file_path)
         pc = doc.page_count
         doc.close()
@@ -201,7 +235,14 @@ def file_info(file_id: int, db: Session = Depends(get_db), user=Depends(current_
 
 # ── PDF preview (on-demand, not stored) ───────────────────────────────────────
 @router.get("/files/{file_id}/preview")
-def preview(file_id: int, page: int = 1, db: Session = Depends(get_db), user=Depends(current_user)):
+def preview(
+    file_id: int,
+    page: int = 1,
+    token: str | None = Query(default=None),
+    authorization: str | None = None,
+    db: Session = Depends(get_db),
+):
+    user = current_user_flexible(token=token, authorization=authorization, db=db)
     f = db.get(M.InvoiceFile, file_id)
     if not f:
         raise HTTPException(404, "File not found")
@@ -223,7 +264,73 @@ def preview(file_id: int, page: int = 1, db: Session = Depends(get_db), user=Dep
     return StreamingResponse(io.BytesIO(png), media_type="image/png")
 
 
-# ── Remap hints ───────────────────────────────────────────────────────────────
+# ── Read text from a region of a page ─────────────────────────────────────────
+def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float, h: float) -> str:
+    """Return text contained in the normalized (0-1) rectangle on the given page.
+    Tries PyMuPDF's text layer first (works for digital PDFs); if empty, falls
+    back to rendering + OCR via the configured OCR backend."""
+    try:
+        import fitz
+    except ImportError:
+        raise HTTPException(501, "PyMuPDF not installed")
+    doc = fitz.open(file_path)
+    try:
+        if page_no < 1 or page_no > doc.page_count:
+            raise HTTPException(400, "Page out of range")
+        page = doc.load_page(page_no - 1)
+        pw, ph = page.rect.width, page.rect.height
+        rect = fitz.Rect(x * pw, y * ph, (x + w) * pw, (y + h) * ph)
+        # 1) Text layer
+        text = (page.get_textbox(rect) or "").strip()
+        if text:
+            return " ".join(text.split())
+        # 2) OCR fallback: render the crop region to a PNG and OCR it
+        try:
+            from app.services.extractor import get_ocr_backend
+            backend = get_ocr_backend()
+        except Exception:
+            backend = None
+        if backend is None:
+            return ""
+        # Render just the clip region at a higher DPI for legibility
+        mat = fitz.Matrix(3.0, 3.0)  # ~216 dpi
+        pix = page.get_pixmap(matrix=mat, clip=rect)
+        img_bytes = pix.tobytes("jpeg")
+        # Call OCR.space directly if available, else give up gracefully
+        try:
+            import requests
+            from app.config import settings
+            if not getattr(settings, "ocr_space_api_key", None):
+                return ""
+            resp = requests.post(
+                settings.ocr_space_endpoint,
+                files={"file": ("region.jpg", img_bytes, "image/jpeg")},
+                data={
+                    "apikey": settings.ocr_space_api_key,
+                    "language": settings.ocr_space_language,
+                    "isOverlayRequired": "false",
+                    "scale": "true",
+                    "OCREngine": str(settings.ocr_space_ocr_engine),
+                },
+                timeout=settings.ocr_space_timeout_seconds,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            if payload.get("IsErroredOnProcessing"):
+                return ""
+            out = []
+            for item in payload.get("ParsedResults") or []:
+                t = (item or {}).get("ParsedText") or ""
+                if t:
+                    out.append(t)
+            return " ".join(" ".join(out).split())
+        except Exception:
+            return ""
+    finally:
+        doc.close()
+
+
+# ── Remap hints (and optional read-back) ──────────────────────────────────────
 @router.post("/batches/{batch_id}/rows/{row_id}/remap")
 def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
                db: Session = Depends(get_db), user=Depends(current_user)):
@@ -250,7 +357,23 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
     )
     db.add(hint)
     db.commit()
-    return {"id": hint.id}
+
+    # Optionally read the text inside the region and return it so the UI can
+    # populate the corresponding field immediately.
+    read_text = ""
+    if payload.apply_as_value:
+        file_id = payload.file_id or row.source_file_id
+        f = db.get(M.InvoiceFile, file_id) if file_id else None
+        if f:
+            try:
+                read_text = _read_region_text(
+                    f.file_path, payload.page_no, payload.x, payload.y, payload.w, payload.h
+                )
+            except HTTPException:
+                raise
+            except Exception:
+                read_text = ""
+    return {"id": hint.id, "read_text": read_text}
 
 
 # ── Admin: rules ──────────────────────────────────────────────────────────────
