@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 180" fill="none">
+  <!-- Approvlinq wordmark v2: the tittle (dot) on the 'i' of 'linq' is
+       replaced with a tiny accent checkmark — ties the name to the
+       product's purpose without being literal. -->
+  <defs>
+    <style>
+      .wm {
+        font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+        font-weight: 700;
+        letter-spacing: -0.025em;
+        fill: #1f4e79;
+      }
+      .tag {
+        font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+        font-weight: 500;
+        letter-spacing: 0.24em;
+        fill: #3ea3d9;
+      }
+    </style>
+  </defs>
+
+  <!-- Render "Approvl" + "nq" as one text; we'll hand-place a custom 'i'. -->
+  <text x="300" y="100" text-anchor="middle" class="wm" font-size="88">Approvlinq</text>
+
+  <!-- Cover the 'i' tittle area and draw a checkmark instead.
+       Position is tuned visually for Inter/Helvetica 88px. -->
+  <g transform="translate(378 36)">
+    <!-- tiny check, centered roughly where the i's dot would sit -->
+    <polyline points="-8,4 -2,10 8,-4" stroke="#3ea3d9" stroke-width="5"
+              stroke-linecap="round" stroke-linejoin="round" fill="none" />
+  </g>
+
+  <!-- Tagline -->
+  <text x="300" y="146" text-anchor="middle" class="tag" font-size="13">INVOICE SCANNING SOLUTION</text>
+</svg>

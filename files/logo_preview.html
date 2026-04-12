@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Approvlinq wordmark options</title>
+<style>
+  body { font-family: Inter, Helvetica, Arial, sans-serif; margin: 0; background: #f5f7fa; color: #1f2937; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 8px 0; }
+  .muted { color: #64748b; font-size: 13px; margin-bottom: 20px; }
+  section { padding: 40px 48px; border-bottom: 1px solid #e5e7eb; }
+  section.dark { background: #0f172a; color: #cbd5e1; }
+  .row { display: grid; grid-template-columns: 260px 1fr; gap: 32px; align-items: center; margin: 28px 0; }
+  .row h2 { font-size: 14px; font-weight: 600; margin: 0 0 6px 0; }
+  .row p { font-size: 12px; color: #64748b; margin: 0; line-height: 1.5; }
+  section.dark .row p { color: #94a3b8; }
+  .frame { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 24px; display: flex; align-items: center; justify-content: center; min-height: 140px; }
+  section.dark .frame { background: #1e293b; border-color: #334155; }
+  .frame img { max-width: 100%; height: auto; }
+  .mono .frame { min-height: 180px; }
+  .mono .frame img { max-width: 120px; }
+</style>
+</head>
+<body>
+
+<section>
+  <h1>On light background</h1>
+  <p class="muted">How the marks read against the app header, emails, documents, and most brand surfaces.</p>
+
+  <div class="row">
+    <div>
+      <h2>v1 — Clean</h2>
+      <p>Pure wordmark with a small accent underline under "linq". Safest, most corporate.</p>
+    </div>
+    <div class="frame"><img src="approvlinq_wordmark_v1_clean.svg" alt="v1" /></div>
+  </div>
+
+  <div class="row">
+    <div>
+      <h2>v2 — Check tittle</h2>
+      <p>The dot on the "i" is replaced with a tiny checkmark. Subtle nod to approval without a separate icon.</p>
+    </div>
+    <div class="frame"><img src="approvlinq_wordmark_v2_check.svg" alt="v2" /></div>
+  </div>
+
+  <div class="row">
+    <div>
+      <h2>v3 — Two-tone</h2>
+      <p>"Approv" in navy, "linq" in accent blue. Gives the mark rhythm and emphasizes the connection half of the name.</p>
+    </div>
+    <div class="frame"><img src="approvlinq_wordmark_v3_twotone.svg" alt="v3" /></div>
+  </div>
+
+  <div class="row mono">
+    <div>
+      <h2>Monogram — for favicons</h2>
+      <p>The "A" crossbar is replaced with a checkmark. Use wherever the full wordmark won't fit.</p>
+    </div>
+    <div class="frame"><img src="approvlinq_monogram.svg" alt="monogram" /></div>
+  </div>
+</section>
+
+<section class="dark">
+  <h1 style="color:#f1f5f9">On dark background</h1>
+  <p class="muted">Same SVGs unmodified. If the navy disappears on your real dark UI, we can build an inverted variant.</p>
+
+  <div class="row">
+    <div><h2 style="color:#f1f5f9">v1 — Clean</h2></div>
+    <div class="frame"><img src="approvlinq_wordmark_v1_clean.svg" alt="v1 dark" /></div>
+  </div>
+  <div class="row">
+    <div><h2 style="color:#f1f5f9">v2 — Check tittle</h2></div>
+    <div class="frame"><img src="approvlinq_wordmark_v2_check.svg" alt="v2 dark" /></div>
+  </div>
+  <div class="row">
+    <div><h2 style="color:#f1f5f9">v3 — Two-tone</h2></div>
+    <div class="frame"><img src="approvlinq_wordmark_v3_twotone.svg" alt="v3 dark" /></div>
+  </div>
+  <div class="row mono">
+    <div><h2 style="color:#f1f5f9">Monogram</h2></div>
+    <div class="frame"><img src="approvlinq_monogram.svg" alt="monogram dark" /></div>
+  </div>
+</section>
+
+</body>
+</html>

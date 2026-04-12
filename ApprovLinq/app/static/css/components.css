@@ -1,0 +1,299 @@
+/* ============================================================================
+   Approvlinq — Components
+   ----------------------------------------------------------------------------
+   All selectors are prefixed `.ap-` so they CANNOT accidentally cascade onto
+   legacy pages still using app.css. Migration = adding .ap-app to <body> and
+   replacing legacy markup with .ap- classes, one page at a time.
+   ============================================================================ */
+
+/* Base reset on the app shell only (not global) */
+.ap-app, .ap-app * { box-sizing: border-box; }
+.ap-app {
+  font-family: var(--ap-font);
+  font-size: var(--ap-fs-13);
+  line-height: 1.5;
+  color: var(--ap-text);
+  background: var(--ap-bg-page);
+  min-height: 100vh;
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ───── Shell layout ───── */
+.ap-shell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  min-height: 100vh;
+}
+@media (max-width: 768px) {
+  .ap-shell { grid-template-columns: 1fr; }
+  .ap-side  { display: none; }
+}
+
+/* ───── Sidebar ───── */
+.ap-side {
+  background: var(--ap-bg-surface);
+  border-right: 1px solid var(--ap-border);
+  padding: var(--ap-s-4) var(--ap-s-3);
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+.ap-brand {
+  display: flex; align-items: center; gap: var(--ap-s-3);
+  padding: var(--ap-s-2) var(--ap-s-3) var(--ap-s-5);
+  text-decoration: none;
+}
+.ap-brand-word {
+  font-size: 17px; font-weight: 700; letter-spacing: -0.02em;
+}
+.ap-brand-word .a { color: var(--ap-navy); }
+.ap-brand-word .b { color: var(--ap-accent); }
+
+.ap-nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.ap-nav-section {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+  color: var(--ap-text-dim); padding: var(--ap-s-4) var(--ap-s-3) var(--ap-s-1);
+  text-transform: uppercase;
+}
+.ap-nav-item {
+  display: flex; align-items: center; gap: var(--ap-s-3);
+  padding: var(--ap-s-2) var(--ap-s-3);
+  border-radius: var(--ap-r-md);
+  font-size: var(--ap-fs-13);
+  color: var(--ap-text-muted);
+  background: none; border: 0; cursor: pointer;
+  font-family: inherit; text-align: left;
+  text-decoration: none;
+}
+.ap-nav-item:hover { background: var(--ap-bg-sub); color: var(--ap-text); }
+.ap-nav-item.active {
+  background: var(--ap-bg-sub); color: var(--ap-navy); font-weight: 500;
+}
+.ap-nav-item svg { width: 16px; height: 16px; flex-shrink: 0; stroke-width: 1.5; }
+
+.ap-user {
+  display: flex; align-items: center; gap: var(--ap-s-3);
+  padding: var(--ap-s-3);
+  border-top: 1px solid var(--ap-border);
+  font-size: var(--ap-fs-12); color: var(--ap-text-muted);
+  margin-top: auto;
+}
+.ap-user .ap-avatar {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--ap-navy); color: var(--ap-text-invert);
+  display: flex; align-items: center; justify-content: center;
+  font-size: var(--ap-fs-11); font-weight: 600;
+}
+.ap-user-name { color: var(--ap-text); font-weight: 500; font-size: var(--ap-fs-12); }
+
+/* ───── Main pane ───── */
+.ap-main {
+  display: flex; flex-direction: column;
+  background: var(--ap-bg-page);
+  min-width: 0;
+}
+
+/* ───── Topbar ───── */
+.ap-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--ap-s-3) var(--ap-s-6);
+  border-bottom: 1px solid var(--ap-border);
+  background: var(--ap-bg-surface);
+  position: sticky; top: 0; z-index: 10;
+}
+.ap-crumb { font-size: var(--ap-fs-12); color: var(--ap-text-muted); }
+.ap-crumb a { color: inherit; text-decoration: none; }
+.ap-crumb a:hover { color: var(--ap-text); }
+.ap-crumb .sep { margin: 0 var(--ap-s-2); color: var(--ap-text-dim); }
+.ap-crumb .cur { color: var(--ap-text); font-weight: 500; }
+.ap-top-actions { display: flex; align-items: center; gap: var(--ap-s-2); }
+
+.ap-theme-toggle {
+  width: 32px; height: 32px;
+  border-radius: var(--ap-r-md);
+  border: 1px solid var(--ap-border);
+  background: var(--ap-bg-surface);
+  color: var(--ap-text-muted);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.ap-theme-toggle:hover { color: var(--ap-text); border-color: var(--ap-border-strong); }
+
+/* ───── Page ───── */
+.ap-page {
+  padding: var(--ap-s-6);
+  max-width: 1280px;
+  width: 100%;
+}
+.ap-h1 { font-size: var(--ap-fs-22); font-weight: 600; margin: 0 0 var(--ap-s-1); letter-spacing: -0.01em; }
+.ap-h2 { font-size: var(--ap-fs-20); font-weight: 600; margin: 0 0 var(--ap-s-2); }
+.ap-h3 { font-size: var(--ap-fs-14); font-weight: 600; margin: 0 0 var(--ap-s-3); color: var(--ap-text); }
+.ap-sub { font-size: var(--ap-fs-13); color: var(--ap-text-muted); margin: 0 0 var(--ap-s-5); }
+
+/* ───── Cards ───── */
+.ap-card {
+  background: var(--ap-bg-surface);
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-lg);
+  padding: var(--ap-s-5);
+  margin-bottom: var(--ap-s-4);
+}
+.ap-card-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: var(--ap-s-3);
+  gap: var(--ap-s-3);
+}
+
+/* ───── Metrics ───── */
+.ap-metric-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--ap-s-3);
+  margin-bottom: var(--ap-s-4);
+}
+.ap-metric {
+  background: var(--ap-bg-surface);
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-lg);
+  padding: var(--ap-s-3) var(--ap-s-4);
+}
+.ap-metric-label {
+  font-size: var(--ap-fs-11); color: var(--ap-text-muted);
+  text-transform: uppercase; letter-spacing: 0.04em; font-weight: 500;
+}
+.ap-metric-value {
+  font-size: var(--ap-fs-22); font-weight: 600; margin-top: var(--ap-s-1);
+  color: var(--ap-text);
+}
+.ap-metric-value.warn { color: var(--ap-warn-fg); }
+
+/* ───── Forms ───── */
+.ap-input, .ap-select, .ap-textarea {
+  height: 34px; padding: 0 var(--ap-s-3);
+  font-size: var(--ap-fs-13); font-family: inherit;
+  border: 1px solid var(--ap-border); border-radius: var(--ap-r-md);
+  background: var(--ap-bg-surface); color: var(--ap-text);
+  outline: none;
+  transition: border-color 0.1s, box-shadow 0.1s;
+}
+.ap-textarea { height: auto; padding: var(--ap-s-2) var(--ap-s-3); min-height: 68px; resize: vertical; line-height: 1.5; }
+.ap-input:hover, .ap-select:hover, .ap-textarea:hover { border-color: var(--ap-border-strong); }
+.ap-input:focus, .ap-select:focus, .ap-textarea:focus {
+  border-color: var(--ap-navy);
+  box-shadow: var(--ap-shadow-focus);
+}
+.ap-label {
+  display: block; font-size: var(--ap-fs-12); color: var(--ap-text-muted);
+  margin-bottom: var(--ap-s-1); font-weight: 500;
+}
+.ap-field { margin-bottom: var(--ap-s-3); }
+.ap-field .ap-input,
+.ap-field .ap-select,
+.ap-field .ap-textarea { width: 100%; }
+
+/* ───── Buttons ───── */
+.ap-btn {
+  height: 34px; padding: 0 var(--ap-s-4);
+  font-size: var(--ap-fs-13); font-weight: 500; font-family: inherit;
+  border-radius: var(--ap-r-md);
+  border: 1px solid var(--ap-border);
+  background: var(--ap-bg-surface); color: var(--ap-text);
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: var(--ap-s-2);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.ap-btn:hover { border-color: var(--ap-border-strong); background: var(--ap-bg-hover); }
+.ap-btn:active { transform: translateY(0.5px); }
+.ap-btn:focus-visible { box-shadow: var(--ap-shadow-focus); outline: none; }
+.ap-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.ap-btn-primary {
+  background: var(--ap-navy); border-color: var(--ap-navy);
+  color: var(--ap-text-invert);
+}
+.ap-btn-primary:hover {
+  background: var(--ap-navy-hover); border-color: var(--ap-navy-hover);
+}
+
+.ap-btn-sm { height: 28px; padding: 0 var(--ap-s-3); font-size: var(--ap-fs-12); }
+.ap-btn-ghost { border-color: transparent; background: transparent; }
+.ap-btn-ghost:hover { background: var(--ap-bg-sub); border-color: transparent; }
+
+/* ───── Tables ───── */
+.ap-table { width: 100%; border-collapse: collapse; font-size: var(--ap-fs-13); }
+.ap-table th {
+  text-align: left; font-weight: 500;
+  color: var(--ap-text-muted);
+  font-size: var(--ap-fs-11); text-transform: uppercase; letter-spacing: 0.04em;
+  padding: var(--ap-s-3);
+  border-bottom: 1px solid var(--ap-border);
+  background: var(--ap-bg-surface);
+}
+.ap-table td {
+  padding: var(--ap-s-3);
+  border-bottom: 1px solid var(--ap-border);
+  vertical-align: middle;
+}
+.ap-table tr:hover td { background: var(--ap-bg-hover); }
+.ap-table tr:last-child td { border-bottom: 0; }
+.ap-table tr.needs-review td { background: var(--ap-warn-bg); }
+.ap-table tr.needs-review:hover td { background: var(--ap-warn-bg); filter: brightness(0.97); }
+
+/* ───── Pills / status ───── */
+.ap-pill {
+  display: inline-block; padding: 3px var(--ap-s-2);
+  border-radius: var(--ap-r-sm);
+  font-size: var(--ap-fs-11); font-weight: 500;
+  line-height: 1.4;
+}
+.ap-pill-ok    { background: var(--ap-ok-bg);   color: var(--ap-ok-fg); }
+.ap-pill-warn  { background: var(--ap-warn-bg); color: var(--ap-warn-fg); }
+.ap-pill-info  { background: var(--ap-info-bg); color: var(--ap-info-fg); }
+.ap-pill-err   { background: var(--ap-err-bg);  color: var(--ap-err-fg); }
+.ap-pill-muted { background: var(--ap-bg-sub);  color: var(--ap-text-muted); }
+
+/* ───── Utilities ───── */
+.ap-row { display: flex; gap: var(--ap-s-2); align-items: center; flex-wrap: wrap; }
+.ap-stack { display: flex; flex-direction: column; gap: var(--ap-s-3); }
+.ap-spacer { flex: 1; }
+.ap-muted { color: var(--ap-text-muted); }
+.ap-mono { font-family: var(--ap-font-mono); font-size: 92%; }
+.ap-hidden { display: none !important; }
+.ap-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+/* ───── Message banner ───── */
+.ap-message {
+  padding: var(--ap-s-3) var(--ap-s-4);
+  border-radius: var(--ap-r-md);
+  font-size: var(--ap-fs-13);
+  margin-bottom: var(--ap-s-3);
+  border: 1px solid transparent;
+}
+.ap-message.ok    { background: var(--ap-ok-bg);   color: var(--ap-ok-fg);   border-color: var(--ap-ok-fg); }
+.ap-message.warn  { background: var(--ap-warn-bg); color: var(--ap-warn-fg); border-color: var(--ap-warn-border); }
+.ap-message.err   { background: var(--ap-err-bg);  color: var(--ap-err-fg);  border-color: var(--ap-err-fg); }
+.ap-message.info  { background: var(--ap-info-bg); color: var(--ap-info-fg); border-color: var(--ap-info-fg); }
+.ap-message:empty { display: none; }
+
+/* ───── Login page (full-screen centered card) ───── */
+.ap-login-wrap {
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--ap-bg-page);
+  padding: var(--ap-s-10);
+}
+.ap-login-card {
+  width: 360px; max-width: 100%;
+  background: var(--ap-bg-surface);
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-xl);
+  padding: var(--ap-s-8);
+}
+.ap-login-logo { display: flex; justify-content: center; margin-bottom: var(--ap-s-6); }
+.ap-login-h { font-size: var(--ap-fs-20); font-weight: 600; text-align: center; margin: 0 0 var(--ap-s-1); color: var(--ap-text); }
+.ap-login-s { font-size: var(--ap-fs-13); color: var(--ap-text-muted); text-align: center; margin: 0 0 var(--ap-s-6); }

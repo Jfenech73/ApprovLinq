@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 180" fill="none">
+  <!-- Approvlinq wordmark v3: two-tone split. "Approv" in primary navy,
+       "linq" in accent blue — emphasizes the "link / connection" half of
+       the name and gives the mark natural hierarchy without any icon. -->
+  <defs>
+    <style>
+      .wm {
+        font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+        font-weight: 700;
+        letter-spacing: -0.025em;
+      }
+      .tag {
+        font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+        font-weight: 500;
+        letter-spacing: 0.24em;
+        fill: #1f4e79;
+      }
+    </style>
+  </defs>
+
+  <!-- Two tspan groups so the break between 'Approv' and 'linq' is colour-only -->
+  <text x="300" y="100" text-anchor="middle" class="wm" font-size="88">
+    <tspan fill="#1f4e79">Approv</tspan><tspan fill="#3ea3d9">linq</tspan>
+  </text>
+
+  <!-- Tagline -->
+  <text x="300" y="146" text-anchor="middle" class="tag" font-size="13">INVOICE SCANNING SOLUTION</text>
+</svg>

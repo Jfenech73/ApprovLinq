@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" fill="none">
+  <!-- Approvlinq monogram — "A" with a check-notch. For favicons, app
+       icons, and any square context where the full wordmark won't fit. -->
+  <g stroke="#1f4e79" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <!-- Left stroke of A -->
+    <line x1="60" y1="200" x2="120" y2="50" />
+    <!-- Right stroke of A -->
+    <line x1="120" y1="50" x2="180" y2="200" />
+  </g>
+  <!-- Crossbar of A rendered as a subtle accent checkmark -->
+  <polyline points="85,140 105,160 150,120" stroke="#3ea3d9" stroke-width="12"
+            stroke-linecap="round" stroke-linejoin="round" fill="none" />
+</svg>

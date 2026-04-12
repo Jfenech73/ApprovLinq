@@ -1,0 +1,124 @@
+/* ============================================================================
+   Approvlinq — Design Tokens
+   ----------------------------------------------------------------------------
+   Single source of truth for colours, typography, spacing, radii, shadows.
+   Every page and component must reference these variables instead of hard-
+   coded values. To rebrand or theme-swap later, only this file changes.
+
+   Loaded before any other stylesheet. Safe to load alongside the legacy
+   app.css during the migration — none of these rules cascade to legacy
+   selectors, they only expose variables.
+   ============================================================================ */
+
+:root,
+html[data-theme="light"] {
+  /* Brand */
+  --ap-navy:         #1f4e79;
+  --ap-navy-hover:   #163a5a;
+  --ap-accent:       #3ea3d9;
+
+  /* Surfaces — page background is the LIGHTEST, cards sit ON TOP as white */
+  --ap-bg-page:      #f8fafc;
+  --ap-bg-surface:   #ffffff;
+  --ap-bg-sub:       #f1f5f9;
+  --ap-bg-hover:     #f8fafc;
+
+  /* Text */
+  --ap-text:         #0f172a;
+  --ap-text-muted:   #64748b;
+  --ap-text-dim:     #94a3b8;
+  --ap-text-invert:  #ffffff;
+
+  /* Borders */
+  --ap-border:        #e5e7eb;
+  --ap-border-strong: #cbd5e1;
+  --ap-border-focus:  rgba(31, 78, 121, 0.25);
+
+  /* Semantic state */
+  --ap-ok-bg:    #dcfce7;   --ap-ok-fg:    #166534;
+  --ap-warn-bg:  #fef3c7;   --ap-warn-fg:  #92400e;   --ap-warn-border: #fcd34d;
+  --ap-info-bg:  #e0f2fe;   --ap-info-fg:  #075985;
+  --ap-err-bg:   #fee2e2;   --ap-err-fg:   #991b1b;
+
+  /* Typography */
+  --ap-font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --ap-font-mono: 'SF Mono', Menlo, Consolas, monospace;
+  --ap-fs-11: 11px;   /* caps labels */
+  --ap-fs-12: 12px;   /* small body */
+  --ap-fs-13: 13px;   /* body */
+  --ap-fs-14: 14px;   /* body emphasised */
+  --ap-fs-16: 16px;
+  --ap-fs-20: 20px;   /* section titles */
+  --ap-fs-22: 22px;   /* page titles */
+  --ap-fs-28: 28px;
+
+  /* Spacing scale (4-based) */
+  --ap-s-1: 4px;
+  --ap-s-2: 8px;
+  --ap-s-3: 12px;
+  --ap-s-4: 16px;
+  --ap-s-5: 20px;
+  --ap-s-6: 24px;
+  --ap-s-8: 32px;
+  --ap-s-10: 40px;
+
+  /* Radius */
+  --ap-r-sm: 4px;
+  --ap-r-md: 6px;
+  --ap-r-lg: 8px;
+  --ap-r-xl: 10px;
+
+  /* Elevation — used very sparingly */
+  --ap-shadow-focus: 0 0 0 3px var(--ap-border-focus);
+}
+
+html[data-theme="dark"] {
+  /* Navy is unreadable on near-black; shift to a lighter blue for dark mode */
+  --ap-navy:         #60a5fa;
+  --ap-navy-hover:   #3b82f6;
+  --ap-accent:       #3ea3d9;
+
+  --ap-bg-page:      #020617;
+  --ap-bg-surface:   #0f172a;
+  --ap-bg-sub:       #1e293b;
+  --ap-bg-hover:     #1e293b;
+
+  --ap-text:         #f1f5f9;
+  --ap-text-muted:   #94a3b8;
+  --ap-text-dim:     #64748b;
+  --ap-text-invert:  #0f172a;
+
+  --ap-border:        #1e293b;
+  --ap-border-strong: #334155;
+  --ap-border-focus:  rgba(96, 165, 250, 0.35);
+
+  --ap-ok-bg:    #052e16;   --ap-ok-fg:    #86efac;
+  --ap-warn-bg:  #422006;   --ap-warn-fg:  #fde68a;   --ap-warn-border: #78350f;
+  --ap-info-bg:  #0c2a4a;   --ap-info-fg:  #93c5fd;
+  --ap-err-bg:   #450a0a;   --ap-err-fg:   #fca5a5;
+}
+
+/* Respect OS preference the first time a user visits, before they've
+   explicitly toggled. Once the toggle writes data-theme=... to <html>,
+   the explicit selectors above take precedence over this. */
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]) {
+    --ap-navy:         #60a5fa;
+    --ap-navy-hover:   #3b82f6;
+    --ap-bg-page:      #020617;
+    --ap-bg-surface:   #0f172a;
+    --ap-bg-sub:       #1e293b;
+    --ap-bg-hover:     #1e293b;
+    --ap-text:         #f1f5f9;
+    --ap-text-muted:   #94a3b8;
+    --ap-text-dim:     #64748b;
+    --ap-text-invert:  #0f172a;
+    --ap-border:        #1e293b;
+    --ap-border-strong: #334155;
+    --ap-border-focus:  rgba(96, 165, 250, 0.35);
+    --ap-ok-bg:    #052e16;   --ap-ok-fg:    #86efac;
+    --ap-warn-bg:  #422006;   --ap-warn-fg:  #fde68a;   --ap-warn-border: #78350f;
+    --ap-info-bg:  #0c2a4a;   --ap-info-fg:  #93c5fd;
+    --ap-err-bg:   #450a0a;   --ap-err-fg:   #fca5a5;
+  }
+}
