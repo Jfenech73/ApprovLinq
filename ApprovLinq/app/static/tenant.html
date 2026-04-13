@@ -15,6 +15,15 @@
   <div data-ap-shell='{"active":"tenant","crumb":[["Configure",""],["Tenant admin","cur"]]}'></div>
   <div data-ap-page-body>
     <div class="ap-page">
+      <h1 class="ap-h1">Tenant admin</h1>
+      <p class="ap-sub">Manage tenant details, companies, suppliers and nominal accounts.</p>
+
+      <div class="ap-card" style="padding: var(--ap-s-3) var(--ap-s-5); display:flex; align-items:center; gap: var(--ap-s-3);">
+        <label class="ap-label" for="tenantSelector" style="margin:0">Tenant</label>
+        <select id="tenantSelector" class="ap-select" style="min-width:220px"></select>
+        <span class="muted" style="font-size:12px">Select the tenant you're managing.</span>
+      </div>
+
 <div id="pageMessage" class="message"></div>
 
     <main class="grid">

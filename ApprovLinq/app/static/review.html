@@ -9,23 +9,25 @@
   </script>
   <link rel="stylesheet" href="/static/css/tokens.css" />
   <link rel="stylesheet" href="/static/css/components.css" />
-  
 </head>
 <body class="ap-app">
   <div data-ap-shell='{"active":"","crumb":[["Work",""],["Batches",""],["Review","cur"]]}'></div>
   <div data-ap-page-body>
     <div class="ap-page">
-<div id="pageMessage" class="message"></div>
+      <div id="pageMessage" class="message"></div>
 
       <main class="stack-lg">
         <section class="card">
           <div class="section-head">
-            <h2 id="batchTitle">Loading…</h2>
+            <div style="display:flex;align-items:center;gap:12px">
+              <h2 id="batchTitle" style="margin:0">Loading…</h2>
+              <span class="pill" id="batchStatusPill">—</span>
+            </div>
             <div class="row gap-sm wrap">
-              <button id="approveBtn" class="btn btn-secondary" type="button">Approve</button>
-              <button id="markFileReviewedBtn" class="btn btn-secondary" type="button" hidden>Mark file reviewed</button>
+              <button id="approveBtn" class="btn" type="button">Approve</button>
+              <button id="markFileReviewedBtn" class="btn" type="button" hidden>Mark file reviewed</button>
               <button id="exportBtn"  class="btn btn-primary"   type="button">Export Excel</button>
-              <button id="reopenBtn"  class="btn btn-secondary" type="button">Reopen</button>
+              <button id="reopenBtn"  class="btn" type="button">Reopen</button>
             </div>
           </div>
           <div class="batch-meta">
@@ -36,15 +38,15 @@
           </div>
         </section>
 
-        <div class="review-grid">
+        <div class="review-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
           <section class="card">
             <div class="section-head">
-              <h2>Rows</h2>
+              <h2 style="margin:0">Rows</h2>
               <div class="row gap-sm wrap filter-chips">
-                <button class="btn btn-secondary active" data-filter="all" type="button">All</button>
-                <button class="btn btn-secondary"        data-filter="needs_review" type="button">Needs review</button>
-                <button class="btn btn-secondary"        data-filter="corrected"    type="button">Corrected</button>
-                <button class="btn btn-secondary"        data-filter="low_conf"     type="button">Low confidence</button>
+                <button class="btn btn-sm active" data-filter="all" type="button">All</button>
+                <button class="btn btn-sm"        data-filter="needs_review" type="button">Needs review</button>
+                <button class="btn btn-sm"        data-filter="corrected"    type="button">Corrected</button>
+                <button class="btn btn-sm"        data-filter="low_conf"     type="button">Low confidence</button>
               </div>
             </div>
             <div id="rowList" class="row-list"></div>
@@ -52,11 +54,11 @@
 
           <section class="card">
             <div class="section-head">
-              <h2>Edit selected row</h2>
+              <h2 style="margin:0">Edit selected row</h2>
               <div class="row gap-sm wrap">
-                <button id="prevPageBtn" class="btn btn-secondary" type="button">◀</button>
+                <button id="prevPageBtn" class="btn btn-sm" type="button">◀</button>
                 <span id="pageLabel" class="muted">page 1</span>
-                <button id="nextPageBtn" class="btn btn-secondary" type="button">▶</button>
+                <button id="nextPageBtn" class="btn btn-sm" type="button">▶</button>
                 <label class="row gap-sm" style="align-items:center;font-size:12px">
                   <input type="checkbox" id="remapMode" /> Remap mode
                 </label>
@@ -80,6 +82,7 @@
       </main>
     </div>
   </div>
+
   <script src="/static/js/common.js"></script>
   <script src="/static/js/review.js"></script>
   <script src="/static/js/ap-ui.js"></script>

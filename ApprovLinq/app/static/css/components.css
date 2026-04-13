@@ -445,3 +445,65 @@
 /* Admin & tenant forms often use .form-grid */
 .ap-app .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--ap-s-3); }
 .ap-app .section-divider { border: 0; border-top: 1px solid var(--ap-border); margin: var(--ap-s-5) 0; }
+
+/* ============================================================================
+   Dark-mode overrides for legacy app.css
+   ----------------------------------------------------------------------------
+   Legacy app.css hard-codes light-only colours on th/td/table/body. These
+   rules must come AFTER the compat layer so they win the cascade. They only
+   activate when data-theme="dark" is set.
+   ============================================================================ */
+html[data-theme="dark"] .ap-app table,
+html[data-theme="dark"] .ap-app .table-wrap table {
+  color: var(--ap-text) !important;
+  background: transparent !important;
+}
+html[data-theme="dark"] .ap-app th,
+html[data-theme="dark"] .ap-app .table-wrap th {
+  background: var(--ap-bg-sub) !important;
+  color: var(--ap-text-muted) !important;
+  border-bottom-color: var(--ap-border) !important;
+}
+html[data-theme="dark"] .ap-app td,
+html[data-theme="dark"] .ap-app .table-wrap td {
+  color: var(--ap-text) !important;
+  border-bottom-color: var(--ap-border) !important;
+  background: transparent !important;
+}
+html[data-theme="dark"] .ap-app tr:hover td {
+  background: var(--ap-bg-hover) !important;
+}
+/* Legacy code blocks / ids that render as dark-on-dark in dark mode */
+html[data-theme="dark"] .ap-app code,
+html[data-theme="dark"] .ap-app .mono,
+html[data-theme="dark"] .ap-app .meta {
+  color: var(--ap-text-muted) !important;
+}
+/* Reset hard-coded page/body backgrounds the legacy stylesheet set */
+html[data-theme="dark"] .ap-app,
+html[data-theme="dark"] .ap-app .page-shell,
+html[data-theme="dark"] .ap-app .page {
+  background: var(--ap-bg-page) !important;
+}
+/* Inputs and selects in dark mode (legacy CSS sets white bgs) */
+html[data-theme="dark"] .ap-app input[type="text"],
+html[data-theme="dark"] .ap-app input[type="email"],
+html[data-theme="dark"] .ap-app input[type="password"],
+html[data-theme="dark"] .ap-app input[type="number"],
+html[data-theme="dark"] .ap-app input[type="file"],
+html[data-theme="dark"] .ap-app select,
+html[data-theme="dark"] .ap-app textarea {
+  background: var(--ap-bg-surface) !important;
+  color: var(--ap-text) !important;
+  border-color: var(--ap-border) !important;
+}
+/* Analytics-specific stat cards from legacy css */
+html[data-theme="dark"] .ap-app .stat-card,
+html[data-theme="dark"] .ap-app .chart-card {
+  background: var(--ap-bg-surface) !important;
+  border-color: var(--ap-border) !important;
+  color: var(--ap-text) !important;
+}
+html[data-theme="dark"] .ap-app .stat-label,
+html[data-theme="dark"] .ap-app .stat-card .label { color: var(--ap-text-muted) !important; }
+html[data-theme="dark"] .ap-app .stat-value { color: var(--ap-text) !important; }

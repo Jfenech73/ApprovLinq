@@ -107,9 +107,9 @@
     { id: "scanner",   href: "/static/scanner.html",          label: "Scanner",          icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2M8 12h8"/></svg>' },
     { id: "analytics", href: "/static/analytics.html",        label: "Analytics",        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18M7 14l4-4 4 4 5-5"/></svg>' },
     { section: "Configure" },
-    { id: "templates", href: "/static/export_templates.html", label: "Export templates", icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>' },
     { id: "tenant",    href: "/static/tenant.html",           label: "Tenant admin",     icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V7l8-4 8 4v14M9 9h1M14 9h1M9 13h1M14 13h1M9 17h1M14 17h1"/></svg>' },
-    { id: "admin",     href: "/static/admin.html",            label: "Platform admin",  hideIfNotAdmin: true, icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24"/></svg>' },
+    { id: "templates", href: "/static/export_templates.html", label: "Export templates", adminOnly: true, icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>' },
+    { id: "admin",     href: "/static/admin.html",            label: "Platform admin",   adminOnly: true, icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24"/></svg>' },
   ];
 
   function renderShell() {
@@ -127,8 +127,9 @@
 
     const navHtml = NAV.map(n => {
       if (n.section) return `<div class="ap-nav-section">${n.section}</div>`;
-      const cls = "ap-nav-item" + (n.id === active ? " active" : "") + (n.hideIfNotAdmin ? " hidden" : "");
-      return `<a class="${cls}" id="nav-${n.id}" href="${n.href}">${n.icon}${n.label}</a>`;
+      const cls = "ap-nav-item" + (n.id === active ? " active" : "") + (n.adminOnly ? " hidden" : "");
+      const attr = n.adminOnly ? ' data-admin-only="true"' : '';
+      return `<a class="${cls}"${attr} id="nav-${n.id}" href="${n.href}">${n.icon}${n.label}</a>`;
     }).join("");
 
     const crumbHtml = crumb.map((c, i) => {
@@ -182,14 +183,24 @@
     const avEl = document.getElementById("userAvatar");
     if (!nameEl || typeof window.api !== "function") return;
     try {
+      // /auth/me returns: { user_id, email, full_name, role, tenants:[{tenant_name,...}] }
       const me = await window.api("/auth/me");
-      if (me && me.email) {
-        nameEl.textContent = me.name || me.email;
-        if (tenantEl) tenantEl.textContent = me.tenant_name || me.tenant || "";
-        if (avEl) {
-          const initials = (me.name || me.email).split(/[ @]/).map(s => s[0]).filter(Boolean).slice(0, 2).join("").toUpperCase();
-          avEl.textContent = initials || "·";
-        }
+      if (!me) return;
+      const displayName = me.full_name || me.email || "User";
+      nameEl.textContent = displayName;
+      if (tenantEl) {
+        const defaultTenant = (me.tenants || []).find(t => t.is_default) || (me.tenants || [])[0];
+        tenantEl.textContent = defaultTenant ? defaultTenant.tenant_name
+                                : (me.role === "admin" ? "Platform admin" : "");
+      }
+      if (avEl) {
+        const initials = String(displayName).split(/[\s@._-]+/)
+          .map(s => s[0]).filter(Boolean).slice(0, 2).join("").toUpperCase();
+        avEl.textContent = initials || "·";
+      }
+      // Reveal nav items marked admin-only when the user is a platform admin.
+      if (me.role === "admin") {
+        document.querySelectorAll(".ap-nav-item[data-admin-only]").forEach(el => el.classList.remove("hidden"));
       }
     } catch { /* silent — not authed or endpoint missing */ }
   }
@@ -203,7 +214,19 @@
 
   applySavedThemeEarly();
 
-  function init() { ensureLegacyStylesheet(); renderShell(); renderLogos(); wireThemeToggle(); }
+  function init() {
+    ensureLegacyStylesheet();
+    renderShell();
+    renderLogos();
+    wireThemeToggle();
+    // Opt-in UI sanity check when URL has ?ui-check=1
+    if (/[?&]ui-check=1(&|$)/.test(location.search)) {
+      const s = document.createElement("script");
+      s.src = "/static/js/ui-check.js";
+      s.async = true;
+      document.head.appendChild(s);
+    }
+  }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {

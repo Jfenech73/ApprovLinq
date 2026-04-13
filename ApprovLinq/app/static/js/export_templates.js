@@ -1,5 +1,19 @@
 ensureAuth();
 
+// ─── Admin-only access gate ─────────────────────────────────────────────────
+// Export templates are a platform feature; tenant users should not reach this
+// page. Check role before any DOM wiring so a non-admin is bounced early.
+(async function enforceAdminOnly() {
+  try {
+    const me = await apiFetch("/auth/me");
+    if (me && me.role !== "admin") {
+      window.location.href = "/static/tenant.html";
+    }
+  } catch {
+    window.location.href = "/static/login.html";
+  }
+})();
+
 const logoutBtn          = document.getElementById("logoutBtn");
 const templateForm       = document.getElementById("templateForm");
 const assignmentForm     = document.getElementById("assignmentForm");
