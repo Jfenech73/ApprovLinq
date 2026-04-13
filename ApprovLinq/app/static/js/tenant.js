@@ -92,7 +92,7 @@ function uploadFormDataWithProgress(path, formData, onProgress) {
   });
 }
 
-document.getElementById("logoutBtn").addEventListener("click", logoutAndGo);
+// logoutBtn is injected by ap-ui.js shell — wired there via logoutAndGo
 document.getElementById("tenantSelector").addEventListener("change", async (event) => {
   setTenantId(event.target.value);
   selectedCompanyId = "";

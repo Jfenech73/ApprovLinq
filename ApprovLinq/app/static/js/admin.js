@@ -1,13 +1,12 @@
 ensureAuth();
 
-const logoutBtn = document.getElementById("logoutBtn");
 const tenantForm = document.getElementById("tenantForm");
 const userForm = document.getElementById("userForm");
 const refreshCapacityBtn = document.getElementById("refreshCapacityBtn");
 const userRoleSelect = document.getElementById("userRole");
 const userTenantIdSelect = document.getElementById("userTenantId");
 
-logoutBtn.addEventListener("click", logoutAndGo);
+// logoutBtn is injected by ap-ui.js shell — wired there via logoutAndGo
 refreshCapacityBtn.addEventListener("click", loadCapacity);
 userRoleSelect.addEventListener("change", syncUserTenantSelectState);
 

@@ -172,19 +172,30 @@
     wireThemeToggle();
     // Populate user block from /auth/me if available
     populateUserBlock();
-    // Wire logout if common.js didn't
+    // Wire logout — use logoutAndGo from common.js
     const lo = document.getElementById("logoutBtn");
-    if (lo && typeof window.logout === "function") lo.onclick = window.logout;
+    if (lo) {
+      const logoutFn = typeof logoutAndGo === "function" ? logoutAndGo
+                     : typeof window.logoutAndGo === "function" ? window.logoutAndGo
+                     : null;
+      if (logoutFn) lo.addEventListener("click", logoutFn);
+    }
   }
 
   async function populateUserBlock() {
     const nameEl = document.getElementById("userName");
     const tenantEl = document.getElementById("userTenant");
     const avEl = document.getElementById("userAvatar");
-    if (!nameEl || typeof window.api !== "function") return;
+    if (!nameEl) return;
+    // apiFetch is defined globally by common.js (always loaded before ap-ui.js)
+    const fetcher = typeof apiFetch === "function" ? apiFetch
+                  : typeof window.apiFetch === "function" ? window.apiFetch
+                  : typeof window.api === "function" ? window.api
+                  : null;
+    if (!fetcher) return;
     try {
       // /auth/me returns: { user_id, email, full_name, role, tenants:[{tenant_name,...}] }
-      const me = await window.api("/auth/me");
+      const me = await fetcher("/auth/me");
       if (!me) return;
       const displayName = me.full_name || me.email || "User";
       nameEl.textContent = displayName;

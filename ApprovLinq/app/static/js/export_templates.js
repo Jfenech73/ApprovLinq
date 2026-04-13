@@ -14,7 +14,7 @@ ensureAuth();
   }
 })();
 
-const logoutBtn          = document.getElementById("logoutBtn");
+// logoutBtn is injected by ap-ui.js shell — wired there via logoutAndGo
 const templateForm       = document.getElementById("templateForm");
 const assignmentForm     = document.getElementById("assignmentForm");
 const addColumnBtn       = document.getElementById("addColumnBtn");
@@ -33,8 +33,6 @@ let _allTemplates        = [];
 let _allTenants          = [];
 let _allAssignments      = [];
 let _currentCompanies    = [];
-
-logoutBtn.addEventListener("click", logoutAndGo);
 
 // ── Init ────────────────────────────────────────────────────────────────────
 

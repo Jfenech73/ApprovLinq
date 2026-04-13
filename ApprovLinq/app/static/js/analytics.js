@@ -170,6 +170,6 @@ document.getElementById("tenantSelector").addEventListener("change", async () =>
   if (companies.length) loadAnalytics(companies[0].id);
 });
 
-document.getElementById("logoutBtn").addEventListener("click", logoutAndGo);
+// logoutBtn is injected by ap-ui.js shell — wired there via logoutAndGo
 
 initAnalyticsPage();

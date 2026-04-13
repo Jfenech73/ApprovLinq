@@ -45,6 +45,8 @@ function stopProgressPolling() {
 async function api(path, options = {}) {
   return apiFetch(path, options);
 }
+// Expose for ap-ui.js populateUserBlock (scanner page loads app.js before ap-ui.js)
+window.api = api;
 
 function setWorkspaceLink(role) {
   const platformAdminLink = $("platformAdminLink");
