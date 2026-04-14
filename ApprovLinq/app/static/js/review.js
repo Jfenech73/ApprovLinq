@@ -85,18 +85,44 @@ function render() {
   const list = $("rowList");
   list.innerHTML = "";
   state.rows.filter(rowMatches).forEach(r => {
+    // Determine urgency: review_required + not yet reviewed/corrected = urgent
+    const isUrgent = r.review_required && !r.row_reviewed && !r.is_corrected;
+    const isHighPriority = r.review_priority === "high" || r.review_priority === "urgent";
+
     const d = document.createElement("div");
     d.className = "review-row" +
       (r.review_required ? " flagged" : "") +
-      (r.is_corrected ? " corrected" : "") +
+      (r.is_corrected    ? " corrected" : "") +
+      (r.row_reviewed    ? " reviewed" : "") +
+      ((isUrgent || isHighPriority) ? " urgent" : "") +
       (r.id === state.selected ? " selected" : "");
+
+    // Badge line
+    const badges = [];
+    if (isUrgent || isHighPriority) badges.push(`<span class="row-badge row-badge-urgent">Needs review</span>`);
+    else if (r.review_required && r.row_reviewed) badges.push(`<span class="row-badge row-badge-reviewed">Reviewed</span>`);
+    else if (r.is_corrected) badges.push(`<span class="row-badge row-badge-corrected">Corrected</span>`);
+
+    const conf = r.confidence_score != null
+      ? `<span class="row-conf${r.confidence_score < 0.55 ? " row-conf-low" : r.confidence_score < 0.75 ? " row-conf-mid" : ""}">${(r.confidence_score * 100).toFixed(0)}%</span>`
+      : "";
+
     d.innerHTML =
-      `<div><strong>${esc(r.current.supplier_name) || "<no supplier>"}</strong> · ${esc(r.current.total_amount) || ""}</div>
-       <div class="meta">${esc(r.source_filename || "file")} · page ${r.page_no} · row #${r.id}${r.confidence_score != null ? " · conf " + r.confidence_score.toFixed(2) : ""}</div>`;
+      `<div class="row-primary">
+         <span class="row-supplier">${esc(r.current.supplier_name) || "<em>no supplier</em>"}</span>
+         <span class="row-amount">${r.current.total_amount != null ? esc(String(r.current.total_amount)) : ""}</span>
+       </div>
+       <div class="row-meta">
+         <span>${esc(r.source_filename || "file")}</span>
+         <span>p.${r.page_no}</span>
+         <span>#${r.id}</span>
+         ${conf}
+       </div>
+       ${badges.length ? `<div class="row-badges">${badges.join("")}</div>` : ""}`;
+
     d.onclick = async () => {
       state.selected = r.id; state.fileId = r.source_file_id; state.page = r.page_no || 1;
       render(); loadAudit(r.id); await ensurePageCount();
-      // Only load the preview image if the user is actively in remap mode.
       if ($("remapMode").checked) refreshPreview();
     };
     list.appendChild(d);
@@ -207,27 +233,59 @@ function updatePageControls() {
 }
 
 let _previewBlobUrl = null;
+function _showPreviewUnavailable(message) {
+  const img = $("previewImg");
+  const ph  = $("previewUnavailable");
+  img.src = "";
+  img.hidden = true;
+  if (ph) {
+    const msgEl = $("previewUnavailableMsg");
+    if (msgEl && message) msgEl.textContent = message;
+    ph.hidden = false;
+  }
+}
+function _showPreviewImage(blobUrl) {
+  const img = $("previewImg");
+  const ph  = $("previewUnavailable");
+  if (ph) ph.hidden = true;
+  img.hidden = false;
+  img.src = blobUrl;
+}
 async function refreshPreview() {
   const img = $("previewImg");
-  if (!state.fileId) { img.src = ""; $("pageLabel").textContent = "page — / —"; return; }
+  if (!state.fileId) {
+    img.src = ""; img.hidden = true;
+    const ph = $("previewUnavailable"); if (ph) ph.hidden = true;
+    $("pageLabel").textContent = "page — / —";
+    return;
+  }
+  // Reset to loading state: hide placeholder, show (empty) img
+  const ph = $("previewUnavailable"); if (ph) ph.hidden = true;
+  img.hidden = false;
   updatePageControls();
   try {
-    // Fetch with auth headers so the Bearer token travels normally.
     const r = await fetch(`/review/files/${state.fileId}/preview?page=${state.page}`, { headers: hdrs() });
     if (!r.ok) {
       let detail = `${r.status} ${r.statusText}`;
       try { const j = await r.json(); if (j && j.detail) detail = j.detail; } catch {}
-      msg(`Preview failed: ${detail}`, "error");
-      img.src = "";
+      // Surface friendly message both in banner and in the preview panel
+      const friendly = detail.includes("missing from disk") || detail.includes("not found") || detail.includes("404")
+        ? "Source PDF is no longer available on disk."
+        : detail.includes("out of range")
+        ? "This page is out of range for the source file."
+        : `Preview unavailable: ${detail}`;
+      msg(friendly, "error");
+      _showPreviewUnavailable(friendly);
       return;
     }
     const blob = await r.blob();
     if (_previewBlobUrl) { URL.revokeObjectURL(_previewBlobUrl); }
     _previewBlobUrl = URL.createObjectURL(blob);
-    img.src = _previewBlobUrl;
+    _showPreviewImage(_previewBlobUrl);
   } catch (e) {
-    msg(`Preview failed: ${e}`, "error");
-    img.src = "";
+    const friendly = "Preview could not be loaded.";
+    msg(friendly, "error");
+    _showPreviewUnavailable(friendly);
   }
 }
 
@@ -331,7 +389,8 @@ $("remapMode").addEventListener("change", async (e) => {
   remapHint.hidden = !on;
   if (!on) {
     remapSel.hidden = true; dragStart = null;
-    previewImg.src = "";  // free memory; preview is meant to show only in remap mode
+    previewImg.src = ""; previewImg.hidden = true;  // free memory
+    const ph = $("previewUnavailable"); if (ph) ph.hidden = true;
     return;
   }
   // Ensure a row/file is selected so we know which PDF to preview.

@@ -657,12 +657,35 @@ previewBtn.addEventListener("click", async () => {
   try {
     const result = await apiFetch(`/admin/export-templates/${_editingTemplateId}/preview`, { method: "POST" });
     document.getElementById("previewSheetName").textContent = result.sheet_name;
-    const hdr = document.getElementById("previewHeaders");
-    hdr.innerHTML = result.columns.map((c) => `<span>${escapeHtml(c)}</span>`).join("");
-    const row = document.getElementById("previewRow");
-    const sampleRow = result.sample_rows[0] || {};
-    row.innerHTML = result.columns.map((c) => `<span>${escapeHtml(sampleRow[c] || "")}</span>`).join("");
+
+    // ── thead: one <th> per column ───────────────────────────────────────
+    const thead = document.getElementById("previewThead");
+    const hdrRow = document.createElement("tr");
+    (result.columns || []).forEach((c) => {
+      const th = document.createElement("th");
+      th.textContent = c;
+      hdrRow.appendChild(th);
+    });
+    thead.innerHTML = "";
+    thead.appendChild(hdrRow);
+
+    // ── tbody: one <tr> per sample row (backend currently returns 1) ─────
+    const tbody = document.getElementById("previewTbody");
+    tbody.innerHTML = "";
+    const sampleRows = result.sample_rows && result.sample_rows.length ? result.sample_rows : [{}];
+    sampleRows.forEach((sampleRow) => {
+      const tr = document.createElement("tr");
+      (result.columns || []).forEach((c) => {
+        const td = document.createElement("td");
+        td.textContent = sampleRow[c] != null ? sampleRow[c] : "";
+        if (!td.textContent) td.classList.add("preview-cell-empty");
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+
     document.getElementById("previewPanel").style.display = "block";
+    document.getElementById("previewPanel").scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (err) {
     setMessage("columnEditorMessage", err.message);
   }

@@ -510,3 +510,210 @@ html[data-theme="dark"] .ap-app .chart-card {
 html[data-theme="dark"] .ap-app .stat-label,
 html[data-theme="dark"] .ap-app .stat-card .label { color: var(--ap-text-muted) !important; }
 html[data-theme="dark"] .ap-app .stat-value { color: var(--ap-text) !important; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   REVIEW PAGE — row list cards
+   ═══════════════════════════════════════════════════════════════════════════ */
+.ap-app .row-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow-y: auto;
+  max-height: 60vh;
+}
+
+/* Base row card */
+.ap-app .review-row {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ap-border);
+  cursor: pointer;
+  transition: background 0.1s;
+  position: relative;
+  border-left: 3px solid transparent;
+}
+.ap-app .review-row:first-child { border-top: 1px solid var(--ap-border); }
+.ap-app .review-row:hover { background: var(--ap-bg-hover); }
+
+/* Selected */
+.ap-app .review-row.selected {
+  background: var(--ap-primary-light, #eff6ff);
+  border-left-color: var(--ap-navy, #1e3a5f);
+}
+.ap-app .review-row.selected:hover { background: var(--ap-primary-light, #eff6ff); }
+
+/* Corrected — green left accent */
+.ap-app .review-row.corrected {
+  border-left-color: #16a34a;
+}
+.ap-app .review-row.corrected .row-supplier { color: #15803d; }
+
+/* Urgent / needs immediate review — amber left accent + tint */
+.ap-app .review-row.urgent {
+  background: #fffbeb;
+  border-left-color: #d97706;
+}
+.ap-app .review-row.urgent:hover { background: #fef3c7; }
+.ap-app .review-row.urgent.selected {
+  background: #fef3c7;
+  border-left-color: #b45309;
+}
+
+/* Row content layout */
+.ap-app .row-primary {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+.ap-app .row-supplier {
+  font-weight: 600;
+  font-size: var(--ap-fs-13);
+  color: var(--ap-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 70%;
+}
+.ap-app .row-amount {
+  font-size: var(--ap-fs-12);
+  color: var(--ap-text-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.ap-app .row-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: var(--ap-fs-11);
+  color: var(--ap-text-muted);
+}
+.ap-app .row-meta span { white-space: nowrap; }
+
+/* Confidence colouring */
+.ap-app .row-conf {
+  font-variant-numeric: tabular-nums;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: var(--ap-fs-11);
+  background: #dcfce7; color: #166534;
+}
+.ap-app .row-conf.row-conf-mid { background: #fef9c3; color: #854d0e; }
+.ap-app .row-conf.row-conf-low { background: #fee2e2; color: #991b1b; }
+
+/* Badges */
+.ap-app .row-badges { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
+.ap-app .row-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.ap-app .row-badge-urgent   { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+.ap-app .row-badge-reviewed { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+.ap-app .row-badge-corrected{ background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   REVIEW PAGE — preview unavailable placeholder
+   ═══════════════════════════════════════════════════════════════════════════ */
+.ap-app .preview-unavailable {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 180px;
+  margin-top: 12px;
+  padding: 28px 20px;
+  background: var(--ap-bg-sub);
+  border: 1px dashed var(--ap-border-strong);
+  border-radius: 8px;
+  color: var(--ap-text-muted);
+  text-align: center;
+}
+.ap-app .preview-unavailable svg { opacity: 0.4; }
+.ap-app .preview-unavailable p {
+  margin: 0;
+  font-size: var(--ap-fs-13);
+  font-weight: 500;
+  color: var(--ap-text);
+}
+.ap-app .preview-unavailable-hint {
+  font-size: var(--ap-fs-12);
+  color: var(--ap-text-muted);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   EXPORT TEMPLATES — preview table
+   ═══════════════════════════════════════════════════════════════════════════ */
+.ap-app .preview-sheet-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: var(--ap-fs-13);
+  color: var(--ap-text-muted);
+}
+.ap-app .preview-sheet-header strong {
+  color: var(--ap-text);
+  font-weight: 600;
+}
+.ap-app .preview-sheet-badge {
+  margin-left: auto;
+  font-size: var(--ap-fs-11);
+  font-weight: 500;
+  background: #dbeafe;
+  color: #1e40af;
+  padding: 2px 8px;
+  border-radius: 10px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.ap-app .preview-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-md);
+}
+.ap-app .preview-table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: max-content;
+  font-size: var(--ap-fs-12);
+  font-family: var(--ap-font-mono, monospace);
+}
+.ap-app .preview-table thead tr {
+  background: var(--ap-bg-sub);
+}
+.ap-app .preview-table th {
+  padding: 8px 12px;
+  text-align: left;
+  font-size: var(--ap-fs-11);
+  font-weight: 600;
+  font-family: var(--ap-font-sans, inherit);
+  color: var(--ap-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--ap-border);
+  white-space: nowrap;
+}
+.ap-app .preview-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ap-border);
+  color: var(--ap-text);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ap-app .preview-table tbody tr:last-child td { border-bottom: 0; }
+.ap-app .preview-table tbody tr:hover td { background: var(--ap-bg-hover); }
+.ap-app .preview-table td.preview-cell-empty { color: var(--ap-text-muted); font-style: italic; }
+.ap-app .preview-table td.preview-cell-empty::before { content: "—"; }
+
+/* Dark mode adjustments */
+html[data-theme="dark"] .ap-app .review-row.urgent { background: rgba(217,119,6,0.08); }
+html[data-theme="dark"] .ap-app .review-row.urgent:hover { background: rgba(217,119,6,0.14); }
+html[data-theme="dark"] .ap-app .preview-unavailable { background: var(--ap-bg-sub); }
