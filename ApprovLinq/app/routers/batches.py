@@ -101,6 +101,48 @@ def _parse_money_candidates(text: str) -> list[float]:
     return vals
 
 
+def _parse_first_money(value: object) -> float | None:
+    vals = _parse_money_candidates(str(value or ""))
+    return vals[0] if vals else None
+
+
+def _is_summary_context(line: str) -> bool:
+    low = (line or '').lower()
+    return bool(re.search(
+        r"\b(total|subtotal|gross|net|vat|tax|summary|amount due|total due|invoice summary|tax summary|deposit summary|total eur|total incl|total net|total gross)\b",
+        low,
+    ))
+
+
+def _is_body_or_item_context(line: str) -> bool:
+    low = (line or '').lower()
+    return bool(re.search(
+        r"\b(qty|quantity|unit|uom|barcode|item|description|pcs|price|w/sale|retail|consumer|code|stock|salesperson|order no|delivery note)\b",
+        low,
+    ))
+
+
+def _collect_summary_region_lines(payload: dict) -> list[str]:
+    lines: list[str] = []
+    totals_raw = str(payload.get('totals_raw') or '')
+    if totals_raw:
+        lines.extend([ln.strip() for ln in totals_raw.splitlines() if ln.strip()])
+    page_text = str(payload.get('page_text_raw') or '')
+    if page_text:
+        page_lines = [ln.strip() for ln in page_text.splitlines() if ln.strip()]
+        if page_lines:
+            start_idx = max(0, int(len(page_lines) * 0.6))
+            lines.extend(page_lines[start_idx:])
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for ln in lines:
+        key = re.sub(r"\s+", " ", ln)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(ln)
+    return deduped
+
+
 def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     reasons = str(payload.get('review_reasons') or '')
     m = re.search(r'deposit_component_detected:(\d+(?:\.\d{2})?)', reasons)
@@ -109,43 +151,67 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
             return round(float(m.group(1)), 2)
         except Exception:
             pass
-    summary_sources = []
-    totals_raw = str(payload.get('totals_raw') or '')
-    if totals_raw:
-        summary_sources.append(totals_raw)
-    page_text = str(payload.get('page_text_raw') or '')
-    if page_text:
-        lines = [ln.strip() for ln in page_text.splitlines() if ln.strip()]
-        if lines:
-            summary_sources.append('\n'.join(lines[-18:]))
-    candidate_lines = []
-    for block in summary_sources:
-        lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
-        for idx, line in enumerate(lines):
-            low = line.lower()
-            if not re.search(r'\b(bcrs|deposit|surcharge)\b', low):
-                continue
-            candidate_lines.append(line)
-            for off in (1, 2):
-                if idx + off < len(lines):
-                    candidate_lines.append(lines[idx + off])
-    ranked = []
-    for line in candidate_lines:
+
+    total_amount = _parse_first_money(payload.get('total_amount'))
+    net_amount = _parse_first_money(payload.get('net_amount'))
+    vat_amount = _parse_first_money(payload.get('vat_amount'))
+
+    lines = _collect_summary_region_lines(payload)
+    if not lines:
+        return None
+
+    label_re = re.compile(r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit|deposit|surcharge)\b", re.I)
+    ranked: list[tuple[int, float]] = []
+
+    for idx, line in enumerate(lines):
         low = line.lower()
-        monies = _parse_money_candidates(line)
-        for val in monies:
-            score = 0
-            if 'bcrs' in low or 'deposit' in low or 'surcharge' in low:
-                score += 5
-            if 'total' in low or 'summary' in low or 'tax' in low:
-                score += 2
-            if val <= 25:
-                score += 1
-            ranked.append((score, val))
-    if ranked:
-        ranked.sort(key=lambda x: (x[0], x[1]), reverse=True)
-        return ranked[0][1]
-    return None
+        if not label_re.search(low):
+            continue
+
+        # Plain 'deposit' only counts when it is clearly in a summary/totals context.
+        if 'deposit' in low and 'bcrs' not in low and 'refundable' not in low and 'surcharge' not in low:
+            neighborhood = ' '.join(lines[max(0, idx - 1): min(len(lines), idx + 2)]).lower()
+            if not (_is_summary_context(line) or 'bcrs' in neighborhood or 'summary' in neighborhood or 'total' in neighborhood):
+                continue
+
+        for nidx in range(max(0, idx - 1), min(len(lines), idx + 2)):
+            cand_line = lines[nidx]
+            cand_low = cand_line.lower()
+            if _is_body_or_item_context(cand_line) and not _is_summary_context(cand_line) and nidx != idx:
+                continue
+            for val in _parse_money_candidates(cand_line):
+                score = 0
+                if nidx == idx:
+                    score += 10
+                if 'bcrs' in low:
+                    score += 10
+                if 'refundable' in low:
+                    score += 4
+                if 'deposit' in low:
+                    score += 6
+                if 'surcharge' in low:
+                    score += 5
+                if _is_summary_context(cand_line) or _is_summary_context(line):
+                    score += 4
+                if nidx != idx:
+                    score += 1
+                if _is_body_or_item_context(cand_line) and not _is_summary_context(cand_line) and nidx == idx:
+                    score -= 4
+                if val > 0:
+                    score += 1
+                if total_amount is not None and net_amount is not None and vat_amount is not None:
+                    if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
+                        score += 12
+                    elif total_amount > 0 and 0 < val < total_amount:
+                        score += 1
+                ranked.append((score, round(val, 2)))
+
+    if not ranked:
+        return None
+
+    ranked.sort(key=lambda x: (x[0], -abs(x[1])), reverse=True)
+    best_score, best_val = ranked[0]
+    return best_val if best_score >= 12 else None
 
 
 def _build_bcrs_row(row: InvoiceRow, amount: float) -> InvoiceRow:
