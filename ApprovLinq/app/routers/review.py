@@ -1,6 +1,8 @@
 """Review, correction, audit, remap, rules, reopen, preview routes."""
 from __future__ import annotations
 import io
+import re
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -480,19 +482,155 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
     return {"id": hint.id, "read_text": read_text}
 
 
-# ── Admin: rules ──────────────────────────────────────────────────────────────
+# ── Rules management (admin + tenant-scoped user access) ──────────────────────
+
+def _rule_to_dict(r: CorrectionRule) -> dict:
+    return {
+        "id": r.id,
+        "tenant_id": str(r.tenant_id),
+        "company_id": str(r.company_id) if r.company_id else None,
+        "rule_type": r.rule_type,
+        "field_name": r.field_name,
+        "source_pattern": r.source_pattern,
+        "target_value": r.target_value,
+        "active": r.active,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "disabled_at": r.disabled_at.isoformat() if r.disabled_at else None,
+        "origin_batch_id": str(r.origin_batch_id) if r.origin_batch_id else None,
+    }
+
+
+def _get_rule_for_user(rule_id: int, db: Session, user: M.User) -> CorrectionRule:
+    r = db.get(CorrectionRule, rule_id)
+    if not r:
+        raise HTTPException(404, "Rule not found")
+    if getattr(user, "role", None) == "admin":
+        return r
+    from app.db.models import UserTenant as _UT
+    link = db.execute(
+        select(_UT).where(_UT.user_id == user.id, _UT.tenant_id == r.tenant_id).limit(1)
+    ).scalar_one_or_none()
+    if not link:
+        raise HTTPException(403, "Not authorised to manage this rule")
+    return r
+
+
+class RuleUpdatePayload(BaseModel):
+    source_pattern: str | None = None
+    target_value: str | None = None
+    active: bool | None = None
+
+
+@router.get("/rules")
+def list_rules_tenant(
+    company_id: str | None = Query(default=None),
+    active_only: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    """List correction rules for the calling user's tenants."""
+    q = select(CorrectionRule)
+    if getattr(user, "role", None) != "admin":
+        from app.db.models import UserTenant as _UT
+        tenant_ids = [
+            row[0] for row in db.execute(select(_UT.tenant_id).where(_UT.user_id == user.id)).all()
+        ]
+        if not tenant_ids:
+            return []
+        q = q.where(CorrectionRule.tenant_id.in_(tenant_ids))
+    if company_id:
+        from uuid import UUID as _UUID
+        try:
+            cid = _UUID(company_id)
+            q = q.where(
+                (CorrectionRule.company_id == cid) | (CorrectionRule.company_id.is_(None))
+            )
+        except ValueError:
+            pass
+    if active_only:
+        q = q.where(CorrectionRule.active.is_(True))
+    rules = db.execute(q.order_by(desc(CorrectionRule.created_at))).scalars().all()
+    return [_rule_to_dict(r) for r in rules]
+
+
 @router.get("/admin/rules")
 def list_rules(db: Session = Depends(get_db), user=Depends(current_user)):
     _require_admin(user)
-    rules = db.execute(select(CorrectionRule).order_by(desc(CorrectionRule.created_at))).scalars().all()
-    return [{
-        "id": r.id, "tenant_id": str(r.tenant_id),
-        "company_id": str(r.company_id) if r.company_id else None,
-        "rule_type": r.rule_type, "field_name": r.field_name,
-        "source_pattern": r.source_pattern, "target_value": r.target_value,
-        "active": r.active, "created_at": r.created_at.isoformat(),
-        "origin_batch_id": str(r.origin_batch_id) if r.origin_batch_id else None,
-    } for r in rules]
+    rules = db.execute(
+        select(CorrectionRule).order_by(desc(CorrectionRule.created_at))
+    ).scalars().all()
+    return [_rule_to_dict(r) for r in rules]
+
+
+@router.patch("/rules/{rule_id}")
+def update_rule(
+    rule_id: int,
+    payload: RuleUpdatePayload,
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    r = _get_rule_for_user(rule_id, db, user)
+    import re as _re
+    new_src = _re.sub(r"\s+", " ", (payload.source_pattern or r.source_pattern).strip().lower())
+    new_tgt = (payload.target_value or r.target_value or "").strip()
+    if not new_src:
+        raise HTTPException(422, "source_pattern cannot be blank")
+    if not new_tgt:
+        raise HTTPException(422, "target_value cannot be blank")
+    if new_src == new_tgt.lower():
+        raise HTTPException(422, "source_pattern and target_value are identical — rule would have no effect")
+    existing = db.execute(
+        select(CorrectionRule).where(
+            CorrectionRule.tenant_id == r.tenant_id,
+            CorrectionRule.rule_type == r.rule_type,
+            CorrectionRule.field_name == r.field_name,
+            CorrectionRule.source_pattern == new_src,
+            CorrectionRule.target_value == new_tgt,
+            CorrectionRule.id != rule_id,
+        ).limit(1)
+    ).scalar_one_or_none()
+    if existing:
+        raise HTTPException(409, f"An equivalent rule already exists (id={existing.id})")
+    r.source_pattern = new_src
+    r.target_value = new_tgt
+    if payload.active is not None:
+        r.active = payload.active
+        if not payload.active:
+            r.disabled_by = user.id
+            r.disabled_at = datetime.utcnow()
+        else:
+            r.disabled_by = None
+            r.disabled_at = None
+    db.commit()
+    return _rule_to_dict(r)
+
+
+@router.post("/rules/{rule_id}/enable")
+def enable_rule(rule_id: int, db: Session = Depends(get_db), user=Depends(current_user)):
+    r = _get_rule_for_user(rule_id, db, user)
+    r.active = True
+    r.disabled_by = None
+    r.disabled_at = None
+    db.commit()
+    return _rule_to_dict(r)
+
+
+@router.post("/rules/{rule_id}/disable")
+def disable_rule_user(rule_id: int, db: Session = Depends(get_db), user=Depends(current_user)):
+    r = _get_rule_for_user(rule_id, db, user)
+    r.active = False
+    r.disabled_by = user.id
+    r.disabled_at = datetime.utcnow()
+    db.commit()
+    return _rule_to_dict(r)
+
+
+@router.delete("/rules/{rule_id}")
+def delete_rule_user(rule_id: int, db: Session = Depends(get_db), user=Depends(current_user)):
+    r = _get_rule_for_user(rule_id, db, user)
+    db.delete(r)
+    db.commit()
+    return {"ok": True, "deleted_id": rule_id}
 
 
 @router.post("/admin/rules/{rule_id}/disable")

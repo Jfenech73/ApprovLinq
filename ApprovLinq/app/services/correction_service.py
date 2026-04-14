@@ -150,19 +150,42 @@ def apply_field_changes(
         if field in save_as_rule_fields and field in ("supplier_name", "nominal_account_code") and new_val:
             src = (str(row.supplier_name or "") if field == "supplier_name"
                    else str(row.nominal_account_code or "")).strip().lower()
-            if src and src != str(new_val).strip().lower():
-                db.add(CorrectionRule(
-                    tenant_id=batch.tenant_id,
-                    company_id=batch.company_id,
-                    rule_type="supplier_alias" if field == "supplier_name" else "nominal_remap",
-                    field_name=field,
-                    source_pattern=src,
-                    target_value=str(new_val),
-                    created_by=user.id,
-                    origin_batch_id=batch.id,
-                    origin_row_id=row.id,
-                ))
-                rule_created = True
+            tgt = str(new_val).strip()
+            if src and src != tgt.lower():
+                rule_type = "supplier_alias" if field == "supplier_name" else "nominal_remap"
+                # Dedup: check for an existing active rule with the same logical identity
+                existing = db.execute(
+                    select(CorrectionRule).where(
+                        CorrectionRule.tenant_id == batch.tenant_id,
+                        CorrectionRule.rule_type == rule_type,
+                        CorrectionRule.field_name == field,
+                        CorrectionRule.source_pattern == src,
+                        CorrectionRule.target_value == tgt,
+                    ).limit(1)
+                ).scalar_one_or_none()
+                if existing:
+                    # Re-activate if it was disabled; update provenance metadata
+                    if not existing.active:
+                        existing.active = True
+                        existing.disabled_by = None
+                        existing.disabled_at = None
+                    # Always refresh batch provenance so we know where it was last seen
+                    existing.origin_batch_id = batch.id
+                    existing.origin_row_id = row.id
+                    rule_created = True
+                else:
+                    db.add(CorrectionRule(
+                        tenant_id=batch.tenant_id,
+                        company_id=batch.company_id,
+                        rule_type=rule_type,
+                        field_name=field,
+                        source_pattern=src,
+                        target_value=tgt,
+                        created_by=user.id,
+                        origin_batch_id=batch.id,
+                        origin_row_id=row.id,
+                    ))
+                    rule_created = True
 
         a = InvoiceRowFieldAudit(
             batch_id=batch.id, row_id=row.id, field_name=field,
