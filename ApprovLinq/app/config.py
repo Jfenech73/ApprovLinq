@@ -12,10 +12,9 @@ class Settings(BaseSettings):
 
     upload_dir: str = "./data/uploads"
     export_dir: str = "./data/exports"
-    file_retention_days: int = 5   # uploaded PDFs and exported XLSXs older than this are removed
 
     # OCR
-    ocr_provider: str = "ocr_space"   # ocr_space | azure_di | none
+    ocr_provider: str = "none"   # none | ocr_space | paddleocr
     enable_paddle_ocr: bool = False
 
     # OCR.space
@@ -46,13 +45,13 @@ class Settings(BaseSettings):
 
     @property
     def upload_path(self) -> Path:
-        path = Path(self.upload_dir).resolve()
+        path = Path(self.upload_dir)
         path.mkdir(parents=True, exist_ok=True)
         return path
 
     @property
     def export_path(self) -> Path:
-        path = Path(self.export_dir).resolve()
+        path = Path(self.export_dir)
         path.mkdir(parents=True, exist_ok=True)
         return path
 

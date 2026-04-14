@@ -332,7 +332,6 @@
   border-radius: var(--ap-r-lg);
   padding: var(--ap-s-5);
   margin-bottom: var(--ap-s-4);
-  box-shadow: none;  /* suppress the heavy legacy shadow from global .card */
 }
 .ap-app .card.full-width { grid-column: 1 / -1; }
 .ap-app .card h2 { font-size: var(--ap-fs-14); font-weight: 600; margin: 0 0 var(--ap-s-3); color: var(--ap-text); }
@@ -341,19 +340,12 @@
 .ap-app main.grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ap-s-4); }
 @media (max-width: 900px) { .ap-app main.grid { grid-template-columns: 1fr; } }
 
-.ap-app .table-wrap {
-  overflow-x: auto;
-  margin-top: var(--ap-s-3);
-  border: 1px solid var(--ap-border);
-  border-radius: var(--ap-r-lg);
-  background: var(--ap-bg-surface);
-}
+.ap-app .table-wrap { overflow-x: auto; margin-top: var(--ap-s-3); }
 .ap-app .table-wrap table { width: 100%; border-collapse: collapse; font-size: var(--ap-fs-13); }
 .ap-app .table-wrap th {
   text-align: left; font-weight: 500; color: var(--ap-text-muted);
   font-size: var(--ap-fs-11); text-transform: uppercase; letter-spacing: 0.04em;
   padding: var(--ap-s-3); border-bottom: 1px solid var(--ap-border);
-  background: var(--ap-bg-sub);
 }
 .ap-app .table-wrap td { padding: var(--ap-s-3); border-bottom: 1px solid var(--ap-border); vertical-align: middle; }
 .ap-app .table-wrap tr:hover td { background: var(--ap-bg-hover); }
@@ -395,37 +387,12 @@
   cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center; gap: var(--ap-s-2);
   text-decoration: none; white-space: nowrap;
-  transition: background 0.1s, border-color 0.1s, color 0.1s;
 }
 .ap-app .btn:hover { border-color: var(--ap-border-strong); background: var(--ap-bg-hover); }
-.ap-app .btn:active { transform: translateY(0.5px); }
-.ap-app .btn:focus-visible { outline: none; box-shadow: var(--ap-shadow-focus); border-color: var(--ap-navy); }
-.ap-app .btn:disabled,
-.ap-app .btn[disabled] { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
 .ap-app .btn-primary { background: var(--ap-navy); border-color: var(--ap-navy); color: var(--ap-text-invert); }
 .ap-app .btn-primary:hover { background: var(--ap-navy-hover); border-color: var(--ap-navy-hover); }
-.ap-app .btn-primary:focus-visible { box-shadow: 0 0 0 3px rgba(31,78,121,0.3); }
 .ap-app .btn-secondary { /* same as default .btn */ }
 .ap-app .btn-sm { height: 28px; padding: 0 var(--ap-s-3); font-size: var(--ap-fs-12); }
-
-/* Filter chip active state — shared across both themes via tokens */
-.ap-app .btn.active {
-  background: var(--ap-navy);
-  border-color: var(--ap-navy);
-  color: var(--ap-text-invert);
-  font-weight: 600;
-}
-.ap-app .btn.active:hover {
-  background: var(--ap-navy-hover);
-  border-color: var(--ap-navy-hover);
-}
-
-/* sr-only alias — matches .ap-sr but uses the class name applied in HTML */
-.ap-app .sr-only {
-  position: absolute; width: 1px; height: 1px; padding: 0;
-  margin: -1px; overflow: hidden; clip: rect(0,0,0,0);
-  white-space: nowrap; border: 0;
-}
 
 /* Native inputs (without .ap-input class) */
 .ap-app input[type="text"],
@@ -485,31 +452,64 @@
 /* ============================================================================
    Dark-mode overrides for legacy app.css
    ----------------------------------------------------------------------------
-   The legacy bridge in app.css :root now maps --bg/--surface/etc onto tokens
-   so most elements update automatically. These overrides remain for cases
-   where app.css uses specific hardcoded values that the bridge cannot reach
-   (e.g. the global th/td which have explicit background colors).
+   Legacy app.css hard-codes light-only colours on th/td/table/body. These
+   rules must come AFTER the compat layer so they win the cascade. They only
+   activate when data-theme="dark" is set.
    ============================================================================ */
-
-/* Tables: th uses background:var(--surface-soft) which now resolves to the
-   dark token, but !important here ensures precedence over legacy resets.
-   The general .ap-app th/td rules below normalize the 14px font-size from
-   the global app.css th rule so both themes render identically. */
-.ap-app table th {
-  font-size: var(--ap-fs-11);
-  font-weight: 500;
-  color: var(--ap-text-muted);
-  background: var(--ap-bg-sub);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  border-bottom-color: var(--ap-border);
+html[data-theme="dark"] .ap-app table,
+html[data-theme="dark"] .ap-app .table-wrap table {
+  color: var(--ap-text) !important;
+  background: transparent !important;
 }
-.ap-app table td {
-  color: var(--ap-text);
-  border-bottom-color: var(--ap-border);
+html[data-theme="dark"] .ap-app th,
+html[data-theme="dark"] .ap-app .table-wrap th {
+  background: var(--ap-bg-sub) !important;
+  color: var(--ap-text-muted) !important;
+  border-bottom-color: var(--ap-border) !important;
 }
-.ap-app table tr:hover td { background: var(--ap-bg-hover); }
-.ap-app code { color: var(--ap-text-muted); }
+html[data-theme="dark"] .ap-app td,
+html[data-theme="dark"] .ap-app .table-wrap td {
+  color: var(--ap-text) !important;
+  border-bottom-color: var(--ap-border) !important;
+  background: transparent !important;
+}
+html[data-theme="dark"] .ap-app tr:hover td {
+  background: var(--ap-bg-hover) !important;
+}
+/* Legacy code blocks / ids that render as dark-on-dark in dark mode */
+html[data-theme="dark"] .ap-app code,
+html[data-theme="dark"] .ap-app .mono,
+html[data-theme="dark"] .ap-app .meta {
+  color: var(--ap-text-muted) !important;
+}
+/* Reset hard-coded page/body backgrounds the legacy stylesheet set */
+html[data-theme="dark"] .ap-app,
+html[data-theme="dark"] .ap-app .page-shell,
+html[data-theme="dark"] .ap-app .page {
+  background: var(--ap-bg-page) !important;
+}
+/* Inputs and selects in dark mode (legacy CSS sets white bgs) */
+html[data-theme="dark"] .ap-app input[type="text"],
+html[data-theme="dark"] .ap-app input[type="email"],
+html[data-theme="dark"] .ap-app input[type="password"],
+html[data-theme="dark"] .ap-app input[type="number"],
+html[data-theme="dark"] .ap-app input[type="file"],
+html[data-theme="dark"] .ap-app select,
+html[data-theme="dark"] .ap-app textarea {
+  background: var(--ap-bg-surface) !important;
+  color: var(--ap-text) !important;
+  border-color: var(--ap-border) !important;
+}
+/* Analytics-specific stat cards from legacy css */
+html[data-theme="dark"] .ap-app .stat-card,
+html[data-theme="dark"] .ap-app .chart-card {
+  background: var(--ap-bg-surface) !important;
+  border-color: var(--ap-border) !important;
+  color: var(--ap-text) !important;
+}
+html[data-theme="dark"] .ap-app .stat-label,
+html[data-theme="dark"] .ap-app .stat-card .label { color: var(--ap-text-muted) !important; }
+html[data-theme="dark"] .ap-app .stat-value { color: var(--ap-text) !important; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    REVIEW PAGE — row list cards
@@ -536,26 +536,26 @@
 
 /* Selected */
 .ap-app .review-row.selected {
-  background: var(--ap-selected-bg);
-  border-left-color: var(--ap-selected-border);
+  background: var(--ap-primary-light, #eff6ff);
+  border-left-color: var(--ap-navy, #1e3a5f);
 }
-.ap-app .review-row.selected:hover { background: var(--ap-selected-bg); }
+.ap-app .review-row.selected:hover { background: var(--ap-primary-light, #eff6ff); }
 
 /* Corrected — green left accent */
 .ap-app .review-row.corrected {
-  border-left-color: var(--ap-corrected-border);
+  border-left-color: #16a34a;
 }
-.ap-app .review-row.corrected .row-supplier { color: var(--ap-corrected-fg); }
+.ap-app .review-row.corrected .row-supplier { color: #15803d; }
 
 /* Urgent / needs immediate review — amber left accent + tint */
 .ap-app .review-row.urgent {
-  background: var(--ap-warning-soft2);
-  border-left-color: var(--ap-warning-strong);
+  background: #fffbeb;
+  border-left-color: #d97706;
 }
-.ap-app .review-row.urgent:hover { background: var(--ap-warning-hover); }
+.ap-app .review-row.urgent:hover { background: #fef3c7; }
 .ap-app .review-row.urgent.selected {
-  background: var(--ap-warning-hover);
-  border-left-color: var(--ap-warning-deep);
+  background: #fef3c7;
+  border-left-color: #b45309;
 }
 
 /* Row content layout */
@@ -596,10 +596,10 @@
   padding: 1px 4px;
   border-radius: 3px;
   font-size: var(--ap-fs-11);
-  background: var(--ap-conf-ok-bg); color: var(--ap-conf-ok-fg);
+  background: #dcfce7; color: #166534;
 }
-.ap-app .row-conf.row-conf-mid { background: var(--ap-conf-mid-bg); color: var(--ap-conf-mid-fg); }
-.ap-app .row-conf.row-conf-low { background: var(--ap-conf-low-bg); color: var(--ap-conf-low-fg); }
+.ap-app .row-conf.row-conf-mid { background: #fef9c3; color: #854d0e; }
+.ap-app .row-conf.row-conf-low { background: #fee2e2; color: #991b1b; }
 
 /* Badges */
 .ap-app .row-badges { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
@@ -612,9 +612,9 @@
   letter-spacing: 0.02em;
   text-transform: uppercase;
 }
-.ap-app .row-badge-urgent    { background: var(--ap-warning-soft);  color: var(--ap-warning-fg);  border: 1px solid var(--ap-warning-border); }
-.ap-app .row-badge-reviewed  { background: var(--ap-success-soft);  color: var(--ap-success-fg);  border: 1px solid var(--ap-success-border); }
-.ap-app .row-badge-corrected { background: var(--ap-info-soft);     color: var(--ap-info-fg);     border: 1px solid var(--ap-info-border); }
+.ap-app .row-badge-urgent   { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+.ap-app .row-badge-reviewed { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+.ap-app .row-badge-corrected{ background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    REVIEW PAGE — preview unavailable placeholder
@@ -665,8 +665,8 @@
   margin-left: auto;
   font-size: var(--ap-fs-11);
   font-weight: 500;
-  background: var(--ap-info-soft);
-  color: var(--ap-info-fg);
+  background: #dbeafe;
+  color: #1e40af;
   padding: 2px 8px;
   border-radius: 10px;
   letter-spacing: 0.02em;
@@ -713,74 +713,7 @@
 .ap-app .preview-table td.preview-cell-empty { color: var(--ap-text-muted); font-style: italic; }
 .ap-app .preview-table td.preview-cell-empty::before { content: "—"; }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   TOAST notifications (ap-toast-* classes used by app.js showToast)
-   ═══════════════════════════════════════════════════════════════════════════ */
-#toastHost {
-  position: fixed;
-  top: 16px;
-  right: 16px;
-  z-index: 9999;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.ap-toast {
-  min-width: 260px;
-  max-width: 360px;
-  padding: 10px 14px;
-  border-radius: 8px;
-  box-shadow: 0 4px 10px rgba(0,0,0,.12);
-  font-size: 13px;
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  background: var(--ap-toast-bg);
-  border: 1px solid var(--ap-toast-border);
-  color: var(--ap-toast-fg);
-}
-.ap-toast-link {
-  font-weight: 600;
-  color: var(--ap-toast-link);
-  text-decoration: underline;
-  white-space: nowrap;
-}
-.ap-toast-close {
-  background: none;
-  border: 0;
-  font-size: 18px;
-  cursor: pointer;
-  color: var(--ap-toast-fg);
-  line-height: 1;
-  padding: 0;
-  flex-shrink: 0;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   UI-CHECK banners (ap-ui-banner-* used by ui-check.js)
-   ═══════════════════════════════════════════════════════════════════════════ */
-.ap-ui-banner {
-  position: fixed;
-  top: 8px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 9999;
-  padding: 10px 16px;
-  border-radius: 6px;
-  font: 13px Inter, sans-serif;
-  max-width: 90vw;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-}
-.ap-ui-banner-ok  { background: var(--ap-ok-bg);  color: var(--ap-ok-fg);  border: 1px solid var(--ap-success-border); }
-.ap-ui-banner-err { background: var(--ap-err-bg); color: var(--ap-err-fg); border: 1px solid var(--ap-danger-border); }
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   EXPORT TEMPLATES — edit column form (warning-tinted panel)
-   ═══════════════════════════════════════════════════════════════════════════ */
-.ap-edit-panel {
-  background: var(--ap-edit-panel-bg) !important;
-  border-color: var(--ap-edit-panel-border) !important;
-}
-.ap-edit-panel-thead {
-  background: var(--ap-edit-thead-bg) !important;
-}
+/* Dark mode adjustments */
+html[data-theme="dark"] .ap-app .review-row.urgent { background: rgba(217,119,6,0.08); }
+html[data-theme="dark"] .ap-app .review-row.urgent:hover { background: rgba(217,119,6,0.14); }
+html[data-theme="dark"] .ap-app .preview-unavailable { background: var(--ap-bg-sub); }

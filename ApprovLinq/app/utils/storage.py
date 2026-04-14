@@ -21,9 +21,7 @@ def _normalize_relative(raw_path: str, marker: str) -> Path:
         return Path(*parts[idx + 1:])
     if len(parts) >= 2 and parts[0] == 'data' and parts[1] == marker:
         return Path(*parts[2:])
-    if len(parts) >= 3 and parts[0] == 'app' and parts[1] == 'Data' and parts[2].lower() == marker:
-        return Path(*parts[3:])
-    if len(parts) >= 3 and parts[0] == 'app' and parts[1] == 'data' and parts[2] == marker:
+    if len(parts) >= 3 and parts[0] == 'app' and parts[1].lower() == 'data' and parts[2] == marker:
         return Path(*parts[3:])
     return Path(*parts)
 
@@ -54,18 +52,20 @@ def _candidate_paths(raw_path: str, root: Path, marker: str) -> Iterable[Path]:
 
 def resolve_upload_path(raw_path: str) -> Path:
     root = settings.upload_path
-    for cand in _candidate_paths(raw_path, root, 'uploads'):
+    candidates = list(_candidate_paths(raw_path, root, 'uploads'))
+    for cand in candidates:
         if cand.exists():
             return cand
-    return list(_candidate_paths(raw_path, root, 'uploads'))[0]
+    return candidates[0] if candidates else root
 
 
 def resolve_export_path(raw_path: str) -> Path:
     root = settings.export_path
-    for cand in _candidate_paths(raw_path, root, 'exports'):
+    candidates = list(_candidate_paths(raw_path, root, 'exports'))
+    for cand in candidates:
         if cand.exists():
             return cand
-    return list(_candidate_paths(raw_path, root, 'exports'))[0]
+    return candidates[0] if candidates else root
 
 
 def batch_upload_folder(batch_id) -> Path:

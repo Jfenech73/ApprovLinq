@@ -75,13 +75,6 @@ function renderMonthlyChart(data) {
   canvas.style.display = "";
   if (emptyEl) emptyEl.style.display = "none";
 
-  // Read chart colours from CSS tokens so both themes are covered automatically.
-  const s = getComputedStyle(document.documentElement);
-  const c1  = s.getPropertyValue("--ap-chart-1").trim()  || "rgba(37,99,235,0.75)";
-  const c1b = s.getPropertyValue("--ap-chart-1b").trim() || "rgba(37,99,235,0.25)";
-  const gridColor = s.getPropertyValue("--ap-chart-grid").trim() || "rgba(0,0,0,0.06)";
-  const axisColor = s.getPropertyValue("--ap-chart-axis").trim() || "#64748b";
-
   if (monthlyChart) monthlyChart.destroy();
   monthlyChart = new Chart(canvas.getContext("2d"), {
     type: "bar",
@@ -91,16 +84,16 @@ function renderMonthlyChart(data) {
         {
           label: "Total (incl. VAT)",
           data: data.map((d) => Number(d.total) || 0),
-          backgroundColor: c1,
-          borderColor: c1.replace(/,[^,)]+\)$/, ",1)"),
+          backgroundColor: "rgba(37,99,235,0.75)",
+          borderColor: "rgba(37,99,235,1)",
           borderWidth: 1,
           borderRadius: 4,
         },
         {
           label: "Net (excl. VAT)",
           data: data.map((d) => Number(d.net) || 0),
-          backgroundColor: c1b,
-          borderColor: c1.replace(/,[^,)]+\)$/, ",0.6)"),
+          backgroundColor: "rgba(37,99,235,0.25)",
+          borderColor: "rgba(37,99,235,0.6)",
           borderWidth: 1,
           borderRadius: 4,
         },
@@ -109,12 +102,11 @@ function renderMonthlyChart(data) {
     options: {
       responsive: true,
       plugins: {
-        legend: { position: "top", labels: { color: axisColor } },
+        legend: { position: "top" },
         tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y)}` } },
       },
       scales: {
-        x: { ticks: { color: axisColor }, grid: { color: gridColor } },
-        y: { beginAtZero: true, ticks: { color: axisColor, callback: (v) => fmt(v) }, grid: { color: gridColor } },
+        y: { beginAtZero: true, ticks: { callback: (v) => fmt(v) } },
       },
     },
   });
@@ -132,11 +124,6 @@ function renderSuppliersChart(data) {
   canvas.style.display = "";
   if (emptyEl) emptyEl.style.display = "none";
 
-  const s = getComputedStyle(document.documentElement);
-  const c2  = s.getPropertyValue("--ap-chart-2").trim()   || "rgba(16,185,129,0.75)";
-  const gridColor = s.getPropertyValue("--ap-chart-grid").trim() || "rgba(0,0,0,0.06)";
-  const axisColor = s.getPropertyValue("--ap-chart-axis").trim() || "#64748b";
-
   if (suppliersChart) suppliersChart.destroy();
   suppliersChart = new Chart(canvas.getContext("2d"), {
     type: "bar",
@@ -146,8 +133,8 @@ function renderSuppliersChart(data) {
         {
           label: "Total Spend",
           data: data.map((d) => Number(d.total) || 0),
-          backgroundColor: c2,
-          borderColor: c2.replace(/,[^,)]+\)$/, ",1)"),
+          backgroundColor: "rgba(16,185,129,0.75)",
+          borderColor: "rgba(16,185,129,1)",
           borderWidth: 1,
           borderRadius: 4,
         },
@@ -161,8 +148,7 @@ function renderSuppliersChart(data) {
         tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.x)}` } },
       },
       scales: {
-        x: { beginAtZero: true, ticks: { color: axisColor, callback: (v) => fmt(v) }, grid: { color: gridColor } },
-        y: { ticks: { color: axisColor }, grid: { color: gridColor } },
+        x: { beginAtZero: true, ticks: { callback: (v) => fmt(v) } },
       },
     },
   });
