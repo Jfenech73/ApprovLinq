@@ -332,6 +332,7 @@
   border-radius: var(--ap-r-lg);
   padding: var(--ap-s-5);
   margin-bottom: var(--ap-s-4);
+  box-shadow: none;  /* suppress the heavy legacy shadow from global .card */
 }
 .ap-app .card.full-width { grid-column: 1 / -1; }
 .ap-app .card h2 { font-size: var(--ap-fs-14); font-weight: 600; margin: 0 0 var(--ap-s-3); color: var(--ap-text); }
@@ -340,12 +341,19 @@
 .ap-app main.grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ap-s-4); }
 @media (max-width: 900px) { .ap-app main.grid { grid-template-columns: 1fr; } }
 
-.ap-app .table-wrap { overflow-x: auto; margin-top: var(--ap-s-3); }
+.ap-app .table-wrap {
+  overflow-x: auto;
+  margin-top: var(--ap-s-3);
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-lg);
+  background: var(--ap-bg-surface);
+}
 .ap-app .table-wrap table { width: 100%; border-collapse: collapse; font-size: var(--ap-fs-13); }
 .ap-app .table-wrap th {
   text-align: left; font-weight: 500; color: var(--ap-text-muted);
   font-size: var(--ap-fs-11); text-transform: uppercase; letter-spacing: 0.04em;
   padding: var(--ap-s-3); border-bottom: 1px solid var(--ap-border);
+  background: var(--ap-bg-sub);
 }
 .ap-app .table-wrap td { padding: var(--ap-s-3); border-bottom: 1px solid var(--ap-border); vertical-align: middle; }
 .ap-app .table-wrap tr:hover td { background: var(--ap-bg-hover); }
@@ -484,24 +492,24 @@
    ============================================================================ */
 
 /* Tables: th uses background:var(--surface-soft) which now resolves to the
-   dark token, but !important here ensures precedence over legacy resets. */
-html[data-theme="dark"] .ap-app th,
-html[data-theme="dark"] .ap-app .table-wrap th {
-  background: var(--ap-bg-sub) !important;
-  color: var(--ap-text-muted) !important;
-  border-bottom-color: var(--ap-border) !important;
+   dark token, but !important here ensures precedence over legacy resets.
+   The general .ap-app th/td rules below normalize the 14px font-size from
+   the global app.css th rule so both themes render identically. */
+.ap-app table th {
+  font-size: var(--ap-fs-11);
+  font-weight: 500;
+  color: var(--ap-text-muted);
+  background: var(--ap-bg-sub);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom-color: var(--ap-border);
 }
-html[data-theme="dark"] .ap-app td,
-html[data-theme="dark"] .ap-app .table-wrap td {
-  color: var(--ap-text) !important;
-  border-bottom-color: var(--ap-border) !important;
-  background: transparent !important;
+.ap-app table td {
+  color: var(--ap-text);
+  border-bottom-color: var(--ap-border);
 }
-html[data-theme="dark"] .ap-app tr:hover td {
-  background: var(--ap-bg-hover) !important;
-}
-html[data-theme="dark"] .ap-app code,
-html[data-theme="dark"] .ap-app .mono { color: var(--ap-text-muted) !important; }
+.ap-app table tr:hover td { background: var(--ap-bg-hover); }
+.ap-app code { color: var(--ap-text-muted); }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    REVIEW PAGE — row list cards
