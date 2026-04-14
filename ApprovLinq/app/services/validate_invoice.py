@@ -69,7 +69,7 @@ def _is_deposit_amount(diff: float) -> bool:
     Heuristic:
         - Positive (surcharge, not a discount)
         - ≤ €200 (large batch deliveries can carry substantial BCRS totals,
-          e.g. J. Sultana with 70.80 for many glass-bottle units)
+          e.g. J. Sultana-style invoices with 70.80 for many glass-bottle units)
         - Centavos part is one of the common BCRS denomination remainders
           (0c, 10c, 20c, 25c, 40c, 50c, 60c, 75c, 80c — per-unit multiples)
     """

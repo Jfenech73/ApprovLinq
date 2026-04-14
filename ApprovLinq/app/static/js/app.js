@@ -304,31 +304,30 @@ function reviewUrl(batchId, fileId) {
 
 // Minimal toast implementation that stacks, auto-dismisses, and supports an
 // action link. Uses a single container that we create on demand.
-// Appearance is driven entirely by CSS classes (ap-toast, ap-toast-link,
-// ap-toast-close) using --ap-toast-* tokens so both themes are covered.
 function showToast(message, kind, action) {
   let host = document.getElementById("toastHost");
   if (!host) {
     host = document.createElement("div");
     host.id = "toastHost";
+    host.style.cssText = "position:fixed;top:16px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;";
     document.body.appendChild(host);
   }
   const t = document.createElement("div");
-  t.className = `ap-toast ap-toast-${kind || "info"}`;
-  const msgEl = document.createElement("div");
-  msgEl.style.flex = "1";
-  msgEl.textContent = message;
-  t.appendChild(msgEl);
+  t.className = `toast toast-${kind || "info"}`;
+  t.style.cssText = "background:#fffbea;border:1px solid #f0c36d;color:#663c00;padding:10px 14px;border-radius:8px;box-shadow:0 4px 10px rgba(0,0,0,.08);min-width:260px;max-width:360px;font-size:13px;display:flex;gap:10px;align-items:center;";
+  const msg = document.createElement("div");
+  msg.style.flex = "1"; msg.textContent = message;
+  t.appendChild(msg);
   if (action && action.href) {
     const a = document.createElement("a");
     a.href = action.href; a.target = "_blank"; a.rel = "noopener";
     a.textContent = action.label || "Open";
-    a.className = "ap-toast-link";
+    a.style.cssText = "font-weight:600;color:#1a46b8;text-decoration:underline;";
     t.appendChild(a);
   }
   const x = document.createElement("button");
   x.type = "button"; x.textContent = "×";
-  x.className = "ap-toast-close";
+  x.style.cssText = "background:none;border:0;font-size:18px;cursor:pointer;color:#663c00;";
   x.onclick = () => t.remove();
   t.appendChild(x);
   host.appendChild(t);
@@ -388,6 +387,31 @@ $("uploadBtn").addEventListener("click", async () => {
   }
 });
 
+$("deleteBatchBtn").addEventListener("click", async () => {
+  const message = $("actionMessage");
+  if (!state.selectedBatchId) {
+    setInlineMessage(message, "Select a batch first.");
+    return;
+  }
+  const batchId = state.selectedBatchId;
+  const batchName = $("selectedBatchName")?.textContent || batchId;
+  const confirmed = window.confirm(`Delete batch "${batchName}" permanently? This removes uploaded files, rows, and batch review/export records.`);
+  if (!confirmed) return;
+  setInlineMessage(message, "Deleting batch...");
+  try {
+    await api(`/batches/${batchId}`, { method: "DELETE" });
+    state.selectedBatchId = null;
+    $("selectedBatchPanel").classList.add("hidden");
+    $("selectedBatchEmpty").classList.remove("hidden");
+    $("filesTableBody").innerHTML = '<tr><td colspan="6" class="muted">No files uploaded yet.</td></tr>';
+    $("rowsTableBody").innerHTML = '<tr><td colspan="9" class="muted">Select a batch first.</td></tr>';
+    setInlineMessage(message, "Batch deleted.", "success");
+    await loadBatches();
+  } catch (error) {
+    setInlineMessage(message, normalizeUiErrorMessage(error.message), "server-error");
+  }
+});
+
 $("processBtn").addEventListener("click", async () => {
   const message = $("actionMessage");
   if (!state.selectedBatchId) {
@@ -441,33 +465,6 @@ $("reviewBtn").addEventListener("click", () => {
   }
   window.location.href = `/static/review.html?batch_id=${state.selectedBatchId}`;
 });
-
-$("deleteBatchBtn").addEventListener("click", async () => {
-  if (!state.selectedBatchId) return;
-  const name = $("selectedBatchName").textContent || state.selectedBatchId;
-  const confirmed = confirm(
-    `Permanently delete batch "${name}"?\n\n` +
-    `This will remove all rows, files, and corrections for this batch. ` +
-    `This cannot be undone.`
-  );
-  if (!confirmed) return;
-  const msg = $("deleteBatchMessage");
-  setInlineMessage(msg, "Deleting…");
-  try {
-    await api(`/batches/${state.selectedBatchId}`, { method: "DELETE" });
-    state.selectedBatchId = null;
-    $("selectedBatchPanel").classList.add("hidden");
-    $("selectedBatchEmpty").classList.remove("hidden");
-    const rowsTbody = $("rowsTableBody");
-    if (rowsTbody) rowsTbody.innerHTML = '<tr><td colspan="9" class="muted">Select a batch first.</td></tr>';
-    const filesTbody = $("filesTableBody");
-    if (filesTbody) filesTbody.innerHTML = '<tr><td colspan="6" class="muted">No files uploaded yet.</td></tr>';
-    await loadBatches();
-  } catch (error) {
-    setInlineMessage(msg, normalizeUiErrorMessage(error.message), "server-error");
-  }
-});
-
 const logoutBtn = document.getElementById("logoutBtn");
 if (logoutBtn) {
   logoutBtn.addEventListener("click", logoutAndGo);

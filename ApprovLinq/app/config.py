@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # OpenAI
     use_openai: bool = False
     openai_api_key: str | None = None
-    openai_model: str = "gpt-4.1"
+    openai_model: str = "gpt-5.4-mini"
 
     # Azure Document Intelligence
     use_azure_di: bool = False

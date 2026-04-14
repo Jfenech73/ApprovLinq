@@ -298,16 +298,16 @@ async def recover_stuck_batches() -> None:
 
 @app.on_event("startup")
 async def run_file_retention_cleanup() -> None:
-    """Delete uploaded PDFs and exported XLSXs that are older than the
-    configured retention window (default 5 days).  Runs once at startup so
-    the server self-cleans on every deploy/restart without needing a cron job.
+    """Delete uploaded PDFs and exported XLSXs older than the configured
+    retention window (default 5 days).  Runs once at startup so the server
+    self-cleans on every deploy/restart without needing a cron job.
 
     Safety rules:
     - Only files strictly older than file_retention_days are removed.
     - Whole batch-upload folders are removed only when ALL files inside them
       are past the retention window (avoids breaking active review sessions).
     - Export files are removed individually by mtime.
-    - DB records are not touched — the rows remain for analytics/audit history.
+    - DB records are not touched — rows remain for analytics/audit history.
     """
     import time
     import shutil
@@ -324,18 +324,16 @@ async def run_file_retention_cleanup() -> None:
             for batch_folder in upload_root.iterdir():
                 if not batch_folder.is_dir():
                     continue
-                files_in_folder = list(batch_folder.rglob("*"))
-                pdf_files = [f for f in files_in_folder if f.is_file()]
+                pdf_files = [f for f in batch_folder.rglob("*") if f.is_file()]
                 if not pdf_files:
-                    # Empty folder — remove it
                     try:
                         shutil.rmtree(batch_folder, ignore_errors=True)
                         removed_folders += 1
                     except Exception:
                         pass
                     continue
-                oldest_mtime = max(f.stat().st_mtime for f in pdf_files)
-                if (now - oldest_mtime) > retention_seconds:
+                newest_mtime = max(f.stat().st_mtime for f in pdf_files)
+                if (now - newest_mtime) > retention_seconds:
                     try:
                         shutil.rmtree(batch_folder, ignore_errors=True)
                         removed_folders += 1
@@ -352,8 +350,7 @@ async def run_file_retention_cleanup() -> None:
                 if not export_file.is_file():
                     continue
                 try:
-                    age = now - export_file.stat().st_mtime
-                    if age > retention_seconds:
+                    if (now - export_file.stat().st_mtime) > retention_seconds:
                         export_file.unlink(missing_ok=True)
                         removed_files += 1
                 except Exception as exc:
@@ -369,7 +366,7 @@ async def run_file_retention_cleanup() -> None:
         )
 
 
-@app.get("/version")
+
 def get_version():
     version = _version_file.read_text().strip() if _version_file.exists() else "0.0.0"
     return JSONResponse({"version": version})

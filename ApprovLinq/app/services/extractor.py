@@ -170,412 +170,6 @@ def _check_deposit_component(
     return False, 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Region-first BCRS / deposit label+value detector
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Labels accepted as BCRS/deposit indicators (case-insensitive).
-# Ordered from most-specific to least-specific so scoring is deterministic.
-_BCRS_LABEL_PATTERNS: list[tuple[str, int]] = [
-    # (regex, base_score)  — higher score = stronger evidence
-    (r"bcrs\s+refundable\s+deposit",   100),
-    (r"bcrs\s+deposit",                 95),
-    (r"bcrs",                           90),
-    (r"refundable\s+deposit",           70),
-    (r"deposit\s+surcharge",            65),
-    (r"returnable\s+deposit",           65),
-    (r"returnable",                     50),
-    (r"deposit",                        40),   # weakest — requires summary-region confirmation
-]
-
-# Monetary token: optional currency symbol, then digits with comma/dot separator
-_MONEY_RE = re.compile(
-    r"(?:EUR|€|£|\$)?\s*([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2}|[0-9]+[.,][0-9]{2})"
-)
-
-
-def _extract_money_tokens(text: str) -> list[float]:
-    """Return all monetary amounts found in `text`, largest-first."""
-    vals = []
-    for m in _MONEY_RE.finditer(text):
-        v = parse_amount(m.group(1))
-        if v is not None and v > 0:
-            vals.append(v)
-    vals.sort(reverse=True)
-    return vals
-
-
-def _text_is_item_row(line: str) -> bool:
-    """Return True when a line looks like a product/item body row rather than
-    a summary label.  Used to suppress false-positive BCRS detection from the
-    line-item grid.
-
-    Heuristics:
-    - Very long lines (>120 chars) are item descriptions
-    - Lines starting with a quantity token (digit × digit, digit UOM) are items
-    - Lines with a "/" that look like pack-size fractions
-    """
-    stripped = line.strip()
-    if len(stripped) > 120:
-        return True
-    # Quantity prefix like "24 x 500ml", "12x330", "1.000 x"
-    if re.match(r"^\d+\s*[xX×]\s*\d", stripped):
-        return True
-    # Pack-size: "500ml", "330ML", "75CL"
-    if re.search(r"\b\d+\s*(?:ml|cl|l|g|kg)\b", stripped, re.I) and len(stripped) < 50:
-        return True
-    return False
-
-
-def _page_summary_zone(lines: list[str]) -> list[str]:
-    """Return the lines that form the summary/totals area of the page.
-
-    Strategy: the bottom 40% of non-empty lines, PLUS any block that contains
-    two or more financial label words (Total, Net, VAT, Balance, Sub, Amount,
-    BCRS, Deposit) regardless of position — these are totals tables.
-    """
-    non_empty = [ln for ln in lines if ln.strip()]
-    if not non_empty:
-        return []
-
-    # Bottom 40 % of the page text by line count
-    cutoff = max(1, int(len(non_empty) * 0.60))
-    bottom_lines: set[int] = set(range(cutoff, len(non_empty)))
-
-    # Find blocks containing financial summary keywords
-    financial_kw = re.compile(
-        r"\b(total|net|vat|balance|sub.?total|amount|bcrs|deposit|"
-        r"grand\s+total|invoice\s+total|amount\s+due)\b",
-        re.I,
-    )
-    summary_lines: set[int] = set()
-    for i, ln in enumerate(non_empty):
-        if financial_kw.search(ln):
-            # Include this line and its immediate neighbours
-            for j in range(max(0, i - 2), min(len(non_empty), i + 4)):
-                summary_lines.add(j)
-
-    combined = sorted(bottom_lines | summary_lines)
-    return [non_empty[i] for i in combined]
-
-
-def _score_bcrs_candidate(
-    label_text: str,
-    amount: float,
-    source_line: str,
-    in_summary_zone: bool,
-    same_line: bool,
-    net: float | None,
-    vat: float | None,
-    total: float | None,
-) -> float:
-    """Score a BCRS candidate (label, amount) pair.
-
-    Returns a float score; higher = more confident.  Returns 0 if the
-    candidate should be rejected outright.
-    """
-    if amount <= 0:
-        return 0.0
-
-    # Base score from label specificity
-    base = 0
-    for pat, score in _BCRS_LABEL_PATTERNS:
-        if re.search(pat, label_text, re.I):
-            base = score
-            break
-    if base == 0:
-        return 0.0
-
-    score = float(base)
-
-    # Proximity boost
-    if same_line:
-        score += 30
-    if in_summary_zone:
-        score += 25
-    else:
-        # Outside summary zone: "deposit" alone is not reliable
-        if base <= 50:
-            return 0.0
-        score -= 10
-
-    # Item-row penalty
-    if _text_is_item_row(source_line):
-        return 0.0
-
-    # Monetary format quality
-    if re.search(r"\d+[.,]\d{2}$", str(amount)):
-        score += 5
-
-    # Reconciliation boost: total ≈ net + vat + candidate
-    if net is not None and total is not None:
-        vat_v = vat or 0.0
-        diff = round(total - (net + vat_v + amount), 2)
-        if abs(diff) <= 0.10:
-            score += 40
-        elif abs(diff) <= 0.50:
-            score += 15
-
-    # Plausibility gate: BCRS values are small relative to invoice total
-    if total is not None and total > 0 and amount > total * 0.80:
-        # If the candidate is >80% of the invoice total it's almost certainly
-        # the invoice total itself, not a deposit
-        return 0.0
-
-    return score
-
-
-def _detect_bcrs_from_fitz(
-    pdf_path: "Path",
-    page_index: int,
-    net: float | None,
-    vat: float | None,
-    total: float | None,
-) -> float | None:
-    """Use PyMuPDF bounding boxes to find BCRS/deposit label+value pairs.
-
-    PyMuPDF's `get_text("words")` returns per-word tuples:
-      (x0, y0, x1, y1, word, block_no, line_no, word_no)
-
-    Strategy:
-    1. Find all words matching a BCRS/deposit label pattern.
-    2. For each match, look rightward on the SAME LINE (y within ±5 pts) for
-       the nearest monetary token.
-    3. Score each candidate and return the best.
-
-    Returns the best BCRS amount or None.
-    """
-    try:
-        import fitz  # PyMuPDF — present in the deployed environment
-        doc = fitz.open(str(pdf_path))
-        try:
-            page = doc[page_index]
-            page_height = page.rect.height
-
-            # words: (x0, y0, x1, y1, word, block_no, line_no, word_no)
-            words = page.get_text("words")
-            if not words:
-                return None
-
-            # ── Group words into logical lines by (block_no, line_no) ────────
-            line_map: dict[tuple, list] = {}
-            for w in words:
-                key = (w[5], w[6])  # (block_no, line_no)
-                line_map.setdefault(key, []).append(w)
-            # Sort words within each line by x0
-            for key in line_map:
-                line_map[key].sort(key=lambda w: w[0])
-
-            # ── Build a normalised line list with text and y-midpoint ─────────
-            # Each entry: {"key": k, "words": [...], "text": "...", "y_mid": float,
-            #              "y_rel": fraction 0..1 of page height}
-            lines_info = []
-            for key, wds in line_map.items():
-                text = " ".join(w[4] for w in wds)
-                y_mid = sum(w[1] + w[3] for w in wds) / (2 * len(wds))
-                y_rel = y_mid / page_height if page_height > 0 else 0.5
-                lines_info.append({
-                    "key": key,
-                    "words": wds,
-                    "text": text,
-                    "y_mid": y_mid,
-                    "y_rel": y_rel,
-                })
-            lines_info.sort(key=lambda li: li["y_mid"])
-
-            # ── Summary zone: bottom 40% of page by y-coordinate ─────────────
-            # Also include any line that contains financial keywords regardless
-            # of position (catches mid-page totals tables).
-            financial_kw_re = re.compile(
-                r"\b(total|net|vat|balance|bcrs|deposit|amount\s+due|grand\s+total)\b",
-                re.I,
-            )
-            summary_line_keys: set = set()
-            for li in lines_info:
-                if li["y_rel"] >= 0.60:
-                    summary_line_keys.add(li["key"])
-                elif financial_kw_re.search(li["text"]):
-                    summary_line_keys.add(li["key"])
-
-            # ── Scan for BCRS/deposit label words ────────────────────────────
-            candidates: list[dict] = []
-
-            for li in lines_info:
-                in_summary = li["key"] in summary_line_keys
-                line_text = li["text"]
-
-                # Check if this line contains a BCRS/deposit label
-                matched_pat_score = 0
-                for pat, base_score in _BCRS_LABEL_PATTERNS:
-                    if re.search(pat, line_text, re.I):
-                        matched_pat_score = base_score
-                        break
-
-                if matched_pat_score == 0:
-                    continue
-
-                # Find the rightmost monetary value on this line
-                amounts_on_line = _extract_money_tokens(line_text)
-
-                # Also search the NEXT line (sometimes label and value
-                # are on consecutive lines in tight table layouts)
-                next_line_amounts: list[float] = []
-                for li2 in lines_info:
-                    if abs(li2["y_mid"] - li["y_mid"]) < 20 and li2["key"] != li["key"]:
-                        next_line_amounts = _extract_money_tokens(li2["text"])
-                        break
-
-                for amt_list, same_ln in [(amounts_on_line, True), (next_line_amounts, False)]:
-                    for amt in amt_list:
-                        s = _score_bcrs_candidate(
-                            label_text=line_text,
-                            amount=amt,
-                            source_line=line_text,
-                            in_summary_zone=in_summary,
-                            same_line=same_ln,
-                            net=net,
-                            vat=vat,
-                            total=total,
-                        )
-                        if s > 0:
-                            candidates.append({"amount": amt, "score": s, "line": line_text})
-
-            if not candidates:
-                return None
-
-            best = max(candidates, key=lambda c: c["score"])
-            logger.debug(
-                "fitz BCRS candidate: %.2f (score=%.0f) from %r",
-                best["amount"], best["score"], best["line"][:80],
-            )
-            return best["amount"]
-
-        finally:
-            doc.close()
-
-    except Exception as exc:
-        logger.debug("_detect_bcrs_from_fitz failed (page %d): %s", page_index, exc)
-        return None
-
-
-def _detect_bcrs_from_text(
-    page_text: str,
-    net: float | None,
-    vat: float | None,
-    total: float | None,
-) -> float | None:
-    """Coordinate-free BCRS/deposit detection from plain page text.
-
-    Used when PyMuPDF is not available or returns no words (scanned pages
-    with no text layer).
-
-    Strategy:
-    1. Split page into summary zone (bottom 40% of lines + financial-keyword
-       blocks) and body zone.
-    2. Within the summary zone, apply multi-word label+value regex patterns
-       that tolerate words between the label and the amount.
-    3. Score candidates; return best.
-    """
-    lines = [ln for ln in page_text.splitlines() if ln.strip()]
-    summary_lines = _page_summary_zone(lines)
-
-    if not summary_lines:
-        return None
-
-    summary_text = "\n".join(summary_lines)
-
-    # Multi-word-gap pattern: label word(s), then ≤6 tokens of anything,
-    # then a monetary amount.  Captures "BCRS Refundable Deposit (M)  10.80"
-    # and "BCRS Deposit  70.80" and "BCRS 14.40".
-    _GAP = r"[\w\s().,\-:/]*?"   # lazy, ≤ 6 non-newline chars groups
-
-    label_value_patterns: list[tuple[str, int]] = [
-        (rf"(?P<lbl>bcrs\s+refundable\s+deposit{_GAP})(?P<amt>[0-9]+[.,][0-9]{{2}})", 100),
-        (rf"(?P<lbl>bcrs\s+deposit{_GAP})(?P<amt>[0-9]+[.,][0-9]{{2}})",              95),
-        (rf"(?P<lbl>bcrs{_GAP})(?P<amt>[0-9]+[.,][0-9]{{2}})",                         90),
-        (rf"(?P<lbl>refundable\s+deposit{_GAP})(?P<amt>[0-9]+[.,][0-9]{{2}})",         70),
-        (rf"(?P<lbl>deposit\s+surcharge{_GAP})(?P<amt>[0-9]+[.,][0-9]{{2}})",          65),
-        (rf"(?P<lbl>returnable\s+deposit{_GAP})(?P<amt>[0-9]+[.,][0-9]{{2}})",         65),
-        (rf"(?P<lbl>returnable{_GAP})(?P<amt>[0-9]+[.,][0-9]{{2}})",                   50),
-        (rf"(?P<lbl>deposit{_GAP})(?P<amt>[0-9]+[.,][0-9]{{2}})",                      40),
-    ]
-
-    candidates: list[dict] = []
-
-    for pat, base_score in label_value_patterns:
-        for m in re.finditer(pat, summary_text, re.I | re.DOTALL):
-            # Reject multi-line spans longer than 80 chars (not same-region)
-            matched_span = m.group(0)
-            if "\n" in matched_span and len(matched_span) > 80:
-                continue
-            amt = parse_amount(m.group("amt"))
-            if amt is None or amt <= 0:
-                continue
-            lbl = m.group("lbl")
-            same_line = "\n" not in matched_span
-
-            # Find the source line
-            # (use the summary line that contains the label start)
-            src_line = ""
-            for ln in summary_lines:
-                if re.search(re.escape(lbl[:15].strip()), ln, re.I):
-                    src_line = ln
-                    break
-
-            s = _score_bcrs_candidate(
-                label_text=lbl,
-                amount=amt,
-                source_line=src_line or matched_span,
-                in_summary_zone=True,
-                same_line=same_line,
-                net=net,
-                vat=vat,
-                total=total,
-            )
-            if s > 0:
-                candidates.append({"amount": amt, "score": s, "label": lbl.strip()[:60]})
-
-    if not candidates:
-        return None
-
-    best = max(candidates, key=lambda c: c["score"])
-    logger.debug(
-        "text BCRS candidate: %.2f (score=%.0f) label=%r",
-        best["amount"], best["score"], best["label"],
-    )
-    return best["amount"]
-
-
-def _detect_bcrs_label_value(
-    pdf_path: "Path | None",
-    page_index: int,
-    page_text: str,
-    net: float | None,
-    vat: float | None,
-    total: float | None,
-) -> float | None:
-    """Top-level BCRS detector: try coordinate-aware first, fall back to text.
-
-    Returns the best BCRS/deposit amount found, or None.
-    Overrides any purely arithmetic result from validate_invoice when label
-    evidence is stronger.
-    """
-    result: float | None = None
-
-    # Priority 1 — coordinate-aware (PyMuPDF bounding boxes)
-    if pdf_path is not None:
-        try:
-            result = _detect_bcrs_from_fitz(pdf_path, page_index, net, vat, total)
-        except Exception as exc:
-            logger.debug("fitz BCRS path skipped: %s", exc)
-
-    # Priority 2 — text-region fallback (no coordinates needed)
-    if result is None and page_text:
-        result = _detect_bcrs_from_text(page_text, net, vat, total)
-
-    return result
-
-
 def _collect_review_reasons(
     extracted: dict[str, Any],
     validation_result: dict[str, Any] | None,
@@ -1239,7 +833,7 @@ def _clean_ocr_supplier_name(name: str | None) -> str | None:
       "jbl\\nJoseph Borg Ltd."                     → "Joseph Borg Ltd."
       "฿ Br Supply Co."                            → "Br Supply Co."
       "N\\nN Calleja Trading"                       → "N Calleja Trading"
-      "Br Supply Co. Br Supply Co"                 → "Br Supply Co."  (full-name repeat)
+      "Br Supply Co. Br Supply Co"                 → "Br Supply Co."  (full-name OCR repeat)
     """
     if not name:
         return name
@@ -1258,15 +852,13 @@ def _clean_ocr_supplier_name(name: str | None) -> str | None:
     # Collapse multiple spaces
     name = re.sub(r"\s+", " ", name).strip()
     # Detect full-name OCR duplication: "Acme Ltd. Acme Ltd" or "Acme Ltd Acme Ltd"
-    # Strategy: split on sentence boundaries / common separators and check if the
-    # first recognisable segment repeats.
+    # Split on ". " (period-space) or double-space, check if both halves share the same
+    # significant token prefix — if so, keep the longer (punctuated) version.
     if len(name) > 8:
-        # Try splitting on ". " or "  " (double-space OCR artefact)
         for sep in (". ", "  "):
             parts = name.split(sep, 1)
             if len(parts) == 2:
                 first, rest = parts[0].strip(), parts[1].strip()
-                # If rest starts with the same significant tokens as first, it's a duplicate
                 first_norm = re.sub(r"[^A-Za-z0-9]", "", first).lower()
                 rest_norm  = re.sub(r"[^A-Za-z0-9]", "", rest).lower()
                 if (
@@ -1274,11 +866,10 @@ def _clean_ocr_supplier_name(name: str | None) -> str | None:
                     and len(rest_norm) >= 4
                     and (
                         first_norm == rest_norm
-                        or first_norm.startswith(rest_norm[:max(4, len(rest_norm)//2)])
-                        or rest_norm.startswith(first_norm[:max(4, len(first_norm)//2)])
+                        or first_norm.startswith(rest_norm[:max(4, len(rest_norm) // 2)])
+                        or rest_norm.startswith(first_norm[:max(4, len(first_norm) // 2)])
                     )
                 ):
-                    # Keep the longer version (has punctuation like "Ltd.")
                     name = first if len(first) >= len(rest) else rest
                     break
     return name if len(name) >= 2 else None
@@ -1343,7 +934,7 @@ def summarise_line_items_rule_based(line_items_text: str) -> str:
         ("fuel and related vehicle consumables", ["fuel", "diesel", "petrol", "unleaded", "lubricant"]),
         ("office supplies and stationery", ["paper", "stationery", "toner", "ink", "folder", "pen", "notebook"]),
         ("cleaning supplies and hygiene products", ["detergent", "cleaner", "soap", "bleach", "sanitiser", "tissue"]),
-        # Food/beverage expanded for Malta hospitality/wholesale suppliers
+        # Food/beverage expanded for Malta hospitality and wholesale suppliers
         ("food and beverage supplies", [
             "food", "catering", "beverage", "drink", "snack", "bread", "meat",
             "poultry", "chicken", "beef", "pork", "fish", "seafood", "dairy",
@@ -1368,9 +959,8 @@ def summarise_line_items_rule_based(line_items_text: str) -> str:
 
     lines = [ln.strip() for ln in line_items_text.splitlines() if ln.strip()]
     if lines:
-        # Use first non-numeric line for a more readable description
+        # Prefer the first non-numeric, non-trivial line for a readable description
         for line in lines[:3]:
-            # Skip lines that are purely amounts/codes
             if re.search(r"^[\d\s.,€£$%]+$", line):
                 continue
             clean = re.sub(r"\s{2,}", " ", line).strip()
@@ -1437,8 +1027,8 @@ def simple_extract(
 
     _curr = r"(?:EUR|GBP|USD|€|£|\$)?"
     net_raw = first_match([
-        rf"(?:subtotal|sub[\s\-]?total|net[\s\-]?amount|amount\s+excl(?:uding)?\.?\s*(?:vat|tax)?|excl(?:uding)?\.?\s*(?:vat|tax)|net\s+total|taxable[\s\-]?amount|amount\s+before\s+(?:vat|tax))\\s*[:\\-]?\\s*{_curr}\\s*([0-9.,]+)",
-        # Cash sale / receipt style: "Sub Total" or "Sub-Total"
+        rf"(?:subtotal|sub[\s\-]?total|net[\s\-]?amount|amount\s+excl(?:uding)?\.?\s*(?:vat|tax)?|excl(?:uding)?\.?\s*(?:vat|tax)|net\s+total|taxable[\s\-]?amount|amount\s+before\s+(?:vat|tax))\s*[:\-]?\s*{_curr}\s*([0-9.,]+)",
+        # Cash-sale / receipt style
         rf"(?:sub[\s\-]total|nett)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)",
     ], text)
     # VAT / tax patterns — covers V.A.T., VAT@rate%, IVA, tax amount, value added tax,
@@ -2615,35 +2205,6 @@ def process_pdf_page(
                 if is_dep:
                     extracted["_deposit_component"] = dep_amt
 
-    # 3b-ext — Region-first BCRS/deposit label+value detection
-    #
-    #   Strategy (in priority order):
-    #   1. Coordinate-aware search: use PyMuPDF bounding boxes from the native
-    #      PDF text layer to find BCRS/deposit labels in the lower summary region,
-    #      then search rightward on the same line for the nearest monetary value.
-    #   2. Text-region fallback: split the page text into a "summary zone"
-    #      (bottom 40% of lines) and "body zone"; search for label+value pairs
-    #      in the summary zone only using a multi-word-gap regex.
-    #   3. Reconciliation boost: if net/vat/total are known, prefer the candidate
-    #      that satisfies  total ≈ net + vat + candidate  within 0.05 tolerance.
-    #
-    #   The result overrides the arithmetic-only _deposit_component from 3b when
-    #   text evidence is stronger (label explicitly present in the document).
-    _bcrs_text_result = _detect_bcrs_label_value(
-        pdf_path=pdf_path,
-        page_index=page_index,
-        page_text=final_text or "",
-        net=extracted.get("net_amount"),
-        vat=extracted.get("vat_amount"),
-        total=extracted.get("total_amount"),
-    )
-    if _bcrs_text_result is not None:
-        extracted["_deposit_component"] = _bcrs_text_result
-        logger.debug(
-            "Region-first BCRS detection on page %d: %.2f",
-            page_index, _bcrs_text_result,
-        )
-
     # 3c — Supplier name normalisation
     #      First apply the lightweight OCR artefact removal and casing fix,
     #      then run the full supplier normalisation module which adds
@@ -2882,9 +2443,6 @@ def process_pdf_page(
         "header_raw":                 header_raw,
         "totals_raw":                 totals_raw,
         "page_text_raw":              page_text_raw,
-        # Expose deposit/BCRS component as a public key so the caller
-        # (_process_batch_job) can create the extra BCRS row.
-        "deposit_component":          extracted.get("_deposit_component"),
     })
     # Clean up internal temp keys
     for _k in ("_supplier_name_raw", "_date_parse_strategy", "_date_ambiguity_flag",
