@@ -24,6 +24,7 @@
       "batchName", "selectedBatchEmpty", "selectedBatchPanel", "selectedBatchId",
       "selectedBatchName", "selectedBatchStatus", "selectedBatchNotes",
       "batchScanModeGroup", "pdfFiles", "uploadBtn", "processBtn",
+      "deleteBatchBtn", "deleteBatchMessage",
       "filesTableBody", "batchesTableBody", "rowsTableBody",
       "refreshRowsBtn", "reviewBtn", "exportBtn", "pageMessage",
       "logoutBtn", "userName", "userTenant", "userAvatar",
@@ -55,13 +56,7 @@
 
   function showBanner(kind, html) {
     const b = document.createElement("div");
-    b.style.cssText =
-      "position:fixed;top:8px;left:50%;transform:translateX(-50%);" +
-      "z-index:9999;padding:10px 16px;border-radius:6px;font:13px Inter,sans-serif;" +
-      "max-width:90vw;box-shadow:0 2px 8px rgba(0,0,0,0.15);" +
-      (kind === "ok"
-        ? "background:#dcfce7;color:#166534;border:1px solid #86efac;"
-        : "background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;");
+    b.className = `ap-ui-banner ap-ui-banner-${kind}`;
     b.innerHTML = html;
     document.body.appendChild(b);
   }

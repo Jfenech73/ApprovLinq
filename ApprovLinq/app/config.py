@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     upload_dir: str = "./data/uploads"
     export_dir: str = "./data/exports"
+    file_retention_days: int = 5   # uploaded PDFs and exported XLSXs older than this are removed
 
     # OCR
     ocr_provider: str = "none"   # none | ocr_space | paddleocr
@@ -29,7 +30,7 @@ class Settings(BaseSettings):
     # OpenAI
     use_openai: bool = False
     openai_api_key: str | None = None
-    openai_model: str = "gpt-5.4-mini"
+    openai_model: str = "gpt-4.1"
 
     # Azure Document Intelligence
     use_azure_di: bool = False
@@ -45,13 +46,13 @@ class Settings(BaseSettings):
 
     @property
     def upload_path(self) -> Path:
-        path = Path(self.upload_dir)
+        path = Path(self.upload_dir).resolve()
         path.mkdir(parents=True, exist_ok=True)
         return path
 
     @property
     def export_path(self) -> Path:
-        path = Path(self.export_dir)
+        path = Path(self.export_dir).resolve()
         path.mkdir(parents=True, exist_ok=True)
         return path
 

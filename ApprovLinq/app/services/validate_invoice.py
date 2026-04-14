@@ -60,7 +60,7 @@ def _safe_float(v) -> Optional[float]:
 
 # ── Deposit detection ──────────────────────────────────────────────────────────
 
-_DEPOSIT_DENOMINATIONS = {0.0, 0.10, 0.20, 0.25, 0.50, 0.75}
+_DEPOSIT_DENOMINATIONS = {0.0, 0.10, 0.20, 0.25, 0.40, 0.50, 0.60, 0.75, 0.80}
 
 
 def _is_deposit_amount(diff: float) -> bool:
@@ -68,10 +68,12 @@ def _is_deposit_amount(diff: float) -> bool:
 
     Heuristic:
         - Positive (surcharge, not a discount)
-        - ≤ €25 (per-invoice deposit unlikely to be larger)
-        - Centavos part is one of the common denomination remainders
+        - ≤ €200 (large batch deliveries can carry substantial BCRS totals,
+          e.g. J. Sultana with 70.80 for many glass-bottle units)
+        - Centavos part is one of the common BCRS denomination remainders
+          (0c, 10c, 20c, 25c, 40c, 50c, 60c, 75c, 80c — per-unit multiples)
     """
-    if not (0.01 <= diff <= 25.00):
+    if not (0.01 <= diff <= 200.00):
         return False
     frac = round(diff % 1.0, 2)
     return frac in _DEPOSIT_DENOMINATIONS

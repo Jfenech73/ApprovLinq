@@ -18,7 +18,6 @@ from app.db import models as M
 from app.db.review_models import InvoiceRowFieldAudit, BatchExportEvent
 from app.services import correction_service as cs
 from app.services.exporter import workbook_from_rows
-from app.utils.storage import batch_export_folder
 
 
 def _build_corrected_rows(db: Session, batch: M.InvoiceBatch) -> list[dict]:
@@ -90,17 +89,11 @@ def export_batch_corrected(
     wb.save(out)
     out.seek(0)
 
-    export_folder = batch_export_folder(batch.id)
-    export_filename = f"batch_{batch.id}_v{next_version}.xlsx"
-    export_path = export_folder / export_filename
-    export_path.write_bytes(out.getvalue())
-    out.seek(0)
-
     # Log export event + flip status + bump version
     ev = BatchExportEvent(
         batch_id=batch.id, export_version=next_version,
         exported_by=user.id, exported_at=datetime.utcnow(),
-        file_path=str(export_path), row_count=len(rows),
+        row_count=len(rows),
     )
     db.add(ev)
     batch.current_export_version = next_version

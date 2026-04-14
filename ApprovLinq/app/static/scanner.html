@@ -56,6 +56,13 @@
               <div><span class="label">Status</span><span id="selectedBatchStatus" class="pill"></span></div>
               <div><span class="label">Notes</span><span id="selectedBatchNotes">-</span></div>
             </div>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+              <button id="deleteBatchBtn" class="btn btn-sm" type="button"
+                style="color:var(--ap-err-fg);border-color:var(--ap-danger-border);background:var(--ap-err-bg)">
+                Delete batch…
+              </button>
+              <div id="deleteBatchMessage" class="message" style="margin:0;flex:1"></div>
+            </div>
 
             <div class="stack">
               <label class="ap-label">Scan mode</label>
@@ -84,7 +91,6 @@
               <div class="row gap-sm wrap">
                 <button id="uploadBtn" class="btn btn-primary" type="button">Upload selected files</button>
                 <button id="processBtn" class="btn" type="button">Process batch</button>
-                <button id="deleteBatchBtn" class="btn" type="button">Delete batch</button>
               </div>
               <div id="actionMessage" class="message"></div>
             </div>

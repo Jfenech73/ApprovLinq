@@ -53,6 +53,8 @@ async function load() {
     if (state.selected != null) {
       loadAudit(state.selected);
       await ensurePageCount();
+      // Remap mode is intentionally NOT auto-enabled on load.
+      // Users enable it manually when they need region selection.
     }
   } catch (e) { msg("Load failed: " + e.message, "error"); }
 }
@@ -277,7 +279,7 @@ async function refreshPreview() {
     _previewBlobUrl = URL.createObjectURL(blob);
     _showPreviewImage(_previewBlobUrl);
   } catch (e) {
-    const friendly = e && e.message ? `Preview error: ${e.message}` : "Preview could not be loaded.";
+    const friendly = "Preview could not be loaded.";
     msg(friendly, "error");
     _showPreviewUnavailable(friendly);
   }
@@ -287,8 +289,19 @@ async function refreshPreview() {
 let _lastFileId = null;
 async function ensurePageCount() {
   if (state.fileId !== _lastFileId) {
+    // File changed — fetch a fresh page count.
     _lastFileId = state.fileId;
     await fetchPageCount();
+  } else {
+    // Same file — no need to re-fetch, but always clamp page to the known range
+    // so that changing rows within the same file doesn't leave state.page pointing
+    // to a page that doesn't exist in the PDF (row.page_no is the logical invoice
+    // page, not always a valid PDF page index).
+    if (state.pageCount > 0) {
+      if (state.page > state.pageCount) state.page = state.pageCount;
+      if (state.page < 1) state.page = 1;
+    }
+    updatePageControls();
   }
 }
 
@@ -354,8 +367,9 @@ function setRemapField(name) {
   remapField = name || null;
   remapTargetLabel.textContent = remapField ? `field: ${remapField}` : "";
   // Only now (remap mode on + field chosen) do we load the preview image.
+  // Always go through ensurePageCount so state.page is clamped before the fetch.
   if ($("remapMode").checked && remapField && state.fileId && !previewImg.src) {
-    refreshPreview();
+    ensurePageCount().then(() => refreshPreview());
   }
 }
 
@@ -369,6 +383,8 @@ document.addEventListener("click", (e) => {
   const el = e.target.closest("#rowEditor [data-field]");
   if (!el) return;
   setRemapField(el.getAttribute("data-field"));
+  // Remap is NOT auto-enabled when a flagged field is clicked — user must
+  // enable remap mode explicitly.
 });
 
 $("remapMode").addEventListener("change", async (e) => {
@@ -389,7 +405,7 @@ $("remapMode").addEventListener("change", async (e) => {
   }
   // Do NOT load the preview image yet — wait until the user picks a field.
   if (!remapField) msg("Click a field in the editor to load the invoice preview, then drag a region.", "");
-  else if (state.fileId) refreshPreview();
+  else if (state.fileId) { await ensurePageCount(); refreshPreview(); }
 });
 
 let dragStart = null;        // {xPx, yPx} pixel coords relative to image top-left
@@ -505,5 +521,3 @@ if (typeof ensureAuth === "function" && !ensureAuth()) {
     }
   };
 })();
-
-const remapDefault = $("remapMode"); if (remapDefault) remapDefault.checked = false;

@@ -1,6 +1,8 @@
 """Review, correction, audit, remap, rules, reopen, preview routes."""
 from __future__ import annotations
 import io
+import logging
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -16,9 +18,10 @@ from app.db.review_models import (
 )
 from app.db.session import get_db
 from app.routers.auth import current_user
-from app.utils.security import session_token_hash, utcnow
+from app.utils.security import session_token_hash
 from app.services import correction_service as cs
-from app.utils.storage import resolve_upload_path
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/review", tags=["review"])
 
@@ -41,17 +44,7 @@ def current_user_flexible(
     session_row = db.execute(
         select(M.UserSession).where(M.UserSession.token_hash == token_hash)
     ).scalar_one_or_none()
-    if session_row and session_row.expires_at:
-        now = utcnow()
-        expiry = session_row.expires_at
-        if getattr(expiry, "tzinfo", None) is None and getattr(now, "tzinfo", None) is not None:
-            now = now.replace(tzinfo=None)
-        elif getattr(expiry, "tzinfo", None) is not None and getattr(now, "tzinfo", None) is None:
-            from datetime import timezone
-            now = now.replace(tzinfo=timezone.utc)
-        if expiry < now:
-            session_row = None
-    if not session_row:
+    if not session_row or (session_row.expires_at and session_row.expires_at < datetime.utcnow()):
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     user = db.get(M.User, session_row.user_id)
     if not user:
@@ -260,24 +253,52 @@ def mark_file_reviewed(batch_id: UUID, file_id: int,
 
 
 # ── PDF file info (page count) ────────────────────────────────────────────────
+def _resolve_file_path(raw_path: str) -> str:
+    """Return an absolute path string.
+
+    Files uploaded before the config was fixed may have a relative path stored
+    in the DB (e.g. 'data/uploads/batch-uuid/file.pdf').  Resolving against the
+    current working directory is still unreliable, so we also try resolving
+    against the configured upload root so old records keep working.
+    """
+    from pathlib import Path as _Path
+    p = _Path(raw_path)
+    if p.is_absolute():
+        return str(p)
+    # Try resolved against CWD first
+    resolved = p.resolve()
+    if resolved.exists():
+        return str(resolved)
+    # Try resolved against the configured upload root
+    from app.config import settings as _settings
+    alt = (_settings.upload_path.parent.parent / raw_path).resolve()
+    if alt.exists():
+        return str(alt)
+    # Return CWD-resolved path (will fail with a clear FileNotFoundError)
+    return str(resolved)
+
+
+# ── PDF file info (page count) ────────────────────────────────────────────────
 def _open_pdf_page_count(path: str) -> int:
+    resolved = _resolve_file_path(path)
     try:
         import pypdfium2 as pdfium
-        pdf = pdfium.PdfDocument(path)
+        pdf = pdfium.PdfDocument(resolved)
         try:
             return len(pdf)
         finally:
             pdf.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("pypdfium2 could not open '%s' for page count: %s", resolved, exc)
     try:
         import fitz
-        doc = fitz.open(path)
+        doc = fitz.open(resolved)
         try:
             return doc.page_count
         finally:
             doc.close()
-    except Exception:
+    except Exception as exc:
+        logger.warning("PyMuPDF could not open '%s' for page count: %s", resolved, exc)
         return 1
 
 
@@ -292,10 +313,7 @@ def file_info(
     f = db.get(M.InvoiceFile, file_id)
     if not f:
         raise HTTPException(404, "File not found")
-    file_path = resolve_upload_path(f.file_path)
-    if not file_path.exists():
-        raise HTTPException(404, f"PDF missing from disk: stored={f.file_path} resolved={file_path}")
-    return {"file_id": file_id, "page_count": _open_pdf_page_count(str(file_path))}
+    return {"file_id": file_id, "page_count": _open_pdf_page_count(f.file_path)}
 
 
 # ── PDF preview (on-demand, not stored) ───────────────────────────────────────
@@ -311,27 +329,16 @@ def preview(
     f = db.get(M.InvoiceFile, file_id)
     if not f:
         raise HTTPException(404, "File not found")
-    file_path = resolve_upload_path(f.file_path)
-    if not file_path.exists():
-        raise HTTPException(404, f"PDF missing from disk: stored={f.file_path} resolved={file_path}")
+    import os
+    file_path = _resolve_file_path(f.file_path)
+    if not os.path.exists(file_path):
+        logger.error("Preview: file not found on disk. DB path=%s resolved=%s", f.file_path, file_path)
+        raise HTTPException(404, f"PDF missing from disk: {file_path}")
+    # Prefer pypdfium2 (already a project dependency); fall back to PyMuPDF.
     errors = []
     try:
-        import fitz
-        doc = fitz.open(str(file_path))
-        if page < 1 or page > doc.page_count:
-            doc.close()
-            raise HTTPException(400, "Page out of range")
-        pix = doc.load_page(page - 1).get_pixmap(dpi=120, alpha=False)
-        png = pix.tobytes("png")
-        doc.close()
-        return StreamingResponse(io.BytesIO(png), media_type="image/png")
-    except HTTPException:
-        raise
-    except Exception as e:
-        errors.append(f"PyMuPDF: {e}")
-    try:
         import pypdfium2 as pdfium
-        pdf = pdfium.PdfDocument(str(file_path))
+        pdf = pdfium.PdfDocument(file_path)
         try:
             if page < 1 or page > len(pdf):
                 raise HTTPException(400, "Page out of range")
@@ -348,8 +355,28 @@ def preview(
     except HTTPException:
         raise
     except Exception as e:
+        logger.error("pypdfium2 preview failed for file %s (path=%s, page=%s): %s",
+                     file_id, file_path, page, e)
         errors.append(f"pypdfium2: {e}")
-    raise HTTPException(500, "Preview rendering failed. Tried: " + " | ".join(errors))
+    try:
+        import fitz
+        doc = fitz.open(file_path)
+        if page < 1 or page > doc.page_count:
+            doc.close()
+            raise HTTPException(400, "Page out of range")
+        pix = doc.load_page(page - 1).get_pixmap(dpi=110)
+        png = pix.tobytes("png")
+        doc.close()
+        return StreamingResponse(io.BytesIO(png), media_type="image/png")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("PyMuPDF preview failed for file %s (path=%s, page=%s): %s",
+                     file_id, file_path, page, e)
+        errors.append(f"PyMuPDF: {e}")
+    logger.error("Preview rendering failed completely for file %s path=%s: %s",
+                 file_id, file_path, " | ".join(errors))
+    raise HTTPException(500, "Preview rendering failed: " + " | ".join(errors))
 
 
 # ── Read text from a region of a page ─────────────────────────────────────────
@@ -357,6 +384,7 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
     """Return text inside the normalized (0-1) rectangle on the page.
     Tries PyMuPDF's text layer first (digital PDFs); if empty or unavailable,
     falls back to rendering + OCR via the configured OCR backend."""
+    file_path = _resolve_file_path(file_path)
     # 1) PyMuPDF text-layer extraction (fast, free, exact)
     try:
         import fitz
@@ -471,7 +499,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         if f:
             try:
                 read_text = _read_region_text(
-                    str(resolve_upload_path(f.file_path)), payload.page_no, payload.x, payload.y, payload.w, payload.h
+                    f.file_path, payload.page_no, payload.x, payload.y, payload.w, payload.h
                 )
             except HTTPException:
                 raise

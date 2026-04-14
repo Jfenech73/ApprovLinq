@@ -30,9 +30,7 @@ from app.services.exporter import workbook_from_rows
 from app.services.corrected_exporter import export_batch_corrected
 # <<< REVIEW_PACK corrected_export_import
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
-from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit
 from app.services.template_render_service import render_template_sheet, resolve_effective_template
-from app.utils.storage import batch_upload_folder, batch_export_folder, resolve_upload_path
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +44,9 @@ _ACTIVE_BATCHES_LOCK = Lock()
 
 
 def _batch_folder(batch_id: UUID) -> Path:
-    return batch_upload_folder(batch_id)
+    folder = settings.upload_path / str(batch_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
 
 
 def _set_active(batch_id: UUID) -> bool:
@@ -61,243 +61,6 @@ def _set_active(batch_id: UUID) -> bool:
 def _clear_active(batch_id: UUID) -> None:
     with _ACTIVE_BATCHES_LOCK:
         _ACTIVE_BATCHES.discard(str(batch_id))
-
-
-def _normalize_rule_value(value: str | None) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip().lower())
-
-
-def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
-    rules = db.query(CorrectionRule).filter(
-        CorrectionRule.tenant_id == batch.tenant_id,
-        CorrectionRule.active.is_(True),
-    )
-    if batch.company_id:
-        rules = rules.filter((CorrectionRule.company_id == batch.company_id) | (CorrectionRule.company_id.is_(None)))
-    else:
-        rules = rules.filter(CorrectionRule.company_id.is_(None))
-    for rule in rules.order_by(CorrectionRule.id.asc()).all():
-        src = _normalize_rule_value(rule.source_pattern)
-        if not src:
-            continue
-        if rule.rule_type == "supplier_alias":
-            current = _normalize_rule_value(row.supplier_name)
-            if current and current == src and rule.target_value:
-                row.supplier_name = rule.target_value
-        elif rule.rule_type == "nominal_remap":
-            current = _normalize_rule_value(row.nominal_account_code)
-            if current and current == src and rule.target_value:
-                row.nominal_account_code = rule.target_value
-
-
-def _parse_money_candidates(text: str) -> list[float]:
-    vals = []
-    for m in re.findall(r"(?<!\d)(?:€\s*)?(\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|\d+[.,]\d{2})(?!\d)", text or ""):
-        raw = m.replace('.', '').replace(',', '.') if re.match(r"^\d{1,3}(?:\.\d{3})+,\d{2}$", m) else m.replace(',', '')
-        try:
-            vals.append(round(float(raw), 2))
-        except Exception:
-            pass
-    return vals
-
-
-def _parse_first_money(value: object) -> float | None:
-    vals = _parse_money_candidates(str(value or ""))
-    return vals[0] if vals else None
-
-
-def _is_summary_context(line: str) -> bool:
-    low = (line or '').lower()
-    return bool(re.search(
-        r"\b(total|subtotal|gross|net|vat|tax|summary|amount due|total due|invoice summary|tax summary|deposit summary|total eur|total incl|total net|total gross)\b",
-        low,
-    ))
-
-
-def _is_body_or_item_context(line: str) -> bool:
-    low = (line or '').lower()
-    return bool(re.search(
-        r"\b(qty|quantity|unit|uom|barcode|item|description|pcs|price|w/sale|retail|consumer|code|stock|salesperson|order no|delivery note)\b",
-        low,
-    ))
-
-
-def _collect_summary_region_lines(payload: dict) -> list[str]:
-    lines: list[str] = []
-    totals_raw = str(payload.get('totals_raw') or '')
-    if totals_raw:
-        lines.extend([ln.strip() for ln in totals_raw.splitlines() if ln.strip()])
-    page_text = str(payload.get('page_text_raw') or '')
-    if page_text:
-        page_lines = [ln.strip() for ln in page_text.splitlines() if ln.strip()]
-        if page_lines:
-            start_idx = max(0, int(len(page_lines) * 0.5))
-            lines.extend(page_lines[start_idx:])
-            lines.extend(page_lines[-20:])
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for ln in lines:
-        key = re.sub(r"\s+", " ", ln)
-        if key not in seen:
-            seen.add(key)
-            deduped.append(ln)
-    return deduped
-
-
-def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
-    reasons = str(payload.get('review_reasons') or '')
-    m = re.search(r'deposit_component_detected:(\d+(?:\.\d{2})?)', reasons)
-    if m:
-        try:
-            return round(float(m.group(1)), 2)
-        except Exception:
-            pass
-
-    total_amount = _parse_first_money(payload.get('total_amount'))
-    net_amount = _parse_first_money(payload.get('net_amount'))
-    vat_amount = _parse_first_money(payload.get('vat_amount'))
-
-    lines = _collect_summary_region_lines(payload)
-    if not lines:
-        return None
-
-    label_re = re.compile(r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit|deposit|surcharge)\b", re.I)
-    summary_text = "\n".join(lines)
-    ranked: list[tuple[int, float]] = []
-
-    def _add_candidate(score: int, val: float | None) -> None:
-        if val is None:
-            return
-        try:
-            f = round(float(val), 2)
-        except Exception:
-            return
-        if f <= 0:
-            return
-        ranked.append((score, f))
-
-    # Pass 1: regex extraction over the whole summary text, useful when OCR collapses rows.
-    patterns = [
-        re.compile(r"(?is)\bbcrs(?:\s+refundable)?(?:\s+deposit)?\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
-        re.compile(r"(?is)\brefundable\s+deposit\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
-        re.compile(r"(?is)\bdeposit\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
-    ]
-    for pidx, pattern in enumerate(patterns):
-        for match in pattern.finditer(summary_text):
-            label_span = summary_text[max(0, match.start()-40):min(len(summary_text), match.end()+40)].lower()
-            if pidx == 2 and 'bcrs' not in label_span and 'summary' not in label_span and 'total' not in label_span and 'refundable' not in label_span:
-                continue
-            raw = match.group(1)
-            try:
-                val = float(raw.replace(',', '.'))
-            except Exception:
-                continue
-            score = 18 if pidx == 0 else 16 if pidx == 1 else 12
-            if total_amount is not None and net_amount is not None and vat_amount is not None:
-                if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
-                    score += 12
-                elif total_amount > 0 and 0 < val < total_amount:
-                    score += 2
-            _add_candidate(score, val)
-
-    # Pass 2: line-based scoring within the summary region.
-    for idx, line in enumerate(lines):
-        low = line.lower()
-        label_match = label_re.search(low)
-        if not label_match:
-            continue
-        if _is_body_or_item_context(line) and not _is_summary_context(line):
-            continue
-
-        plain_deposit_only = ('deposit' in low and 'bcrs' not in low and 'refundable' not in low and 'surcharge' not in low)
-        neighborhood = ' '.join(lines[max(0, idx - 1): min(len(lines), idx + 2)]).lower()
-        if plain_deposit_only and not (_is_summary_context(line) or 'bcrs' in neighborhood or 'summary' in neighborhood or 'total' in neighborhood):
-            continue
-
-        same_line_vals = _parse_money_candidates(line)
-        if same_line_vals:
-            after = line[label_match.end():]
-            after_vals = _parse_money_candidates(after)
-            if after_vals:
-                for val in after_vals[:2]:
-                    score = 22
-                    if 'bcrs' in low:
-                        score += 10
-                    if 'refundable' in low:
-                        score += 5
-                    if 'deposit' in low:
-                        score += 6
-                    if 'surcharge' in low:
-                        score += 5
-                    if _is_summary_context(line):
-                        score += 4
-                    if total_amount is not None and net_amount is not None and vat_amount is not None:
-                        if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
-                            score += 12
-                    _add_candidate(score, val)
-            for val in same_line_vals:
-                score = 12
-                if 'bcrs' in low:
-                    score += 8
-                if 'deposit' in low:
-                    score += 4
-                if _is_summary_context(line):
-                    score += 4
-                if total_amount is not None and net_amount is not None and vat_amount is not None:
-                    if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
-                        score += 10
-                _add_candidate(score, val)
-
-        for nidx in range(max(0, idx - 1), min(len(lines), idx + 2)):
-            if nidx == idx:
-                continue
-            cand_line = lines[nidx]
-            if _is_body_or_item_context(cand_line) and not _is_summary_context(cand_line):
-                continue
-            for val in _parse_money_candidates(cand_line):
-                score = 8
-                if 'bcrs' in low:
-                    score += 8
-                if 'refundable' in low:
-                    score += 3
-                if 'deposit' in low:
-                    score += 4
-                if _is_summary_context(cand_line) or _is_summary_context(line):
-                    score += 4
-                if total_amount is not None and net_amount is not None and vat_amount is not None:
-                    if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
-                        score += 10
-                _add_candidate(score, val)
-
-    if not ranked:
-        return None
-
-    ranked.sort(key=lambda x: (x[0], -abs(x[1])), reverse=True)
-    best_score, best_val = ranked[0]
-    return best_val if best_score >= 12 else None
-
-
-def _build_bcrs_row(row: InvoiceRow, amount: float) -> InvoiceRow:
-    desc = (row.description or '').strip()
-    if desc:
-        desc = f"{desc} - BCRS" if 'bcrs' not in desc.lower() else desc
-    else:
-        desc = 'BCRS surcharge'
-    return InvoiceRow(
-        batch_id=row.batch_id, tenant_id=row.tenant_id, company_id=row.company_id,
-        source_file_id=row.source_file_id, source_filename=row.source_filename, page_no=row.page_no,
-        supplier_name=row.supplier_name, supplier_posting_account=row.supplier_posting_account,
-        nominal_account_code=row.nominal_account_code, invoice_number=row.invoice_number,
-        invoice_date=row.invoice_date, description=desc, line_items_raw='BCRS surcharge',
-        net_amount=amount, vat_amount=0.0, total_amount=amount, currency=row.currency, tax_code=row.tax_code,
-        method_used=(row.method_used or '') + '+bcrs', confidence_score=row.confidence_score,
-        validation_status=row.validation_status, review_required=row.review_required,
-        review_priority=row.review_priority, review_reasons=row.review_reasons, review_fields=row.review_fields,
-        auto_approved=row.auto_approved, page_quality_score=row.page_quality_score,
-        classification_method=row.classification_method, supplier_match_method=row.supplier_match_method,
-        totals_reconciliation_status=row.totals_reconciliation_status, header_raw=row.header_raw,
-        totals_raw=row.totals_raw, page_text_raw=row.page_text_raw,
-    )
 
 
 _STOP_WORDS = {"the", "and", "of", "for", "a", "an", "in", "on", "at", "to", "by"}
@@ -935,7 +698,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         total_target_pages = 0
         for invoice_file in files:
             try:
-                page_count = get_pdf_page_count(resolve_upload_path(invoice_file.file_path))
+                page_count = get_pdf_page_count(invoice_file.file_path)
             except Exception:
                 page_count = 0
             invoice_file.page_count = page_count
@@ -963,7 +726,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 for page_index in range(page_count):
                     try:
                         row_payloads = process_pdf_page_rows(
-                            str(resolve_upload_path(invoice_file.file_path)),
+                            invoice_file.file_path,
                             page_index=page_index,
                             scan_mode=batch.scan_mode or "summary",
                             openai_api_key=settings.openai_api_key if settings.use_openai else None,
@@ -1026,16 +789,66 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 db, tenant_id, batch.company_id, row,
                                 supplier_vat=supplier_vat,
                             )
-                            _apply_saved_rules(db, batch, row)
                             db.add(row)
                             inserted_rows += 1
                             total_rows += 1
-                            bcrs_amount = _extract_bcrs_amount_from_summary(r)
-                            if bcrs_amount and bcrs_amount > 0:
-                                bcrs_row = _build_bcrs_row(row, bcrs_amount)
+
+                            # ── BCRS / deposit duplicate row ──────────────
+                            # If the extractor detected a deposit or BCRS
+                            # surcharge component (validated amount from
+                            # validate_invoice or heuristic fallback), create
+                            # an additional row that isolates the surcharge
+                            # with net=vat=total=deposit_amount so it can be
+                            # posted as a separate line in the accounting system.
+                            _deposit_amt = r.get("deposit_component")
+                            if _deposit_amt and float(_deposit_amt) > 0:
+                                bcrs_row = InvoiceRow(
+                                    batch_id=batch_id,
+                                    tenant_id=batch.tenant_id,
+                                    company_id=batch.company_id,
+                                    source_file_id=invoice_file.id,
+                                    source_filename=invoice_file.original_filename,
+                                    page_no=r.get("page_no") or (page_index + 1),
+                                    supplier_name=supplier_name,
+                                    invoice_number=r.get("invoice_number"),
+                                    invoice_date=r.get("invoice_date"),
+                                    description=(
+                                        f"BCRS/Deposit surcharge — {float(_deposit_amt):.2f}"
+                                    ),
+                                    currency=r.get("currency"),
+                                    tax_code=None,
+                                    net_amount=float(_deposit_amt),
+                                    vat_amount=0.0,
+                                    total_amount=float(_deposit_amt),
+                                    method_used=r.get("method_used"),
+                                    confidence_score=r.get("confidence_score"),
+                                    validation_status="ok",
+                                    review_required=False,
+                                    review_priority=None,
+                                    review_reasons=None,
+                                    review_fields=None,
+                                    auto_approved=True,
+                                    page_quality_score=r.get("page_quality_score"),
+                                    supplier_match_method=r.get("supplier_match_method"),
+                                    totals_reconciliation_status="bcrs_row",
+                                    header_raw=r.get("header_raw"),
+                                    totals_raw=r.get("totals_raw"),
+                                    page_text_raw=None,
+                                )
+                                # Re-apply account suggestions so BCRS row
+                                # inherits nominal/posting codes where possible.
+                                _apply_account_suggestions(
+                                    db, tenant_id, batch.company_id, bcrs_row,
+                                    supplier_vat=supplier_vat,
+                                )
                                 db.add(bcrs_row)
                                 inserted_rows += 1
                                 total_rows += 1
+                                logger.debug(
+                                    "BCRS row created for page %s: amount=%.2f",
+                                    r.get("page_no"), float(_deposit_amt),
+                                )
+                            # ─────────────────────────────────────────────
                         processed_pages += 1
                         batch.page_count = processed_pages
                         batch.notes = f"Processing file {file_index}/{len(files)}: {invoice_file.original_filename} (page {page_index + 1}/{page_count})"
@@ -1210,35 +1023,6 @@ def process_batch(batch_id: UUID, background_tasks: BackgroundTasks, db: Session
     return {"ok": True, "status": batch.status}
 
 
-@router.delete("/{batch_id}")
-def delete_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
-    batch = _get_batch_for_tenant(db, batch_id, tenant_id)
-    with _ACTIVE_BATCHES_LOCK:
-        if str(batch.id) in _ACTIVE_BATCHES or batch.status == "processing":
-            raise HTTPException(status_code=409, detail="Cannot delete a batch while it is processing")
-
-    upload_folder = batch_upload_folder(batch.id)
-    export_folder = batch_export_folder(batch.id)
-
-    db.query(InvoiceRowFieldAudit).filter(InvoiceRowFieldAudit.batch_id == batch.id).delete(synchronize_session=False)
-    db.query(InvoiceRowCorrection).filter(InvoiceRowCorrection.batch_id == batch.id).delete(synchronize_session=False)
-    db.query(BatchExportEvent).filter(BatchExportEvent.batch_id == batch.id).delete(synchronize_session=False)
-    db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch.id).delete(synchronize_session=False)
-    db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch.id).delete(synchronize_session=False)
-    db.delete(batch)
-    db.commit()
-
-    for folder in (upload_folder, export_folder):
-        try:
-            if folder.exists():
-                import shutil
-                shutil.rmtree(folder, ignore_errors=True)
-        except Exception:
-            logger.warning("Failed to remove batch folder %s", folder, exc_info=True)
-
-    return {"ok": True, "deleted_batch_id": str(batch_id)}
-
-
 @router.get("/{batch_id}/rows", response_model=list[InvoiceRowOut])
 def list_rows(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
     _get_batch_for_tenant(db, batch_id, tenant_id)
@@ -1318,6 +1102,63 @@ def get_batch_progress(batch_id: UUID, db: Session = Depends(get_db), tenant_id=
         "percent": percent,
         "files": file_states,
     }
+
+
+@router.delete("/{batch_id}", status_code=200)
+def delete_batch(
+    batch_id: UUID,
+    db: Session = Depends(get_db),
+    tenant_id=Depends(current_tenant_id),
+    _user: User = Depends(current_user),
+):
+    """Permanently delete a batch and all batch-owned data.
+
+    Removes: InvoiceBatch, InvoiceFile, InvoiceRow, InvoiceRowCorrection,
+    InvoiceRowFieldAudit, BatchExportEvent records, and the uploaded files
+    folder on disk.
+
+    Does NOT remove: CorrectionRule, RemapHint, SupplierPattern — these are
+    global learning artifacts that belong to the tenant/company, not the batch.
+    """
+    batch = _get_batch_for_tenant(db, batch_id, tenant_id)
+
+    # Block deletion while the batch is actively being processed.
+    with _ACTIVE_BATCHES_LOCK:
+        if str(batch_id) in _ACTIVE_BATCHES:
+            raise HTTPException(
+                status_code=409,
+                detail="Batch is currently processing. Wait for processing to complete before deleting.",
+            )
+
+    # Collect the disk folder path BEFORE the DB delete so we still have it.
+    folder = _batch_folder(batch_id)
+
+    # Transactional DB delete.
+    # InvoiceRowCorrection and InvoiceRowFieldAudit have ondelete=CASCADE on
+    # their batch_id FK so they are removed automatically when InvoiceBatch is
+    # deleted. InvoiceRow and InvoiceFile also CASCADE from InvoiceBatch.
+    # BatchExportEvent has the same CASCADE. We do an explicit bulk-delete of
+    # InvoiceRow first because it is the largest table and we want the DELETE
+    # to be a simple filtered bulk op rather than ORM-loaded object deletes.
+    try:
+        db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch_id).delete(synchronize_session=False)
+        db.delete(batch)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("Batch delete DB error for %s: %s", batch_id, exc)
+        raise HTTPException(status_code=500, detail=f"Database deletion failed: {exc}") from exc
+
+    # Remove uploaded files from disk — non-fatal if already missing.
+    try:
+        if folder.exists():
+            import shutil
+            shutil.rmtree(folder, ignore_errors=True)
+            logger.info("Deleted batch folder: %s", folder)
+    except Exception as exc:
+        logger.warning("Could not remove batch folder %s: %s", folder, exc)
+
+    return {"ok": True, "deleted_batch_id": str(batch_id)}
 
 
 @router.get("/{batch_id}/export")
