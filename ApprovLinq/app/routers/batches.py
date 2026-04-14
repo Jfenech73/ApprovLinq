@@ -30,7 +30,7 @@ from app.services.exporter import workbook_from_rows
 from app.services.corrected_exporter import export_batch_corrected
 # <<< REVIEW_PACK corrected_export_import
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
-from app.db.review_models import CorrectionRule
+from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit
 from app.services.template_render_service import render_template_sheet, resolve_effective_template
 from app.utils.storage import batch_upload_folder, batch_export_folder, resolve_upload_path
 
@@ -1079,6 +1079,35 @@ def process_batch(batch_id: UUID, background_tasks: BackgroundTasks, db: Session
     batch.notes = "Processing started"
     db.commit()
     return {"ok": True, "status": batch.status}
+
+
+@router.delete("/{batch_id}")
+def delete_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
+    batch = _get_batch_for_tenant(db, batch_id, tenant_id)
+    with _ACTIVE_BATCHES_LOCK:
+        if str(batch.id) in _ACTIVE_BATCHES or batch.status == "processing":
+            raise HTTPException(status_code=409, detail="Cannot delete a batch while it is processing")
+
+    upload_folder = batch_upload_folder(batch.id)
+    export_folder = batch_export_folder(batch.id)
+
+    db.query(InvoiceRowFieldAudit).filter(InvoiceRowFieldAudit.batch_id == batch.id).delete(synchronize_session=False)
+    db.query(InvoiceRowCorrection).filter(InvoiceRowCorrection.batch_id == batch.id).delete(synchronize_session=False)
+    db.query(BatchExportEvent).filter(BatchExportEvent.batch_id == batch.id).delete(synchronize_session=False)
+    db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch.id).delete(synchronize_session=False)
+    db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch.id).delete(synchronize_session=False)
+    db.delete(batch)
+    db.commit()
+
+    for folder in (upload_folder, export_folder):
+        try:
+            if folder.exists():
+                import shutil
+                shutil.rmtree(folder, ignore_errors=True)
+        except Exception:
+            logger.warning("Failed to remove batch folder %s", folder, exc_info=True)
+
+    return {"ok": True, "deleted_batch_id": str(batch_id)}
 
 
 @router.get("/{batch_id}/rows", response_model=list[InvoiceRowOut])
