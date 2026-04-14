@@ -391,3 +391,135 @@ class TestExportRegression:
         wb = openpyxl.load_workbook(buf)
         assert "Invoices" in wb.sheetnames
         assert "Sage 50" not in wb.sheetnames
+
+
+# ── Regression: condition_rules absent on lightweight column object (Defect E) ─
+
+class TestConditionalValueWithoutConditionRules:
+    """Defect E: render_template_sheet must not raise AttributeError when the
+    column object (e.g. a SimpleNamespace built in tests) lacks a
+    condition_rules attribute. The fix uses getattr(col, 'condition_rules', None)."""
+
+    def test_conditional_no_condition_rules_attr_falls_back_to_transform(self):
+        """Column has NO condition_rules attribute at all — must fall back to transform_rule."""
+        col = _make_column(
+            1, "Tax Code", "conditional_value",
+            source_field="tax_code",
+            transform_rule="default:T1",
+            col_order=0,
+        )
+        # _make_column produces a SimpleNamespace — condition_rules is absent by design
+        assert not hasattr(col, "condition_rules")
+        tpl = _make_template("T", [col])
+        _, rows = render_template_sheet(tpl, [_make_invoice_row(tax_code=None)])
+        # transform_rule default:T1 must apply
+        assert rows[0]["Tax Code"] == "T1"
+
+    def test_conditional_condition_rules_none_falls_back_to_transform(self):
+        """Column has condition_rules=None explicitly — must fall back to transform."""
+        col = _make_column(
+            2, "Tax Code", "conditional_value",
+            source_field="tax_code",
+            transform_rule="default:T2",
+            col_order=0,
+        )
+        col.condition_rules = None          # explicitly set to None
+        tpl = _make_template("T", [col])
+        _, rows = render_template_sheet(tpl, [_make_invoice_row(tax_code=None)])
+        assert rows[0]["Tax Code"] == "T2"
+
+    def test_conditional_condition_rules_empty_list_falls_back_to_transform(self):
+        """Empty condition_rules list is falsy — must still fall back to transform."""
+        col = _make_column(
+            3, "Tax Code", "conditional_value",
+            source_field="tax_code",
+            transform_rule="default:T3",
+            col_order=0,
+        )
+        col.condition_rules = []
+        tpl = _make_template("T", [col])
+        _, rows = render_template_sheet(tpl, [_make_invoice_row(tax_code=None)])
+        assert rows[0]["Tax Code"] == "T3"
+
+    def test_conditional_with_populated_condition_rules_evaluates_normally(self):
+        """When condition_rules is a non-empty list, conditions are evaluated as before."""
+        col = _make_column(
+            4, "Flag", "conditional_value",
+            source_field="currency",
+            col_order=0,
+        )
+        col.condition_rules = [
+            {"if_field": "currency", "operator": "eq", "value": "EUR", "output": "EURO"},
+            {"output": "OTHER"},
+        ]
+        tpl = _make_template("T", [col])
+        _, rows_eur = render_template_sheet(tpl, [_make_invoice_row(currency="EUR")])
+        _, rows_gbp = render_template_sheet(tpl, [_make_invoice_row(currency="GBP")])
+        assert rows_eur[0]["Flag"] == "EURO"
+        assert rows_gbp[0]["Flag"] == "OTHER"
+
+    def test_no_attribute_error_raised_without_condition_rules(self):
+        """Explicit check: calling render_template_sheet with a SimpleNamespace
+        column missing condition_rules must never raise AttributeError."""
+        col = _make_column(
+            5, "X", "conditional_value",
+            source_field="invoice_number",
+            col_order=0,
+        )
+        tpl = _make_template("T", [col])
+        try:
+            render_template_sheet(tpl, [_make_invoice_row()])
+        except AttributeError as exc:
+            pytest.fail(f"render_template_sheet raised AttributeError: {exc}")
+
+
+# ── Regression: Authorization header binding (Defect D) ──────────────────────
+
+class TestAuthorizationHeaderBinding:
+    """Defect D: review.py endpoints used plain `authorization: str | None = None`
+    which does NOT bind the HTTP Authorization header in FastAPI.
+
+    These tests verify the fix by inspecting the function signatures directly —
+    no running server required.
+    """
+
+    def test_current_user_flexible_authorization_uses_header(self):
+        """current_user_flexible must declare authorization via Header(...)."""
+        import inspect
+        from fastapi import Header
+        from app.routers.review import current_user_flexible
+
+        sig = inspect.signature(current_user_flexible)
+        param = sig.parameters.get("authorization")
+        assert param is not None, "current_user_flexible must have an 'authorization' parameter"
+        default = param.default
+        # FastAPI Header parameters are wrapped in FieldInfo; check the type name
+        assert "Header" in type(default).__name__ or hasattr(default, "alias"), (
+            f"'authorization' parameter must use Header(...), got {type(default).__name__}"
+        )
+
+    def test_file_info_authorization_uses_header(self):
+        """file_info must declare authorization via Header(...)."""
+        import inspect
+        from app.routers.review import file_info
+
+        sig = inspect.signature(file_info)
+        param = sig.parameters.get("authorization")
+        assert param is not None, "file_info must have an 'authorization' parameter"
+        default = param.default
+        assert "Header" in type(default).__name__ or hasattr(default, "alias"), (
+            f"file_info 'authorization' must use Header(...), got {type(default).__name__}"
+        )
+
+    def test_preview_authorization_uses_header(self):
+        """preview must declare authorization via Header(...)."""
+        import inspect
+        from app.routers.review import preview
+
+        sig = inspect.signature(preview)
+        param = sig.parameters.get("authorization")
+        assert param is not None, "preview must have an 'authorization' parameter"
+        default = param.default
+        assert "Header" in type(default).__name__ or hasattr(default, "alias"), (
+            f"preview 'authorization' must use Header(...), got {type(default).__name__}"
+        )

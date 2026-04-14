@@ -235,8 +235,9 @@ def render_template_sheet(
 
             elif ctype == "conditional_value":
                 raw = merged.get(col.source_field) if col.source_field else None
-                if col.condition_rules:
-                    result = _evaluate_conditions(col.condition_rules, merged, raw)
+                condition_rules = getattr(col, "condition_rules", None)
+                if condition_rules:
+                    result = _evaluate_conditions(condition_rules, merged, raw)
                 else:
                     result = apply_transform(raw, col.transform_rule)
                 out_row[heading] = _coerce_cell(result)

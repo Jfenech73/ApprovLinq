@@ -86,29 +86,48 @@ def apply_field_changes(
 
         force_added_flag = False
         if field == "supplier_name" and new_val:
-            exists = db.execute(
-                select(M.TenantSupplier).where(
-                    M.TenantSupplier.tenant_id == batch.tenant_id,
-                    M.TenantSupplier.name == new_val,
-                )
-            ).scalar_one_or_none()
+            supplier_q = select(M.TenantSupplier).where(
+                M.TenantSupplier.tenant_id == batch.tenant_id,
+                M.TenantSupplier.supplier_name == new_val,
+            )
+            if batch.company_id:
+                supplier_q = supplier_q.where(M.TenantSupplier.company_id == batch.company_id)
+            exists = db.execute(supplier_q).scalar_one_or_none()
             if not exists:
                 if not (force_add and note):
-                    raise ValueError("supplier_name not in master list; force_add=true and note required")
-                db.add(M.TenantSupplier(tenant_id=batch.tenant_id, name=new_val))
-                force_added_flag = True
+                    raise ValueError(
+                        "supplier_name not in master list; supply force_add=true and note, "
+                        "or add the supplier via the master-data management page."
+                    )
+                # Cannot safely auto-create a TenantSupplier: required fields
+                # (company_id, posting_account) are not available in this payload.
+                # Reject with an actionable error rather than inserting an incomplete row.
+                raise ValueError(
+                    f"Cannot force-add supplier '{new_val}': TenantSupplier requires "
+                    "company_id and posting_account. Add the supplier via the "
+                    "master-data management page first."
+                )
         if field == "nominal_account_code" and new_val:
-            exists = db.execute(
-                select(M.TenantNominalAccount).where(
-                    M.TenantNominalAccount.tenant_id == batch.tenant_id,
-                    M.TenantNominalAccount.code == new_val,
-                )
-            ).scalar_one_or_none()
+            nominal_q = select(M.TenantNominalAccount).where(
+                M.TenantNominalAccount.tenant_id == batch.tenant_id,
+                M.TenantNominalAccount.account_code == new_val,
+            )
+            if batch.company_id:
+                nominal_q = nominal_q.where(M.TenantNominalAccount.company_id == batch.company_id)
+            exists = db.execute(nominal_q).scalar_one_or_none()
             if not exists:
                 if not (force_add and note):
-                    raise ValueError("nominal_account_code not in master list; force_add=true and note required")
-                db.add(M.TenantNominalAccount(tenant_id=batch.tenant_id, code=new_val))
-                force_added_flag = True
+                    raise ValueError(
+                        "nominal_account_code not in master list; supply force_add=true and note, "
+                        "or add the nominal account via the master-data management page."
+                    )
+                # Cannot safely auto-create a TenantNominalAccount: required fields
+                # (company_id, account_name) are not available in this payload.
+                raise ValueError(
+                    f"Cannot force-add nominal account '{new_val}': TenantNominalAccount requires "
+                    "company_id and account_name. Add the nominal account via the "
+                    "master-data management page first."
+                )
 
         setattr(correction, field, new_val)
 

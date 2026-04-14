@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select, desc
@@ -25,7 +25,7 @@ router = APIRouter(prefix="/review", tags=["review"])
 
 def current_user_flexible(
     token: str | None = Query(default=None),
-    authorization: str | None = None,
+    authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
     """Resolve the current user from either the Authorization header (normal API
@@ -242,7 +242,7 @@ def mark_file_reviewed(batch_id: UUID, file_id: int,
         db.add(InvoiceRowFieldAudit(
             batch_id=batch.id, row_id=r.id, field_name="_file_reviewed",
             old_value=None, new_value="marked_reviewed",
-            action_type="mark_reviewed", user_id=user.id, note=None,
+            action="mark_reviewed", user_id=user.id, note=None,
         ))
         created += 1
     db.commit()
@@ -275,7 +275,7 @@ def _open_pdf_page_count(path: str) -> int:
 def file_info(
     file_id: int,
     token: str | None = Query(default=None),
-    authorization: str | None = None,
+    authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
     current_user_flexible(token=token, authorization=authorization, db=db)
@@ -291,7 +291,7 @@ def preview(
     file_id: int,
     page: int = 1,
     token: str | None = Query(default=None),
-    authorization: str | None = None,
+    authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
     current_user_flexible(token=token, authorization=authorization, db=db)
@@ -429,12 +429,15 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         raise HTTPException(404)
     supplier = None
     if row.supplier_name:
-        supplier = db.execute(
+        supplier_q = (
             select(M.TenantSupplier).where(
                 M.TenantSupplier.tenant_id == batch.tenant_id,
-                M.TenantSupplier.name == row.supplier_name,
+                M.TenantSupplier.supplier_name == row.supplier_name,
             )
-        ).scalar_one_or_none()
+        )
+        if batch.company_id:
+            supplier_q = supplier_q.where(M.TenantSupplier.company_id == batch.company_id)
+        supplier = db.execute(supplier_q).scalar_one_or_none()
     hint = RemapHint(
         tenant_id=batch.tenant_id, company_id=batch.company_id,
         supplier_id=supplier.id if supplier else None,
