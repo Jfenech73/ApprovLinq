@@ -792,6 +792,63 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             db.add(row)
                             inserted_rows += 1
                             total_rows += 1
+
+                            # ── BCRS / deposit duplicate row ──────────────
+                            # If the extractor detected a deposit or BCRS
+                            # surcharge component (validated amount from
+                            # validate_invoice or heuristic fallback), create
+                            # an additional row that isolates the surcharge
+                            # with net=vat=total=deposit_amount so it can be
+                            # posted as a separate line in the accounting system.
+                            _deposit_amt = r.get("deposit_component")
+                            if _deposit_amt and float(_deposit_amt) > 0:
+                                bcrs_row = InvoiceRow(
+                                    batch_id=batch_id,
+                                    tenant_id=batch.tenant_id,
+                                    company_id=batch.company_id,
+                                    source_file_id=invoice_file.id,
+                                    source_filename=invoice_file.original_filename,
+                                    page_no=r.get("page_no") or (page_index + 1),
+                                    supplier_name=supplier_name,
+                                    invoice_number=r.get("invoice_number"),
+                                    invoice_date=r.get("invoice_date"),
+                                    description=(
+                                        f"BCRS/Deposit surcharge — {float(_deposit_amt):.2f}"
+                                    ),
+                                    currency=r.get("currency"),
+                                    tax_code=None,
+                                    net_amount=float(_deposit_amt),
+                                    vat_amount=0.0,
+                                    total_amount=float(_deposit_amt),
+                                    method_used=r.get("method_used"),
+                                    confidence_score=r.get("confidence_score"),
+                                    validation_status="ok",
+                                    review_required=False,
+                                    review_priority=None,
+                                    review_reasons=None,
+                                    review_fields=None,
+                                    auto_approved=True,
+                                    page_quality_score=r.get("page_quality_score"),
+                                    supplier_match_method=r.get("supplier_match_method"),
+                                    totals_reconciliation_status="bcrs_row",
+                                    header_raw=r.get("header_raw"),
+                                    totals_raw=r.get("totals_raw"),
+                                    page_text_raw=None,
+                                )
+                                # Re-apply account suggestions so BCRS row
+                                # inherits nominal/posting codes where possible.
+                                _apply_account_suggestions(
+                                    db, tenant_id, batch.company_id, bcrs_row,
+                                    supplier_vat=supplier_vat,
+                                )
+                                db.add(bcrs_row)
+                                inserted_rows += 1
+                                total_rows += 1
+                                logger.debug(
+                                    "BCRS row created for page %s: amount=%.2f",
+                                    r.get("page_no"), float(_deposit_amt),
+                                )
+                            # ─────────────────────────────────────────────
                         processed_pages += 1
                         batch.page_count = processed_pages
                         batch.notes = f"Processing file {file_index}/{len(files)}: {invoice_file.original_filename} (page {page_index + 1}/{page_count})"
@@ -1047,7 +1104,64 @@ def get_batch_progress(batch_id: UUID, db: Session = Depends(get_db), tenant_id=
     }
 
 
-@router.get("/{batch_id}/export")
+@router.delete("/{batch_id}", status_code=200)
+def delete_batch(
+    batch_id: UUID,
+    db: Session = Depends(get_db),
+    tenant_id=Depends(current_tenant_id),
+    _user: User = Depends(current_user),
+):
+    """Permanently delete a batch and all batch-owned data.
+
+    Removes: InvoiceBatch, InvoiceFile, InvoiceRow, InvoiceRowCorrection,
+    InvoiceRowFieldAudit, BatchExportEvent records, and the uploaded files
+    folder on disk.
+
+    Does NOT remove: CorrectionRule, RemapHint, SupplierPattern — these are
+    global learning artifacts that belong to the tenant/company, not the batch.
+    """
+    batch = _get_batch_for_tenant(db, batch_id, tenant_id)
+
+    # Block deletion while the batch is actively being processed.
+    with _ACTIVE_BATCHES_LOCK:
+        if str(batch_id) in _ACTIVE_BATCHES:
+            raise HTTPException(
+                status_code=409,
+                detail="Batch is currently processing. Wait for processing to complete before deleting.",
+            )
+
+    # Collect the disk folder path BEFORE the DB delete so we still have it.
+    folder = _batch_folder(batch_id)
+
+    # Transactional DB delete.
+    # InvoiceRowCorrection and InvoiceRowFieldAudit have ondelete=CASCADE on
+    # their batch_id FK so they are removed automatically when InvoiceBatch is
+    # deleted. InvoiceRow and InvoiceFile also CASCADE from InvoiceBatch.
+    # BatchExportEvent has the same CASCADE. We do an explicit bulk-delete of
+    # InvoiceRow first because it is the largest table and we want the DELETE
+    # to be a simple filtered bulk op rather than ORM-loaded object deletes.
+    try:
+        db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch_id).delete(synchronize_session=False)
+        db.delete(batch)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("Batch delete DB error for %s: %s", batch_id, exc)
+        raise HTTPException(status_code=500, detail=f"Database deletion failed: {exc}") from exc
+
+    # Remove uploaded files from disk — non-fatal if already missing.
+    try:
+        if folder.exists():
+            import shutil
+            shutil.rmtree(folder, ignore_errors=True)
+            logger.info("Deleted batch folder: %s", folder)
+    except Exception as exc:
+        logger.warning("Could not remove batch folder %s: %s", folder, exc)
+
+    return {"ok": True, "deleted_batch_id": str(batch_id)}
+
+
+
 def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
     import pandas as pd
     from app.db.models import Company, Tenant

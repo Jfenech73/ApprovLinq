@@ -253,25 +253,52 @@ def mark_file_reviewed(batch_id: UUID, file_id: int,
 
 
 # ── PDF file info (page count) ────────────────────────────────────────────────
+def _resolve_file_path(raw_path: str) -> str:
+    """Return an absolute path string.
+
+    Files uploaded before the config was fixed may have a relative path stored
+    in the DB (e.g. 'data/uploads/batch-uuid/file.pdf').  Resolving against the
+    current working directory is still unreliable, so we also try resolving
+    against the configured upload root so old records keep working.
+    """
+    from pathlib import Path as _Path
+    p = _Path(raw_path)
+    if p.is_absolute():
+        return str(p)
+    # Try resolved against CWD first
+    resolved = p.resolve()
+    if resolved.exists():
+        return str(resolved)
+    # Try resolved against the configured upload root
+    from app.config import settings as _settings
+    alt = (_settings.upload_path.parent.parent / raw_path).resolve()
+    if alt.exists():
+        return str(alt)
+    # Return CWD-resolved path (will fail with a clear FileNotFoundError)
+    return str(resolved)
+
+
+# ── PDF file info (page count) ────────────────────────────────────────────────
 def _open_pdf_page_count(path: str) -> int:
+    resolved = _resolve_file_path(path)
     try:
         import pypdfium2 as pdfium
-        pdf = pdfium.PdfDocument(path)
+        pdf = pdfium.PdfDocument(resolved)
         try:
             return len(pdf)
         finally:
             pdf.close()
     except Exception as exc:
-        logger.warning("pypdfium2 could not open '%s' for page count: %s", path, exc)
+        logger.warning("pypdfium2 could not open '%s' for page count: %s", resolved, exc)
     try:
         import fitz
-        doc = fitz.open(path)
+        doc = fitz.open(resolved)
         try:
             return doc.page_count
         finally:
             doc.close()
     except Exception as exc:
-        logger.warning("PyMuPDF could not open '%s' for page count: %s", path, exc)
+        logger.warning("PyMuPDF could not open '%s' for page count: %s", resolved, exc)
         return 1
 
 
@@ -303,13 +330,15 @@ def preview(
     if not f:
         raise HTTPException(404, "File not found")
     import os
-    if not os.path.exists(f.file_path):
-        raise HTTPException(404, f"PDF missing from disk: {f.file_path}")
+    file_path = _resolve_file_path(f.file_path)
+    if not os.path.exists(file_path):
+        logger.error("Preview: file not found on disk. DB path=%s resolved=%s", f.file_path, file_path)
+        raise HTTPException(404, f"PDF missing from disk: {file_path}")
     # Prefer pypdfium2 (already a project dependency); fall back to PyMuPDF.
     errors = []
     try:
         import pypdfium2 as pdfium
-        pdf = pdfium.PdfDocument(f.file_path)
+        pdf = pdfium.PdfDocument(file_path)
         try:
             if page < 1 or page > len(pdf):
                 raise HTTPException(400, "Page out of range")
@@ -327,11 +356,11 @@ def preview(
         raise
     except Exception as e:
         logger.error("pypdfium2 preview failed for file %s (path=%s, page=%s): %s",
-                     file_id, f.file_path, page, e)
+                     file_id, file_path, page, e)
         errors.append(f"pypdfium2: {e}")
     try:
         import fitz
-        doc = fitz.open(f.file_path)
+        doc = fitz.open(file_path)
         if page < 1 or page > doc.page_count:
             doc.close()
             raise HTTPException(400, "Page out of range")
@@ -343,10 +372,10 @@ def preview(
         raise
     except Exception as e:
         logger.error("PyMuPDF preview failed for file %s (path=%s, page=%s): %s",
-                     file_id, f.file_path, page, e)
+                     file_id, file_path, page, e)
         errors.append(f"PyMuPDF: {e}")
     logger.error("Preview rendering failed completely for file %s path=%s: %s",
-                 file_id, f.file_path, " | ".join(errors))
+                 file_id, file_path, " | ".join(errors))
     raise HTTPException(500, "Preview rendering failed: " + " | ".join(errors))
 
 
@@ -355,6 +384,7 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
     """Return text inside the normalized (0-1) rectangle on the page.
     Tries PyMuPDF's text layer first (digital PDFs); if empty or unavailable,
     falls back to rendering + OCR via the configured OCR backend."""
+    file_path = _resolve_file_path(file_path)
     # 1) PyMuPDF text-layer extraction (fast, free, exact)
     try:
         import fitz

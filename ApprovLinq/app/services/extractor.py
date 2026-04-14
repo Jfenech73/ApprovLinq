@@ -2400,6 +2400,9 @@ def process_pdf_page(
         "header_raw":                 header_raw,
         "totals_raw":                 totals_raw,
         "page_text_raw":              page_text_raw,
+        # Expose deposit/BCRS component as a public key so the caller
+        # (_process_batch_job) can create the extra BCRS row.
+        "deposit_component":          extracted.get("_deposit_component"),
     })
     # Clean up internal temp keys
     for _k in ("_supplier_name_raw", "_date_parse_strategy", "_date_ambiguity_flag",

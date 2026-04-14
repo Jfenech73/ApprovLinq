@@ -441,6 +441,33 @@ $("reviewBtn").addEventListener("click", () => {
   }
   window.location.href = `/static/review.html?batch_id=${state.selectedBatchId}`;
 });
+
+$("deleteBatchBtn").addEventListener("click", async () => {
+  if (!state.selectedBatchId) return;
+  const name = $("selectedBatchName").textContent || state.selectedBatchId;
+  const confirmed = confirm(
+    `Permanently delete batch "${name}"?\n\n` +
+    `This will remove all rows, files, and corrections for this batch. ` +
+    `This cannot be undone.`
+  );
+  if (!confirmed) return;
+  const msg = $("deleteBatchMessage");
+  setInlineMessage(msg, "Deleting…");
+  try {
+    await api(`/batches/${state.selectedBatchId}`, { method: "DELETE" });
+    state.selectedBatchId = null;
+    $("selectedBatchPanel").classList.add("hidden");
+    $("selectedBatchEmpty").classList.remove("hidden");
+    const rowsTbody = $("rowsTableBody");
+    if (rowsTbody) rowsTbody.innerHTML = '<tr><td colspan="9" class="muted">Select a batch first.</td></tr>';
+    const filesTbody = $("filesTableBody");
+    if (filesTbody) filesTbody.innerHTML = '<tr><td colspan="6" class="muted">No files uploaded yet.</td></tr>';
+    await loadBatches();
+  } catch (error) {
+    setInlineMessage(msg, normalizeUiErrorMessage(error.message), "server-error");
+  }
+});
+
 const logoutBtn = document.getElementById("logoutBtn");
 if (logoutBtn) {
   logoutBtn.addEventListener("click", logoutAndGo);

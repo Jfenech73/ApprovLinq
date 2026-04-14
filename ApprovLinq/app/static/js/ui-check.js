@@ -24,6 +24,7 @@
       "batchName", "selectedBatchEmpty", "selectedBatchPanel", "selectedBatchId",
       "selectedBatchName", "selectedBatchStatus", "selectedBatchNotes",
       "batchScanModeGroup", "pdfFiles", "uploadBtn", "processBtn",
+      "deleteBatchBtn", "deleteBatchMessage",
       "filesTableBody", "batchesTableBody", "rowsTableBody",
       "refreshRowsBtn", "reviewBtn", "exportBtn", "pageMessage",
       "logoutBtn", "userName", "userTenant", "userAvatar",

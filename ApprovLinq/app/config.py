@@ -45,13 +45,13 @@ class Settings(BaseSettings):
 
     @property
     def upload_path(self) -> Path:
-        path = Path(self.upload_dir)
+        path = Path(self.upload_dir).resolve()
         path.mkdir(parents=True, exist_ok=True)
         return path
 
     @property
     def export_path(self) -> Path:
-        path = Path(self.export_dir)
+        path = Path(self.export_dir).resolve()
         path.mkdir(parents=True, exist_ok=True)
         return path
 
