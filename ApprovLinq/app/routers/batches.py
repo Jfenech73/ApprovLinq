@@ -185,8 +185,27 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     for pidx, pattern in enumerate(patterns):
         for match in pattern.finditer(summary_text):
             label_span = summary_text[max(0, match.start()-40):min(len(summary_text), match.end()+40)].lower()
-            if pidx == 2 and 'bcrs' not in label_span and 'summary' not in label_span and 'total' not in label_span and 'refundable' not in label_span:
-                continue
+            if pidx == 2:
+                # Plain "deposit" pattern: accept when the surrounding context contains
+                # known summary/totals keywords OR when the matched line itself is in a
+                # summary context (catches "Deposit Summary" laid out as separate lines).
+                has_context_window = (
+                    'bcrs' in label_span
+                    or 'summary' in label_span
+                    or 'total' in label_span
+                    or 'refundable' in label_span
+                )
+                # Find which collected line this match falls on
+                match_line = ""
+                pos = 0
+                for ln in lines:
+                    if pos + len(ln) >= match.start():
+                        match_line = ln
+                        break
+                    pos += len(ln) + 1  # +1 for the "\n" join
+                has_summary_line = _is_summary_context(match_line)
+                if not has_context_window and not has_summary_line:
+                    continue
             raw = match.group(1)
             try:
                 val = float(raw.replace(',', '.'))
@@ -211,8 +230,19 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
 
         plain_deposit_only = ('deposit' in low and 'bcrs' not in low and 'refundable' not in low and 'surcharge' not in low)
         neighborhood = ' '.join(lines[max(0, idx - 1): min(len(lines), idx + 2)]).lower()
-        if plain_deposit_only and not (_is_summary_context(line) or 'bcrs' in neighborhood or 'summary' in neighborhood or 'total' in neighborhood):
-            continue
+        if plain_deposit_only:
+            # Build a list of neighbouring lines that are themselves summary context
+            # (not body/item lines). This prevents the "Total" column header in an
+            # item table from acting as a false summary signal.
+            summary_neighbours = [
+                lines[nidx] for nidx in range(max(0, idx - 1), min(len(lines), idx + 2))
+                if nidx != idx and _is_summary_context(lines[nidx]) and not _is_body_or_item_context(lines[nidx])
+            ]
+            has_summary_neighbour = bool(summary_neighbours)
+            has_bcrs_nearby = 'bcrs' in neighborhood
+            has_summary_keyword = 'summary' in neighborhood
+            if not (_is_summary_context(line) or has_bcrs_nearby or has_summary_keyword or has_summary_neighbour):
+                continue
 
         same_line_vals = _parse_money_candidates(line)
         if same_line_vals:
@@ -1036,6 +1066,16 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 db.add(bcrs_row)
                                 inserted_rows += 1
                                 total_rows += 1
+                                # Correct the original row total so it no longer includes
+                                # the BCRS component.  After the split:
+                                #   original.total = net + vat  (BCRS excluded)
+                                #   bcrs_row.total = bcrs_amount
+                                #   original.total + bcrs_row.total = real invoice total
+                                _net = round(float(row.net_amount or 0.0), 2)
+                                _vat = round(float(row.vat_amount or 0.0), 2)
+                                _corrected_total = round(_net + _vat, 2)
+                                if _corrected_total >= 0 and _corrected_total < round(float(row.total_amount or 0.0), 2):
+                                    row.total_amount = _corrected_total
                         processed_pages += 1
                         batch.page_count = processed_pages
                         batch.notes = f"Processing file {file_index}/{len(files)}: {invoice_file.original_filename} (page {page_index + 1}/{page_count})"
