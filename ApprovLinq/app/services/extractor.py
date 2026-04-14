@@ -833,6 +833,7 @@ def _clean_ocr_supplier_name(name: str | None) -> str | None:
       "jbl\\nJoseph Borg Ltd."                     → "Joseph Borg Ltd."
       "฿ Br Supply Co."                            → "Br Supply Co."
       "N\\nN Calleja Trading"                       → "N Calleja Trading"
+      "Br Supply Co. Br Supply Co"                 → "Br Supply Co."  (full-name repeat)
     """
     if not name:
         return name
@@ -850,6 +851,30 @@ def _clean_ocr_supplier_name(name: str | None) -> str | None:
         name = m.group(2)
     # Collapse multiple spaces
     name = re.sub(r"\s+", " ", name).strip()
+    # Detect full-name OCR duplication: "Acme Ltd. Acme Ltd" or "Acme Ltd Acme Ltd"
+    # Strategy: split on sentence boundaries / common separators and check if the
+    # first recognisable segment repeats.
+    if len(name) > 8:
+        # Try splitting on ". " or "  " (double-space OCR artefact)
+        for sep in (". ", "  "):
+            parts = name.split(sep, 1)
+            if len(parts) == 2:
+                first, rest = parts[0].strip(), parts[1].strip()
+                # If rest starts with the same significant tokens as first, it's a duplicate
+                first_norm = re.sub(r"[^A-Za-z0-9]", "", first).lower()
+                rest_norm  = re.sub(r"[^A-Za-z0-9]", "", rest).lower()
+                if (
+                    len(first_norm) >= 4
+                    and len(rest_norm) >= 4
+                    and (
+                        first_norm == rest_norm
+                        or first_norm.startswith(rest_norm[:max(4, len(rest_norm)//2)])
+                        or rest_norm.startswith(first_norm[:max(4, len(first_norm)//2)])
+                    )
+                ):
+                    # Keep the longer version (has punctuation like "Ltd.")
+                    name = first if len(first) >= len(rest) else rest
+                    break
     return name if len(name) >= 2 else None
 
 
@@ -912,7 +937,17 @@ def summarise_line_items_rule_based(line_items_text: str) -> str:
         ("fuel and related vehicle consumables", ["fuel", "diesel", "petrol", "unleaded", "lubricant"]),
         ("office supplies and stationery", ["paper", "stationery", "toner", "ink", "folder", "pen", "notebook"]),
         ("cleaning supplies and hygiene products", ["detergent", "cleaner", "soap", "bleach", "sanitiser", "tissue"]),
-        ("food and catering supplies", ["food", "catering", "beverage", "drink", "snack", "bread", "meat"]),
+        # Food/beverage expanded for Malta hospitality/wholesale suppliers
+        ("food and beverage supplies", [
+            "food", "catering", "beverage", "drink", "snack", "bread", "meat",
+            "poultry", "chicken", "beef", "pork", "fish", "seafood", "dairy",
+            "cheese", "butter", "milk", "cream", "yoghurt", "eggs",
+            "whisky", "whiskey", "vodka", "gin", "rum", "wine", "beer",
+            "spirits", "alcohol", "champagne", "prosecco", "brandy", "liqueur",
+            "scotch", "bourbon", "lager", "cider",
+            "coffee", "tea", "juice", "water", "soft drink", "energy drink",
+            "ice cream", "frozen", "chilled", "deli", "produce",
+        ]),
         ("vehicle parts and maintenance items", ["filter", "brake", "tyre", "battery", "engine", "service kit"]),
         ("electrical supplies and components", ["cable", "socket", "switch", "lamp", "electrical", "fuse"]),
         ("building materials and hardware items", ["cement", "paint", "screw", "bolt", "hardware", "tool"]),
@@ -927,6 +962,14 @@ def summarise_line_items_rule_based(line_items_text: str) -> str:
 
     lines = [ln.strip() for ln in line_items_text.splitlines() if ln.strip()]
     if lines:
+        # Use first non-numeric line for a more readable description
+        for line in lines[:3]:
+            # Skip lines that are purely amounts/codes
+            if re.search(r"^[\d\s.,€£$%]+$", line):
+                continue
+            clean = re.sub(r"\s{2,}", " ", line).strip()
+            if len(clean) > 4:
+                return limit_to_20_words(clean)
         return limit_to_20_words(" ".join(lines[:2]))
 
     return "Invoice goods or services"
@@ -988,7 +1031,9 @@ def simple_extract(
 
     _curr = r"(?:EUR|GBP|USD|€|£|\$)?"
     net_raw = first_match([
-        rf"(?:subtotal|sub[\s\-]?total|net[\s\-]?amount|amount\s+excl(?:uding)?\.?\s*(?:vat|tax)?|excl(?:uding)?\.?\s*(?:vat|tax)|net\s+total|taxable[\s\-]?amount|amount\s+before\s+(?:vat|tax))\s*[:\-]?\s*{_curr}\s*([0-9.,]+)"
+        rf"(?:subtotal|sub[\s\-]?total|net[\s\-]?amount|amount\s+excl(?:uding)?\.?\s*(?:vat|tax)?|excl(?:uding)?\.?\s*(?:vat|tax)|net\s+total|taxable[\s\-]?amount|amount\s+before\s+(?:vat|tax))\\s*[:\\-]?\\s*{_curr}\\s*([0-9.,]+)",
+        # Cash sale / receipt style: "Sub Total" or "Sub-Total"
+        rf"(?:sub[\s\-]total|nett)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)",
     ], text)
     # VAT / tax patterns — covers V.A.T., VAT@rate%, IVA, tax amount, value added tax,
     # and standalone "vat" or "tax" followed by a currency amount.
@@ -1005,6 +1050,8 @@ def simple_extract(
     total_raw = first_match([
         # Specific multi-word labels first (more precise)
         rf"(?:amount due|balance due|grand total|total due|total amount|invoice total|total incl\.?\s*(?:vat|tax)?)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)",
+        # Cash-sale / receipt style: "Total to Pay", "Total Payable", "Amount to Pay"
+        rf"(?:total\s+to\s+pay|total\s+payable|amount\s+to\s+pay|amount\s+payable|total\s+inc(?:l(?:uding)?)?\.?\s*(?:vat|tax)?)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)",
         # Generic "total" label
         rf"(?:total)\s*[:\-]?\s*{_curr}\s*([0-9.,]+)",
         # Standalone "amount" as a last resort (common on subscription/SaaS invoices)
@@ -2161,6 +2208,30 @@ def process_pdf_page(
                 is_dep, dep_amt = _check_deposit_component(net_s3, vat_s3, tot_s3)
                 if is_dep:
                     extracted["_deposit_component"] = dep_amt
+
+    # 3b-ext — Text-evidence BCRS/deposit scan
+    #   If the page text explicitly mentions a BCRS or deposit amount, extract
+    #   it directly rather than relying solely on the mismatch heuristic.
+    #   This fires even when totals are balanced (e.g. net already excludes deposit).
+    if not extracted.get("_deposit_component"):
+        _page_text_for_bcrs = final_text or ""
+        # Patterns: "BCRS 0.50", "BCRS: 0.50", "deposit 1.20", "returnable 0.25"
+        _bcrs_patterns = [
+            r"\bBCRS\b\s*[:\-]?\s*(?:EUR|€)?\s*([0-9]+[.,][0-9]{2})",
+            r"\bdeposit\b\s*[:\-]?\s*(?:surcharge\s*)?(?:EUR|€)?\s*([0-9]+[.,][0-9]{2})",
+            r"\breturnable\b\s*[:\-]?\s*(?:EUR|€)?\s*([0-9]+[.,][0-9]{2})",
+        ]
+        for _bp in _bcrs_patterns:
+            _bm = re.search(_bp, _page_text_for_bcrs, re.IGNORECASE)
+            if _bm:
+                _bcrs_val = parse_amount(_bm.group(1))
+                if _bcrs_val and 0.01 <= _bcrs_val <= 50.0:
+                    extracted["_deposit_component"] = _bcrs_val
+                    logger.debug(
+                        "Text-evidence BCRS detected on page %d: %.2f",
+                        page_index, _bcrs_val,
+                    )
+                    break
 
     # 3c — Supplier name normalisation
     #      First apply the lightweight OCR artefact removal and casing fix,

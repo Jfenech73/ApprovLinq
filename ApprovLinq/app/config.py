@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     upload_dir: str = "./data/uploads"
     export_dir: str = "./data/exports"
+    file_retention_days: int = 5   # uploaded PDFs and exported XLSXs older than this are removed
 
     # OCR
     ocr_provider: str = "none"   # none | ocr_space | paddleocr

@@ -1161,7 +1161,7 @@ def delete_batch(
     return {"ok": True, "deleted_batch_id": str(batch_id)}
 
 
-
+@router.get("/{batch_id}/export")
 def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
     import pandas as pd
     from app.db.models import Company, Tenant

@@ -53,12 +53,8 @@ async function load() {
     if (state.selected != null) {
       loadAudit(state.selected);
       await ensurePageCount();
-      // When arriving from "Review now", auto-enable remap mode so the PDF
-      // preview opens immediately and the user can start region-selecting.
-      if (fileFilterId) {
-        const cb = $("remapMode");
-        if (cb && !cb.checked) { cb.checked = true; cb.dispatchEvent(new Event("change")); }
-      }
+      // Remap mode is intentionally NOT auto-enabled on load.
+      // Users enable it manually when they need region selection.
     }
   } catch (e) { msg("Load failed: " + e.message, "error"); }
 }
@@ -387,12 +383,8 @@ document.addEventListener("click", (e) => {
   const el = e.target.closest("#rowEditor [data-field]");
   if (!el) return;
   setRemapField(el.getAttribute("data-field"));
-  // If the user clicked a low-confidence / flagged field, auto-activate remap
-  // mode so the PDF preview opens and they can re-select the region directly.
-  if (el.classList.contains("flagged-field")) {
-    const cb = $("remapMode");
-    if (!cb.checked) { cb.checked = true; cb.dispatchEvent(new Event("change")); }
-  }
+  // Remap is NOT auto-enabled when a flagged field is clicked — user must
+  // enable remap mode explicitly.
 });
 
 $("remapMode").addEventListener("change", async (e) => {
