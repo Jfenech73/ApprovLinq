@@ -1,3 +1,11 @@
+// Analytics page JS
+// Depends on: common.js (apiFetch, escapeHtml, setMessage, ensureAuth,
+//             getSessionInfo, populateTenantSelector)
+// Script load order in analytics.html: common.js → ap-ui.js → analytics.js
+// ap-ui.js runs first so the shell (and the live [data-ap-page-body] node
+// containing tenantSelector / companySelector) is fully in the DOM by the
+// time this file executes.
+
 let monthlyChart = null;
 let suppliersChart = null;
 
@@ -17,6 +25,7 @@ function fmtPct(v) {
 
 async function loadCompaniesAnalytics() {
   const sel = document.getElementById("companySelector");
+  if (!sel) return [];
   try {
     const companies = await apiFetch("/tenant/companies");
     sel.innerHTML = companies.length
@@ -39,11 +48,12 @@ async function loadAnalytics(companyId) {
       apiFetch(`/analytics/top-suppliers?company_id=${companyId}&limit=10`),
     ]);
 
-    document.getElementById("statTotalRows").textContent = Number(summary.total_rows).toLocaleString();
-    document.getElementById("statTotalSpend").textContent = fmt(summary.total_spend);
-    document.getElementById("statDistinctSuppliers").textContent = Number(summary.distinct_suppliers).toLocaleString();
-    document.getElementById("statNeedsReview").textContent = Number(summary.needs_review).toLocaleString();
-    document.getElementById("statAvgConfidence").textContent = fmtPct(summary.avg_confidence);
+    const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    set("statTotalRows",        Number(summary.total_rows).toLocaleString());
+    set("statTotalSpend",       fmt(summary.total_spend));
+    set("statDistinctSuppliers",Number(summary.distinct_suppliers).toLocaleString());
+    set("statNeedsReview",      Number(summary.needs_review).toLocaleString());
+    set("statAvgConfidence",    fmtPct(summary.avg_confidence));
 
     renderMonthlyChart(monthly);
     renderSuppliersChart(top);
@@ -55,14 +65,15 @@ async function loadAnalytics(companyId) {
 
 function renderMonthlyChart(data) {
   const emptyEl = document.getElementById("monthlyEmpty");
-  const canvas = document.getElementById("monthlyChart");
+  const canvas  = document.getElementById("monthlyChart");
+  if (!canvas) return;
   if (!data || data.length === 0) {
     canvas.style.display = "none";
-    emptyEl.style.display = "block";
+    if (emptyEl) emptyEl.style.display = "block";
     return;
   }
   canvas.style.display = "";
-  emptyEl.style.display = "none";
+  if (emptyEl) emptyEl.style.display = "none";
 
   if (monthlyChart) monthlyChart.destroy();
   monthlyChart = new Chart(canvas.getContext("2d"), {
@@ -103,14 +114,15 @@ function renderMonthlyChart(data) {
 
 function renderSuppliersChart(data) {
   const emptyEl = document.getElementById("suppliersEmpty");
-  const canvas = document.getElementById("suppliersChart");
+  const canvas  = document.getElementById("suppliersChart");
+  if (!canvas) return;
   if (!data || data.length === 0) {
     canvas.style.display = "none";
-    emptyEl.style.display = "block";
+    if (emptyEl) emptyEl.style.display = "block";
     return;
   }
   canvas.style.display = "";
-  emptyEl.style.display = "none";
+  if (emptyEl) emptyEl.style.display = "none";
 
   if (suppliersChart) suppliersChart.destroy();
   suppliersChart = new Chart(canvas.getContext("2d"), {
@@ -145,30 +157,42 @@ function renderSuppliersChart(data) {
 async function initAnalyticsPage() {
   if (!ensureAuth()) return;
   try {
-    const session = await getSessionInfo();
-    const platformLink = document.getElementById("platformAdminLink");
-    if (platformLink && String(session.role || "").toLowerCase() === "admin") {
-      platformLink.classList.remove("hidden");
-    }
-
+    // populateTenantSelector sets the active X-Tenant-Id in localStorage so
+    // subsequent apiFetch calls (/tenant/companies, /analytics/*) are scoped
+    // to the right tenant automatically via authHeaders().
     await populateTenantSelector("tenantSelector");
     const companies = await loadCompaniesAnalytics();
     if (companies.length) {
       await loadAnalytics(companies[0].id);
+    } else {
+      setMessage("pageMessage", "No companies found for this tenant.", "");
     }
   } catch (err) {
     setMessage("pageMessage", err.message || "Failed to initialise page.", "server-error");
   }
 }
 
-document.getElementById("companySelector").addEventListener("change", (e) => {
-  if (e.target.value) loadAnalytics(e.target.value);
-});
+// ── Selector change handlers ──────────────────────────────────────────────────
+// These elements are guaranteed to exist at this point because:
+//   1. They are declared in analytics.html inside [data-ap-page-body]
+//   2. ap-ui.js runs before this script, moves the live node into the shell
+//      (preserving it), so getElementById() finds the real nodes here.
 
-document.getElementById("tenantSelector").addEventListener("change", async () => {
-  const companies = await loadCompaniesAnalytics();
-  if (companies.length) loadAnalytics(companies[0].id);
-});
+const _companySel = document.getElementById("companySelector");
+if (_companySel) {
+  _companySel.addEventListener("change", (e) => {
+    if (e.target.value) loadAnalytics(e.target.value);
+  });
+}
+
+const _tenantSel = document.getElementById("tenantSelector");
+if (_tenantSel) {
+  _tenantSel.addEventListener("change", async () => {
+    const companies = await loadCompaniesAnalytics();
+    if (companies.length) loadAnalytics(companies[0].id);
+    else setMessage("pageMessage", "No companies found for this tenant.", "");
+  });
+}
 
 // logoutBtn is injected by ap-ui.js shell — wired there via logoutAndGo
 

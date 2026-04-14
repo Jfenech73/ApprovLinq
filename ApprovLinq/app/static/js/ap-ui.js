@@ -119,11 +119,15 @@
     try { opts = JSON.parse(root.getAttribute("data-ap-shell") || "{}"); } catch {}
     const active = opts.active || "";
     const crumb = opts.crumb || [];
+
+    // ── KEY FIX ──────────────────────────────────────────────────────────────
+    // Detach the live [data-ap-page-body] node BEFORE we touch the DOM so we
+    // can re-attach it inside the new shell. Using the live node (rather than
+    // body.innerHTML) preserves all event listeners that page scripts already
+    // bound to elements inside it.
     const body = document.querySelector("[data-ap-page-body]");
-    const bodyHtml = body ? body.innerHTML : "";
-    // Remove the original body node so its content doesn't render twice —
-    // we're about to inject a fresh copy inside the shell.
     if (body && body.parentNode) body.parentNode.removeChild(body);
+    // ─────────────────────────────────────────────────────────────────────────
 
     const navHtml = NAV.map(n => {
       if (n.section) return `<div class="ap-nav-section">${n.section}</div>`;
@@ -139,6 +143,7 @@
       return sep + inner;
     }).join("");
 
+    // Build the shell scaffold via innerHTML (no page-content goes in here).
     root.outerHTML = `
       <div class="ap-shell">
         <aside class="ap-side">
@@ -157,16 +162,22 @@
             </button>
           </div>
         </aside>
-        <div class="ap-main">
+        <div class="ap-main" id="_apMainRegion">
           <div class="ap-topbar">
             <div class="ap-crumb">${crumbHtml}</div>
             <div class="ap-top-actions">
               <button class="ap-theme-toggle" data-ap-theme-toggle type="button" aria-label="Toggle theme"></button>
             </div>
           </div>
-          ${bodyHtml}
         </div>
       </div>`;
+
+    // Re-attach the live page-body node into the new .ap-main container so
+    // all previously-bound listeners remain intact.
+    const main = document.getElementById("_apMainRegion");
+    if (main && body) {
+      main.appendChild(body);
+    }
     // Re-render logos & rewire theme toggle since we replaced the DOM
     renderLogos();
     wireThemeToggle();

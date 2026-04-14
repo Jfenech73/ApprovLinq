@@ -17,6 +17,13 @@
     <div class="ap-page">
 <div id="pageMessage" class="message"></div>
 
+      <div class="toolbar" style="margin-bottom:16px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <label for="tenantSelector" class="sr-only">Tenant</label>
+        <select id="tenantSelector" class="ap-select" style="min-width:180px;" aria-label="Tenant"></select>
+        <label for="companySelector" class="sr-only">Company</label>
+        <select id="companySelector" class="ap-select" style="min-width:200px;" aria-label="Company"></select>
+      </div>
+
       <main class="stack" style="gap:24px; padding: 0 0 40px 0;">
 
         <div class="stat-grid">
@@ -64,7 +71,7 @@
     </div>
   </div>
   <script src="/static/js/common.js"></script>
-  <script src="/static/js/analytics.js"></script>
   <script src="/static/js/ap-ui.js"></script>
+  <script src="/static/js/analytics.js"></script>
 </body>
 </html>
