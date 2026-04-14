@@ -304,30 +304,31 @@ function reviewUrl(batchId, fileId) {
 
 // Minimal toast implementation that stacks, auto-dismisses, and supports an
 // action link. Uses a single container that we create on demand.
+// Appearance is driven entirely by CSS classes (ap-toast, ap-toast-link,
+// ap-toast-close) using --ap-toast-* tokens so both themes are covered.
 function showToast(message, kind, action) {
   let host = document.getElementById("toastHost");
   if (!host) {
     host = document.createElement("div");
     host.id = "toastHost";
-    host.style.cssText = "position:fixed;top:16px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;";
     document.body.appendChild(host);
   }
   const t = document.createElement("div");
-  t.className = `toast toast-${kind || "info"}`;
-  t.style.cssText = "background:#fffbea;border:1px solid #f0c36d;color:#663c00;padding:10px 14px;border-radius:8px;box-shadow:0 4px 10px rgba(0,0,0,.08);min-width:260px;max-width:360px;font-size:13px;display:flex;gap:10px;align-items:center;";
-  const msg = document.createElement("div");
-  msg.style.flex = "1"; msg.textContent = message;
-  t.appendChild(msg);
+  t.className = `ap-toast ap-toast-${kind || "info"}`;
+  const msgEl = document.createElement("div");
+  msgEl.style.flex = "1";
+  msgEl.textContent = message;
+  t.appendChild(msgEl);
   if (action && action.href) {
     const a = document.createElement("a");
     a.href = action.href; a.target = "_blank"; a.rel = "noopener";
     a.textContent = action.label || "Open";
-    a.style.cssText = "font-weight:600;color:#1a46b8;text-decoration:underline;";
+    a.className = "ap-toast-link";
     t.appendChild(a);
   }
   const x = document.createElement("button");
   x.type = "button"; x.textContent = "×";
-  x.style.cssText = "background:none;border:0;font-size:18px;cursor:pointer;color:#663c00;";
+  x.className = "ap-toast-close";
   x.onclick = () => t.remove();
   t.appendChild(x);
   host.appendChild(t);
