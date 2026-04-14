@@ -51,6 +51,7 @@ def export_batch_corrected(
     template_sheet=None,
     nominal_account_map: dict[str, str] | None = None,
     batch_metadata: dict | None = None,
+    export_file_path: str | None = None,
 ) -> BytesIO:
     """Render the workbook with corrected values, append audit sheet, log event."""
     rows = _build_corrected_rows(db, batch)
@@ -93,6 +94,7 @@ def export_batch_corrected(
     ev = BatchExportEvent(
         batch_id=batch.id, export_version=next_version,
         exported_by=user.id, exported_at=datetime.utcnow(),
+        file_path=export_file_path,
         row_count=len(rows),
     )
     db.add(ev)

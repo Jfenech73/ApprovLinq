@@ -27,6 +27,8 @@ function msg(text, kind) {
 
 async function load() {
   if (!batchId) { msg("Missing batch_id in URL", "error"); return; }
+  const remapToggle = $("remapMode");
+  if (remapToggle) remapToggle.checked = false;
   try {
     const r = await fetch(`/review/batches/${batchId}`, { headers: hdrs() });
     if (!r.ok) throw new Error(await r.text());

@@ -31,6 +31,7 @@ from app.services.corrected_exporter import export_batch_corrected
 # <<< REVIEW_PACK corrected_export_import
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
 from app.services.template_render_service import render_template_sheet, resolve_effective_template
+from app.utils.storage import batch_upload_folder, batch_export_folder
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +45,7 @@ _ACTIVE_BATCHES_LOCK = Lock()
 
 
 def _batch_folder(batch_id: UUID) -> Path:
-    folder = settings.upload_path / str(batch_id)
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
+    return batch_upload_folder(batch_id)
 
 
 def _set_active(batch_id: UUID) -> bool:
@@ -1229,6 +1228,9 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
         template_sheet_arg = None
 
     # >>> REVIEW_PACK export_wiring
+    safe_name = re.sub(r"[^\w\-. ]", "_", batch.batch_name or "batch").strip()
+    filename = f"{safe_name}_{batch.id}.xlsx"
+    export_path = batch_export_folder(batch.id) / filename
     workbook_bytes = export_batch_corrected(
         db,
         batch=batch,
@@ -1236,11 +1238,11 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
         template_sheet=template_sheet_arg,
         nominal_account_map=nominal_account_map,
         batch_metadata=batch_metadata,
+        export_file_path=str(export_path),
     )
+    export_path.write_bytes(workbook_bytes.getvalue())
     db.commit()
     # <<< REVIEW_PACK export_wiring
-    safe_name = re.sub(r"[^\w\-. ]", "_", batch.batch_name or "batch").strip()
-    filename = f"{safe_name}_{batch.id}.xlsx"
     encoded = urllib.parse.quote(filename, safe="")
     return StreamingResponse(
         iter([workbook_bytes.getvalue()]),

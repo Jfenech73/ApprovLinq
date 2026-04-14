@@ -170,6 +170,58 @@ def _check_deposit_component(
     return False, 0.0
 
 
+
+
+def _totals_summary_text(page_text: str) -> str:
+    text = page_text or ""
+    if not text:
+        return ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    relevant = []
+    summary_markers = ("bcrs", "deposit", "surcharge", "summary", "subtotal", "total", "tax", "vat", "net")
+    for ln in lines:
+        low = ln.lower()
+        if any(marker in low for marker in summary_markers):
+            relevant.append(ln)
+    tail = lines[-12:]
+    merged = []
+    for ln in relevant + tail:
+        if ln not in merged:
+            merged.append(ln)
+    return "\n".join(merged)
+
+
+def _extract_bcrs_amount_from_summary(page_text: str, net: float | None = None, vat: float | None = None, total: float | None = None) -> float | None:
+    summary = _totals_summary_text(page_text)
+    if not summary:
+        return None
+    labels = ("bcrs", "deposit", "surcharge", "returnable")
+    candidates: list[tuple[int, float]] = []
+    for line in summary.splitlines():
+        low = line.lower()
+        if not any(label in low for label in labels):
+            continue
+        for m in re.finditer(r"([0-9]+[.,][0-9]{2})", line):
+            val = parse_amount(m.group(1))
+            if val is None or not (0.01 <= val <= 50.0):
+                continue
+            score = 0
+            if any(tok in low for tok in ("total", "summary", "deposit summary", "invoice summary", "tax summary")):
+                score += 3
+            if low.startswith(("bcrs", "deposit", "surcharge", "returnable")):
+                score += 3
+            # same-line evidence beats nearby tail numbers
+            score += 2
+            if net is not None and vat is not None and total is not None:
+                if abs((float(net) + float(vat) + float(val)) - float(total)) <= 0.15:
+                    score += 5
+            candidates.append((score, float(val)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+    return candidates[0][1]
 def _collect_review_reasons(
     extracted: dict[str, Any],
     validation_result: dict[str, Any] | None,
@@ -2214,24 +2266,18 @@ def process_pdf_page(
     #   it directly rather than relying solely on the mismatch heuristic.
     #   This fires even when totals are balanced (e.g. net already excludes deposit).
     if not extracted.get("_deposit_component"):
-        _page_text_for_bcrs = final_text or ""
-        # Patterns: "BCRS 0.50", "BCRS: 0.50", "deposit 1.20", "returnable 0.25"
-        _bcrs_patterns = [
-            r"\bBCRS\b\s*[:\-]?\s*(?:EUR|€)?\s*([0-9]+[.,][0-9]{2})",
-            r"\bdeposit\b\s*[:\-]?\s*(?:surcharge\s*)?(?:EUR|€)?\s*([0-9]+[.,][0-9]{2})",
-            r"\breturnable\b\s*[:\-]?\s*(?:EUR|€)?\s*([0-9]+[.,][0-9]{2})",
-        ]
-        for _bp in _bcrs_patterns:
-            _bm = re.search(_bp, _page_text_for_bcrs, re.IGNORECASE)
-            if _bm:
-                _bcrs_val = parse_amount(_bm.group(1))
-                if _bcrs_val and 0.01 <= _bcrs_val <= 50.0:
-                    extracted["_deposit_component"] = _bcrs_val
-                    logger.debug(
-                        "Text-evidence BCRS detected on page %d: %.2f",
-                        page_index, _bcrs_val,
-                    )
-                    break
+        _bcrs_val = _extract_bcrs_amount_from_summary(
+            final_text or "",
+            extracted.get("net_amount"),
+            extracted.get("vat_amount"),
+            extracted.get("total_amount"),
+        )
+        if _bcrs_val:
+            extracted["_deposit_component"] = _bcrs_val
+            logger.debug(
+                "Summary-area BCRS detected on page %d: %.2f",
+                page_index, _bcrs_val,
+            )
 
     # 3c — Supplier name normalisation
     #      First apply the lightweight OCR artefact removal and casing fix,
