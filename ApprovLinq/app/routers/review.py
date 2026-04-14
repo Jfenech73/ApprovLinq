@@ -1,6 +1,7 @@
 """Review, correction, audit, remap, rules, reopen, preview routes."""
 from __future__ import annotations
 import io
+import logging
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -19,6 +20,8 @@ from app.db.session import get_db
 from app.routers.auth import current_user
 from app.utils.security import session_token_hash
 from app.services import correction_service as cs
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/review", tags=["review"])
 
@@ -258,8 +261,8 @@ def _open_pdf_page_count(path: str) -> int:
             return len(pdf)
         finally:
             pdf.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("pypdfium2 could not open '%s' for page count: %s", path, exc)
     try:
         import fitz
         doc = fitz.open(path)
@@ -267,7 +270,8 @@ def _open_pdf_page_count(path: str) -> int:
             return doc.page_count
         finally:
             doc.close()
-    except Exception:
+    except Exception as exc:
+        logger.warning("PyMuPDF could not open '%s' for page count: %s", path, exc)
         return 1
 
 
@@ -322,6 +326,8 @@ def preview(
     except HTTPException:
         raise
     except Exception as e:
+        logger.error("pypdfium2 preview failed for file %s (path=%s, page=%s): %s",
+                     file_id, f.file_path, page, e)
         errors.append(f"pypdfium2: {e}")
     try:
         import fitz
@@ -336,8 +342,12 @@ def preview(
     except HTTPException:
         raise
     except Exception as e:
+        logger.error("PyMuPDF preview failed for file %s (path=%s, page=%s): %s",
+                     file_id, f.file_path, page, e)
         errors.append(f"PyMuPDF: {e}")
-    raise HTTPException(500, "Preview rendering failed. Tried: " + " | ".join(errors))
+    logger.error("Preview rendering failed completely for file %s path=%s: %s",
+                 file_id, f.file_path, " | ".join(errors))
+    raise HTTPException(500, "Preview rendering failed: " + " | ".join(errors))
 
 
 # ── Read text from a region of a page ─────────────────────────────────────────
