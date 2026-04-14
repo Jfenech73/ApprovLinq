@@ -131,8 +131,9 @@ def _collect_summary_region_lines(payload: dict) -> list[str]:
     if page_text:
         page_lines = [ln.strip() for ln in page_text.splitlines() if ln.strip()]
         if page_lines:
-            start_idx = max(0, int(len(page_lines) * 0.6))
+            start_idx = max(0, int(len(page_lines) * 0.5))
             lines.extend(page_lines[start_idx:])
+            lines.extend(page_lines[-20:])
     deduped: list[str] = []
     seen: set[str] = set()
     for ln in lines:
@@ -161,50 +162,112 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
         return None
 
     label_re = re.compile(r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit|deposit|surcharge)\b", re.I)
+    summary_text = "\n".join(lines)
     ranked: list[tuple[int, float]] = []
 
+    def _add_candidate(score: int, val: float | None) -> None:
+        if val is None:
+            return
+        try:
+            f = round(float(val), 2)
+        except Exception:
+            return
+        if f <= 0:
+            return
+        ranked.append((score, f))
+
+    # Pass 1: regex extraction over the whole summary text, useful when OCR collapses rows.
+    patterns = [
+        re.compile(r"(?is)\bbcrs(?:\s+refundable)?(?:\s+deposit)?\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
+        re.compile(r"(?is)\brefundable\s+deposit\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
+        re.compile(r"(?is)\bdeposit\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
+    ]
+    for pidx, pattern in enumerate(patterns):
+        for match in pattern.finditer(summary_text):
+            label_span = summary_text[max(0, match.start()-40):min(len(summary_text), match.end()+40)].lower()
+            if pidx == 2 and 'bcrs' not in label_span and 'summary' not in label_span and 'total' not in label_span and 'refundable' not in label_span:
+                continue
+            raw = match.group(1)
+            try:
+                val = float(raw.replace(',', '.'))
+            except Exception:
+                continue
+            score = 18 if pidx == 0 else 16 if pidx == 1 else 12
+            if total_amount is not None and net_amount is not None and vat_amount is not None:
+                if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
+                    score += 12
+                elif total_amount > 0 and 0 < val < total_amount:
+                    score += 2
+            _add_candidate(score, val)
+
+    # Pass 2: line-based scoring within the summary region.
     for idx, line in enumerate(lines):
         low = line.lower()
-        if not label_re.search(low):
+        label_match = label_re.search(low)
+        if not label_match:
+            continue
+        if _is_body_or_item_context(line) and not _is_summary_context(line):
             continue
 
-        # Plain 'deposit' only counts when it is clearly in a summary/totals context.
-        if 'deposit' in low and 'bcrs' not in low and 'refundable' not in low and 'surcharge' not in low:
-            neighborhood = ' '.join(lines[max(0, idx - 1): min(len(lines), idx + 2)]).lower()
-            if not (_is_summary_context(line) or 'bcrs' in neighborhood or 'summary' in neighborhood or 'total' in neighborhood):
-                continue
+        plain_deposit_only = ('deposit' in low and 'bcrs' not in low and 'refundable' not in low and 'surcharge' not in low)
+        neighborhood = ' '.join(lines[max(0, idx - 1): min(len(lines), idx + 2)]).lower()
+        if plain_deposit_only and not (_is_summary_context(line) or 'bcrs' in neighborhood or 'summary' in neighborhood or 'total' in neighborhood):
+            continue
 
-        for nidx in range(max(0, idx - 1), min(len(lines), idx + 2)):
-            cand_line = lines[nidx]
-            cand_low = cand_line.lower()
-            if _is_body_or_item_context(cand_line) and not _is_summary_context(cand_line) and nidx != idx:
-                continue
-            for val in _parse_money_candidates(cand_line):
-                score = 0
-                if nidx == idx:
-                    score += 10
+        same_line_vals = _parse_money_candidates(line)
+        if same_line_vals:
+            after = line[label_match.end():]
+            after_vals = _parse_money_candidates(after)
+            if after_vals:
+                for val in after_vals[:2]:
+                    score = 22
+                    if 'bcrs' in low:
+                        score += 10
+                    if 'refundable' in low:
+                        score += 5
+                    if 'deposit' in low:
+                        score += 6
+                    if 'surcharge' in low:
+                        score += 5
+                    if _is_summary_context(line):
+                        score += 4
+                    if total_amount is not None and net_amount is not None and vat_amount is not None:
+                        if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
+                            score += 12
+                    _add_candidate(score, val)
+            for val in same_line_vals:
+                score = 12
                 if 'bcrs' in low:
-                    score += 10
-                if 'refundable' in low:
-                    score += 4
+                    score += 8
                 if 'deposit' in low:
-                    score += 6
-                if 'surcharge' in low:
-                    score += 5
-                if _is_summary_context(cand_line) or _is_summary_context(line):
                     score += 4
-                if nidx != idx:
-                    score += 1
-                if _is_body_or_item_context(cand_line) and not _is_summary_context(cand_line) and nidx == idx:
-                    score -= 4
-                if val > 0:
-                    score += 1
+                if _is_summary_context(line):
+                    score += 4
                 if total_amount is not None and net_amount is not None and vat_amount is not None:
                     if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
-                        score += 12
-                    elif total_amount > 0 and 0 < val < total_amount:
-                        score += 1
-                ranked.append((score, round(val, 2)))
+                        score += 10
+                _add_candidate(score, val)
+
+        for nidx in range(max(0, idx - 1), min(len(lines), idx + 2)):
+            if nidx == idx:
+                continue
+            cand_line = lines[nidx]
+            if _is_body_or_item_context(cand_line) and not _is_summary_context(cand_line):
+                continue
+            for val in _parse_money_candidates(cand_line):
+                score = 8
+                if 'bcrs' in low:
+                    score += 8
+                if 'refundable' in low:
+                    score += 3
+                if 'deposit' in low:
+                    score += 4
+                if _is_summary_context(cand_line) or _is_summary_context(line):
+                    score += 4
+                if total_amount is not None and net_amount is not None and vat_amount is not None:
+                    if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
+                        score += 10
+                _add_candidate(score, val)
 
     if not ranked:
         return None
