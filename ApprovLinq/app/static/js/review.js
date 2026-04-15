@@ -101,21 +101,10 @@ function render() {
       ? `<span class="row-conf${r.confidence_score < 0.55 ? " row-conf-low" : r.confidence_score < 0.75 ? " row-conf-mid" : ""}">${(r.confidence_score * 100).toFixed(0)}%</span>`
       : "";
 
-    // Tool source badge (DI / AI / OCR) derived from method_used
-    const toolBadge = (() => {
-      const m = (r.method_used || "").toLowerCase();
-      if (m.includes("azure_di") || m.includes("di"))       return '<span class="tool-badge tool-di">DI</span>';
-      if (m.includes("openai") || m.includes("vision") || m.includes("ai")) return '<span class="tool-badge tool-ai">AI</span>';
-      if (m.includes("ocr"))                                 return '<span class="tool-badge tool-ocr">OCR</span>';
-      if (m && m !== "")                                     return '<span class="tool-badge tool-native">TXT</span>';
-      return "";
-    })();
-
     d.innerHTML =
       `<div class="row-primary">
          <span class="row-supplier">${esc(r.current.supplier_name) || "<em>no supplier</em>"}</span>
          <span class="row-amount">${r.current.total_amount != null ? esc(String(r.current.total_amount)) : ""}</span>
-         ${toolBadge}
        </div>
        <div class="row-meta">
          <span>${esc(r.source_filename || "file")}</span>
@@ -145,75 +134,16 @@ function renderEditor() {
   const ed = $("rowEditor");
   if (!r) { ed.innerHTML = '<div class="muted">Select a row from the left.</div>'; return; }
   let html = '<div class="field-grid">';
-  // Build a field→reason map from the pipe-separated review_reasons string
-  // Format stored: "reason_code|reason_code|field:reason|field:reason"
-  // Simple heuristic: if a reason_code contains the field name it belongs to that field,
-  // otherwise treat as global reasons shown on all flagged fields.
-  const reasonMap = {};  // field → [human reason, ...]
-  const globalReasons = [];
-  const REASON_LABELS = {
-    no_supplier:           "Supplier unclear",
-    invoice_number_missing:"Invoice number missing",
-    no_amount:             "No amount found",
-    ambiguous_date_locale: "Date format ambiguous",
-    vat_missing:           "VAT amount missing",
-    vat_anomaly:           "VAT rate unusual",
-    totals_mismatch:       "Totals do not reconcile",
-    low_confidence:        "Low extraction confidence",
-    deposit_component_detected: "Deposit/BCRS detected",
-    subtotal_not_found:    "Sub-total not found",
-  };
-  (r.review_reasons || []).forEach(raw => {
-    const s = String(raw || "");
-    // Check if it encodes a field-specific reason like "low_conf:supplier_name"
-    const colonIdx = s.indexOf(":");
-    if (colonIdx > 0) {
-      const field = s.slice(colonIdx + 1);
-      const code  = s.slice(0, colonIdx);
-      if (!reasonMap[field]) reasonMap[field] = [];
-      reasonMap[field].push(REASON_LABELS[code] || code.replace(/_/g, " "));
-    } else {
-      globalReasons.push(REASON_LABELS[s] || s.replace(/_/g, " "));
-    }
-  });
-
-  // Tool marker row at top of editor
-  const toolLabel = (() => {
-    const m = (r.method_used || "").toLowerCase();
-    if (m.includes("azure_di") || m.includes("di"))       return "Azure Document Intelligence (DI)";
-    if (m.includes("openai") || m.includes("vision") || m.includes("ai")) return "AI (OpenAI / Vision)";
-    if (m.includes("ocr"))                                 return "OCR";
-    if (m && m !== "")                                     return "Native text extraction";
-    return "Unknown";
-  })();
-  if (r.method_used) {
-    html += `<div style="margin-bottom:8px;font-size:12px;color:var(--ap-text-sub)">
-      <strong>Extraction tool:</strong> ${esc(toolLabel)}
-    </div>`;
-  }
-
-  // Global reasons banner (not field-specific)
-  if (r.review_required && globalReasons.length) {
-    html += `<div class="review-reasons-banner">⚠ ${globalReasons.map(esc).join(" · ")}</div>`;
-  }
-
   FIELDS.forEach(f => {
     const cur = r.current[f] == null ? "" : r.current[f];
     const orig = r.original[f] == null ? "" : r.original[f];
     const flagged = (r.review_fields || []).includes(f);
-    const fieldReasons = [
-      ...(reasonMap[f] || []),
-      ...(flagged && globalReasons.length === 0 ? globalReasons : []),
-    ];
-    const reasonHtml = fieldReasons.length
-      ? `<div class="field-reason">⚠ ${fieldReasons.map(esc).join(" · ")}</div>`
-      : "";
     html +=
       `<label>${esc(f)}${flagged ? " ⚠" : ""}</label>
        <input data-field="${esc(f)}"${flagged ? ' class="flagged-field"' : ''} value="${esc(cur)}" />
        <label class="rule-cb"><input type="checkbox" data-rule="${esc(f)}" /> rule</label>
        <button class="btn btn-secondary" data-revert="${esc(f)}" type="button" title="Revert to original">↶</button>
-       <div class="orig">original: ${esc(orig) || "—"}${reasonHtml}</div>`;
+       <div class="orig">original: ${esc(orig) || "—"}</div>`;
   });
   html += "</div>";
   html +=
@@ -441,46 +371,24 @@ document.addEventListener("click", (e) => {
   setRemapField(el.getAttribute("data-field"));
 });
 
-// Returns null if remap is allowed, or a string reason why it's locked
-function remapLockReason() {
-  if (!state.batch) return "Batch not loaded";
-  const batchStatus = (state.batch.status || "").toLowerCase();
-  if (batchStatus === "exported") return "Batch is exported — reopen to remap";
-  if (batchStatus === "approved") return "Batch is approved — reopen to remap";
-  // Check the selected row's reviewed state
-  if (state.selected != null) {
-    const row = state.rows.find(x => x.id === state.selected);
-    if (row && row.row_reviewed) return "This row is marked reviewed — reopen to remap";
-  }
-  return null;
-}
-
 $("remapMode").addEventListener("change", async (e) => {
   const on = e.target.checked;
-  // Enforce lock when turning remap on
-  if (on) {
-    const reason = remapLockReason();
-    if (reason) {
-      e.target.checked = false;
-      msg(reason, "error");
-      return;
-    }
-  }
   previewWrap.classList.toggle("remap-active", on);
   remapHint.hidden = !on;
   if (!on) {
     remapSel.hidden = true; dragStart = null;
-    previewImg.src = ""; previewImg.hidden = true;
+    previewImg.src = ""; previewImg.hidden = true;  // free memory
     const ph = $("previewUnavailable"); if (ph) ph.hidden = true;
     return;
   }
-  // Ensure a row/file is selected
+  // Ensure a row/file is selected so we know which PDF to preview.
   if (!state.fileId && state.rows.length) {
     const r0 = state.rows[0];
     state.selected = r0.id; state.fileId = r0.source_file_id; state.page = r0.page_no || 1;
     render(); loadAudit(r0.id); await ensurePageCount();
   }
-  if (!remapField) msg("Click a field in the editor to activate remap for that field.", "");
+  // Do NOT load the preview image yet — wait until the user picks a field.
+  if (!remapField) msg("Click a field in the editor to load the invoice preview, then drag a region.", "");
   else if (state.fileId) refreshPreview();
 });
 
@@ -532,13 +440,6 @@ window.addEventListener("mouseup", async (e) => {
   if (region.wN < 0.01 || region.hN < 0.01) {
     remapSel.hidden = true;
     return; // accidental click / too-small
-  }
-  // Re-check lock before saving (belt-and-suspenders vs. the checkbox guard)
-  const lockReason = remapLockReason();
-  if (lockReason) {
-    remapSel.hidden = true;
-    msg(lockReason, "error");
-    return;
   }
   const row = state.rows.find(x => x.id === state.selected);
   if (!row) { msg("Select a row first.", "error"); return; }

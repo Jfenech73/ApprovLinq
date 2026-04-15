@@ -30,7 +30,7 @@ from app.services.exporter import workbook_from_rows
 from app.services.corrected_exporter import export_batch_corrected
 # <<< REVIEW_PACK corrected_export_import
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
-from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
+from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit
 from app.services.template_render_service import render_template_sheet, resolve_effective_template
 from app.utils.storage import batch_upload_folder, batch_export_folder, resolve_upload_path
 
@@ -88,97 +88,6 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             current = _normalize_rule_value(row.nominal_account_code)
             if current and current == src and rule.target_value:
                 row.nominal_account_code = rule.target_value
-
-
-
-def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
-    """Apply saved RemapHints as extraction guidance for this supplier.
-
-    When a user has previously remapped a field for this supplier, we store
-    the region coordinates in RemapHint.  On future runs we can re-read that
-    region from the PDF and use it to improve the extracted value.
-
-    Implementation is conservative:
-    - Only applies when a region was saved (x/y/w/h are not None) AND the
-      PDF file is still on disk AND the hint's page_no matches the current row.
-    - Applies only to fields that are currently blank or low-confidence so we
-      never override a good extraction with a hint.
-    - If the region read fails for any reason the row is left unchanged.
-    """
-    if not row.supplier_name:
-        return
-
-    # Normalise supplier name for matching (same logic as _normalise_supplier)
-    def _norm(s: str) -> str:
-        import re as _re
-        n = _re.sub(r"\b(ltd|limited|plc|llc|inc|corp|co|group|trading|holdings|services|solutions)\b", "", (s or "").lower())
-        return _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9 ]", " ", n)).strip()
-
-    row_supplier_norm = _norm(row.supplier_name)
-    if not row_supplier_norm:
-        return
-
-    # Find active hints for this tenant scoped to this row's page
-    hints = db.query(RemapHint).filter(
-        RemapHint.tenant_id == batch.tenant_id,
-        RemapHint.active.is_(True),
-        RemapHint.page_no == row.page_no,
-        RemapHint.x.isnot(None),
-        RemapHint.y.isnot(None),
-    ).all()
-    if not hints:
-        return
-
-    # Match hints whose supplier name snapshot normalises to the same string
-    matched = [
-        h for h in hints
-        if h.supplier_name_snapshot and _norm(h.supplier_name_snapshot) == row_supplier_norm
-    ]
-    if not matched:
-        return
-
-    # Only apply hints for fields that are currently blank on the row
-    blank_fields = {
-        f for f in (
-            "supplier_name", "invoice_number", "invoice_date",
-            "net_amount", "vat_amount", "total_amount",
-            "nominal_account_code", "description",
-        )
-        if not getattr(row, f, None)
-    }
-    if not blank_fields:
-        return
-
-    # Find the source file for this row so we can re-read the region
-    from app.utils.storage import resolve_upload_path as _rup
-    file_obj = db.get(__import__("app.db.models", fromlist=["InvoiceFile"]).InvoiceFile,
-                      row.source_file_id) if row.source_file_id else None
-    if not file_obj:
-        return
-    try:
-        pdf_path = str(_rup(file_obj.file_path))
-    except Exception:
-        return
-
-    for hint in matched:
-        if hint.field_name not in blank_fields:
-            continue
-        try:
-            # Import inline to avoid top-level circular reference
-            from app.routers.review import _read_region_text
-            text = _read_region_text(
-                pdf_path, hint.page_no or row.page_no,
-                float(hint.x), float(hint.y), float(hint.w), float(hint.h),
-            )
-            if text:
-                setattr(row, hint.field_name, text)
-                blank_fields.discard(hint.field_name)
-                logger.debug(
-                    "RemapHint applied: supplier=%r field=%s page=%s → %r",
-                    row.supplier_name, hint.field_name, hint.page_no, text[:40],
-                )
-        except Exception as exc:
-            logger.debug("RemapHint apply failed for field %s: %s", hint.field_name, exc)
 
 
 def _parse_money_candidates(text: str) -> list[float]:
@@ -1147,7 +1056,6 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 db, tenant_id, batch.company_id, row,
                                 supplier_vat=supplier_vat,
                             )
-                            _apply_remap_hints(db, batch, row)
                             _apply_saved_rules(db, batch, row)
                             db.add(row)
                             inserted_rows += 1
