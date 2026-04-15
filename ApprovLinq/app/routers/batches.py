@@ -238,7 +238,7 @@ def _collect_summary_region_lines(payload: dict) -> list[str]:
 def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     # NOTE: We deliberately do NOT use the arithmetic deposit_component_detected
     # shortcut here.  That signal (from validate_invoice) is stored in
-    # review_reasons purely as metadata — it is NOT sufficient evidence for a
+    # review_reasons purely as metadata.  It is NOT sufficient evidence for a
     # BCRS split because it fires on any arithmetic mismatch that lands on a
     # common denomination, even when no BCRS/deposit label exists in the document.
     # A BCRS split requires confirmed label+region evidence (see below).
@@ -397,13 +397,11 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     if best_score < 20:
         return None
 
-    # ── Final guard: require at least one candidate to have been produced
-    # by a line that carries an actual BCRS/deposit label.
-    # This prevents cases where only summary totals/subtotal lines are present
-    # (the "Dione false positive" pattern: subtotal/VAT/total only, no deposit
-    # label on any line, but a reconciliation match boosts a spurious candidate).
-    # A "label-bearing line" is one that matches our label_re and is NOT a
-    # pure totals line (no independent deposit/bcrs keyword — just subtotal/vat/total).
+    # ── Final guard: require at least one line with an actual BCRS/deposit label
+    # and a monetary value.  This prevents false splits when only ordinary totals
+    # (subtotal / VAT / total) exist with no independent deposit/BCRS label line —
+    # i.e. the "Dione false positive" pattern where a reconciliation match alone
+    # would otherwise promote a spurious candidate.
     _TOTALS_ONLY_RE = re.compile(
         r'^\s*(?:sub\s*total|subtotal|net\s*amount|net|v\.?a\.?t\.?|vat|tax|'
         r'invoice\s*total|grand\s*total|total\s*(?:due|amount|eur|incl|net)?'
@@ -419,24 +417,19 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     for ln in lines:
         ln_low = ln.lower()
         if _DEPOSIT_LABEL_RE.search(ln_low):
-            # Accept plain "deposit" only if it appears on a non-pure-totals line
             is_pure_total = bool(_TOTALS_ONLY_RE.match(ln))
             if not is_pure_total:
-                # Also make sure this line (or an immediate neighbour) has a
-                # monetary value, so "Deposit Summary" heading lines with zero
-                # amounts don't count as confirmation.
                 if _parse_money_candidates(ln):
                     has_label_line = True
                     break
-                # Look at neighbours for the amount
+                # Value may be on an immediate neighbour line
                 idx = lines.index(ln)
-                nbr_vals = []
                 for nidx in range(max(0, idx - 1), min(len(lines), idx + 2)):
-                    if nidx != idx:
-                        nbr_vals.extend(_parse_money_candidates(lines[nidx]))
-                if nbr_vals:
-                    has_label_line = True
-                    break
+                    if nidx != idx and _parse_money_candidates(lines[nidx]):
+                        has_label_line = True
+                        break
+            if has_label_line:
+                break
 
     if not has_label_line:
         return None
