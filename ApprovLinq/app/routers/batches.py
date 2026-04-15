@@ -30,7 +30,7 @@ from app.services.exporter import workbook_from_rows
 from app.services.corrected_exporter import export_batch_corrected
 # <<< REVIEW_PACK corrected_export_import
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
-from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit
+from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
 from app.services.template_render_service import render_template_sheet, resolve_effective_template
 from app.utils.storage import batch_upload_folder, batch_export_folder, resolve_upload_path
 
@@ -90,6 +90,76 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 row.nominal_account_code = rule.target_value
 
 
+
+def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
+    """Apply saved RemapHints as extraction guidance for blank fields on this row.
+
+    Conservative: only fills fields that are currently blank; never overwrites
+    a non-empty value.  Any failure is silently logged and skipped.
+    """
+    if not row.supplier_name:
+        return
+
+    def _norm(s: str) -> str:
+        import re as _re
+        n = _re.sub(r"\b(ltd|limited|plc|llc|inc|corp|co|group|trading|holdings|services|solutions)\b",
+                    "", (s or "").lower())
+        return _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9 ]", " ", n)).strip()
+
+    row_norm = _norm(row.supplier_name)
+    if not row_norm:
+        return
+
+    hints = db.query(RemapHint).filter(
+        RemapHint.tenant_id == batch.tenant_id,
+        RemapHint.active.is_(True),
+        RemapHint.page_no == row.page_no,
+        RemapHint.x.isnot(None),
+    ).all()
+    if not hints:
+        return
+
+    matched = [h for h in hints if h.supplier_name_snapshot and _norm(h.supplier_name_snapshot) == row_norm]
+    if not matched:
+        return
+
+    blank_fields = {
+        f for f in ("supplier_name", "invoice_number", "invoice_date",
+                    "net_amount", "vat_amount", "total_amount",
+                    "nominal_account_code", "description")
+        if not getattr(row, f, None)
+    }
+    if not blank_fields:
+        return
+
+    from app.db.models import InvoiceFile as _IF
+    from app.utils.storage import resolve_upload_path as _rup
+    file_obj = db.get(_IF, row.source_file_id) if row.source_file_id else None
+    if not file_obj:
+        return
+    try:
+        pdf_path = str(_rup(file_obj.file_path))
+    except Exception:
+        return
+
+    for hint in matched:
+        if hint.field_name not in blank_fields:
+            continue
+        try:
+            from app.routers.review import _read_region_text
+            text = _read_region_text(
+                pdf_path, hint.page_no or row.page_no,
+                float(hint.x), float(hint.y), float(hint.w), float(hint.h),
+            )
+            if text:
+                setattr(row, hint.field_name, text)
+                blank_fields.discard(hint.field_name)
+                logger.debug("RemapHint applied: supplier=%r field=%s → %r",
+                             row.supplier_name, hint.field_name, text[:40])
+        except Exception as exc:
+            logger.debug("RemapHint apply failed for field %s: %s", hint.field_name, exc)
+
+
 def _parse_money_candidates(text: str) -> list[float]:
     vals = []
     for m in re.findall(r"(?<!\d)(?:€\s*)?(\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|\d+[.,]\d{2})(?!\d)", text or ""):
@@ -145,13 +215,11 @@ def _collect_summary_region_lines(payload: dict) -> list[str]:
 
 
 def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
-    reasons = str(payload.get('review_reasons') or '')
-    m = re.search(r'deposit_component_detected:(\d+(?:\.\d{2})?)', reasons)
-    if m:
-        try:
-            return round(float(m.group(1)), 2)
-        except Exception:
-            pass
+    # NOTE: The arithmetic deposit_component_detected shortcut is intentionally
+    # removed.  That signal (written by validate_invoice) fires on any
+    # arithmetic mismatch that lands on a common denomination — even when no
+    # BCRS/deposit label exists in the document — causing false splits.
+    # A split requires confirmed label+region evidence (see below).
 
     total_amount = _parse_first_money(payload.get('total_amount'))
     net_amount = _parse_first_money(payload.get('net_amount'))
@@ -304,7 +372,43 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
 
     ranked.sort(key=lambda x: (x[0], -abs(x[1])), reverse=True)
     best_score, best_val = ranked[0]
-    return best_val if best_score >= 12 else None
+    if best_score < 20:
+        return None
+
+    # Final guard: at least one collected line must carry an actual BCRS/deposit
+    # keyword with a monetary value.  Prevents splits where only ordinary
+    # subtotal/VAT/total lines exist (no independent deposit label anywhere).
+    _TOTALS_ONLY_RE = re.compile(
+        r'^\s*(?:sub\s*total|subtotal|net\s*amount|net|v\.?a\.?t\.?|vat|tax|'
+        r'invoice\s*total|grand\s*total|total\s*(?:due|amount|eur|incl|net)?'
+        r'|amount\s*due|balance\s*due)\s*[:\-]?\s*[€$£]?[\d.,]+\s*$',
+        re.I,
+    )
+    _DEPOSIT_LABEL_RE = re.compile(
+        r'\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit'
+        r'|deposit\s+summary|deposit\s+surcharge|returnable(?:\s+deposit)?'
+        r'|surcharge|deposit)\b',
+        re.I,
+    )
+    has_label_line = False
+    for ln in lines:
+        if _DEPOSIT_LABEL_RE.search(ln.lower()):
+            if not _TOTALS_ONLY_RE.match(ln):
+                if _parse_money_candidates(ln):
+                    has_label_line = True
+                    break
+                idx = lines.index(ln)
+                for nidx in range(max(0, idx - 1), min(len(lines), idx + 2)):
+                    if nidx != idx and _parse_money_candidates(lines[nidx]):
+                        has_label_line = True
+                        break
+        if has_label_line:
+            break
+
+    if not has_label_line:
+        return None
+
+    return best_val
 
 
 def _build_bcrs_row(row: InvoiceRow, amount: float) -> InvoiceRow:
@@ -1056,6 +1160,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 db, tenant_id, batch.company_id, row,
                                 supplier_vat=supplier_vat,
                             )
+                            _apply_remap_hints(db, batch, row)
                             _apply_saved_rules(db, batch, row)
                             db.add(row)
                             inserted_rows += 1

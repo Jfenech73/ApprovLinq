@@ -215,6 +215,14 @@ async function loadRows() {
     const supplier = truncate(row.supplier_name || "-", 60);
     const invoiceNo = truncate(row.invoice_number || "-", 40);
     const tr = document.createElement("tr");
+    const toolBadge = (() => {
+      const m = (row.method_used || "").toLowerCase();
+      if (m.includes("azure_di") || m.includes("_di")) return "DI";
+      if (m.includes("openai") || m.includes("vision") || m.includes("_ai")) return "AI";
+      if (m.includes("ocr")) return "OCR";
+      if (m) return "TXT";
+      return "-";
+    })();
     tr.innerHTML = `
       <td>${escapeHtml(row.source_filename || "-")}</td>
       <td>${row.page_no ?? "-"}</td>
@@ -224,6 +232,7 @@ async function loadRows() {
       <td title="${escapeHtml(row.description || "")}">${escapeHtml(description)}</td>
       <td>${row.total_amount ?? "-"}</td>
       <td>${confidenceDisplay(row.confidence_score)}</td>
+      <td>${escapeHtml(toolBadge)}</td>
       <td title="Posting: ${escapeHtml(row.supplier_posting_account || "-")} | Nominal: ${escapeHtml(row.nominal_account_code || "-")}">${reviewBadge(row)}</td>
     `;
     tbody.appendChild(tr);
@@ -272,13 +281,10 @@ function applyReviewStates(fileStates) {
     if (!cell) return;
     cell.innerHTML = renderReviewCell(fs, state.selectedBatchId);
     tr.classList.toggle("needs-review", fs.review_state === "needs_review");
-    // Announce newly-flagged files exactly once (per browser session per file).
+    // Row flash on needs_review transition (no popup toast)
     const key = `${state.selectedBatchId}|${fs.file_id}`;
     if (fs.review_state === "needs_review" && !_announcedReviewFiles.has(key)) {
       _announcedReviewFiles.add(key);
-      showToast(`Low-confidence fields detected in ${fn} — review recommended.`, "warn",
-                { label: "Review now", href: reviewUrl(state.selectedBatchId, fs.file_id) });
-      // Briefly highlight the row so the user can see which file landed.
       tr.classList.add("row-flash");
       setTimeout(() => tr.classList.remove("row-flash"), 2500);
     }
@@ -521,6 +527,30 @@ async function initScannerPage() {
 }
 
 initScannerPage();
+
+// ── Collapsible scanner sections ─────────────────────────────────────────────
+(function wireCollapsible() {
+  const SECTIONS = [
+    { toggleId: "batchesSectionToggle", bodyId: "batchesSectionBody", key: "ap_batches_collapsed" },
+    { toggleId: "rowsSectionToggle",    bodyId: "rowsSectionBody",    key: "ap_rows_collapsed"   },
+  ];
+  SECTIONS.forEach(({ toggleId, bodyId, key }) => {
+    const toggle = document.getElementById(toggleId);
+    const body   = document.getElementById(bodyId);
+    if (!toggle || !body) return;
+    const collapsed = sessionStorage.getItem(key) === "1";
+    body.classList.toggle("section-collapsed", collapsed);
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.textContent = collapsed ? "▶" : "▼";
+    toggle.addEventListener("click", () => {
+      const nowCollapsed = !body.classList.contains("section-collapsed");
+      body.classList.toggle("section-collapsed", nowCollapsed);
+      toggle.setAttribute("aria-expanded", String(!nowCollapsed));
+      toggle.textContent = nowCollapsed ? "▶" : "▼";
+      try { sessionStorage.setItem(key, nowCollapsed ? "1" : "0"); } catch {}
+    });
+  });
+})();
 
 
 initPageHelp({

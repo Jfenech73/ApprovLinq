@@ -101,10 +101,20 @@ function render() {
       ? `<span class="row-conf${r.confidence_score < 0.55 ? " row-conf-low" : r.confidence_score < 0.75 ? " row-conf-mid" : ""}">${(r.confidence_score * 100).toFixed(0)}%</span>`
       : "";
 
+    const toolBadge = (() => {
+      const m = (r.method_used || "").toLowerCase();
+      if (m.includes("azure_di") || m.includes("_di")) return '<span class="tool-badge tool-di">DI</span>';
+      if (m.includes("openai") || m.includes("vision") || m.includes("_ai")) return '<span class="tool-badge tool-ai">AI</span>';
+      if (m.includes("ocr")) return '<span class="tool-badge tool-ocr">OCR</span>';
+      if (m) return '<span class="tool-badge tool-native">TXT</span>';
+      return "";
+    })();
+
     d.innerHTML =
       `<div class="row-primary">
          <span class="row-supplier">${esc(r.current.supplier_name) || "<em>no supplier</em>"}</span>
          <span class="row-amount">${r.current.total_amount != null ? esc(String(r.current.total_amount)) : ""}</span>
+         ${toolBadge}
        </div>
        <div class="row-meta">
          <span>${esc(r.source_filename || "file")}</span>
@@ -134,16 +144,61 @@ function renderEditor() {
   const ed = $("rowEditor");
   if (!r) { ed.innerHTML = '<div class="muted">Select a row from the left.</div>'; return; }
   let html = '<div class="field-grid">';
+  // Tool source label
+  const toolLabel = (() => {
+    const m = (r.method_used || "").toLowerCase();
+    if (m.includes("azure_di") || m.includes("_di"))           return "Azure Document Intelligence (DI)";
+    if (m.includes("openai") || m.includes("vision") || m.includes("_ai")) return "AI (OpenAI / Vision)";
+    if (m.includes("ocr"))  return "OCR";
+    if (m)                  return "Native text extraction";
+    return "";
+  })();
+  if (toolLabel) html += `<div style="font-size:12px;color:var(--ap-text-sub);margin-bottom:8px"><strong>Source:</strong> ${esc(toolLabel)}</div>`;
+
+  // Build per-field reason map from pipe-separated review_reasons
+  const REASON_LABELS = {
+    no_supplier:             "Supplier unclear",
+    invoice_number_missing:  "Invoice number missing",
+    no_amount:               "No amount found",
+    ambiguous_date_locale:   "Date format ambiguous",
+    vat_missing:             "VAT amount missing",
+    vat_anomaly:             "VAT rate unusual",
+    totals_mismatch:         "Totals do not reconcile",
+    low_confidence:          "Low extraction confidence",
+    deposit_component_detected: "Deposit/BCRS detected",
+    subtotal_not_found:      "Sub-total not found",
+  };
+  const globalReasons = [];
+  const reasonMap = {};
+  (r.review_reasons || []).forEach(raw => {
+    const s2 = String(raw || "");
+    const ci = s2.indexOf(":");
+    if (ci > 0) {
+      const field = s2.slice(ci + 1);
+      const code  = s2.slice(0, ci);
+      if (!reasonMap[field]) reasonMap[field] = [];
+      reasonMap[field].push(REASON_LABELS[code] || code.replace(/_/g, " "));
+    } else {
+      globalReasons.push(REASON_LABELS[s2] || s2.replace(/_/g, " "));
+    }
+  });
+  if (r.review_required && globalReasons.length) {
+    html += `<div class="review-reasons-banner">⚠ ${globalReasons.map(esc).join(" · ")}</div>`;
+  }
+
   FIELDS.forEach(f => {
     const cur = r.current[f] == null ? "" : r.current[f];
     const orig = r.original[f] == null ? "" : r.original[f];
     const flagged = (r.review_fields || []).includes(f);
+    const fieldReasons = reasonMap[f] || [];
+    const reasonHtml = fieldReasons.length
+      ? `<div class="field-reason">⚠ ${fieldReasons.map(esc).join(" · ")}</div>` : "";
     html +=
       `<label>${esc(f)}${flagged ? " ⚠" : ""}</label>
        <input data-field="${esc(f)}"${flagged ? ' class="flagged-field"' : ''} value="${esc(cur)}" />
        <label class="rule-cb"><input type="checkbox" data-rule="${esc(f)}" /> rule</label>
        <button class="btn btn-secondary" data-revert="${esc(f)}" type="button" title="Revert to original">↶</button>
-       <div class="orig">original: ${esc(orig) || "—"}</div>`;
+       <div class="orig">original: ${esc(orig) || "—"}${reasonHtml}</div>`;
   });
   html += "</div>";
   html +=
@@ -371,24 +426,43 @@ document.addEventListener("click", (e) => {
   setRemapField(el.getAttribute("data-field"));
 });
 
+// Returns null if remap is allowed, or a string reason why it is locked
+function remapLockReason() {
+  if (!state.batch) return "Batch not loaded";
+  const st = (state.batch.status || "").toLowerCase();
+  if (st === "exported") return "Batch is exported — reopen to remap";
+  if (st === "approved") return "Batch is approved — reopen to remap";
+  if (state.selected != null) {
+    const row = state.rows.find(x => x.id === state.selected);
+    if (row && row.row_reviewed) return "This row is marked reviewed — reopen to remap";
+  }
+  return null;
+}
+
 $("remapMode").addEventListener("change", async (e) => {
   const on = e.target.checked;
+  if (on) {
+    const reason = remapLockReason();
+    if (reason) {
+      e.target.checked = false;
+      msg(reason, "error");
+      return;
+    }
+  }
   previewWrap.classList.toggle("remap-active", on);
   remapHint.hidden = !on;
   if (!on) {
     remapSel.hidden = true; dragStart = null;
-    previewImg.src = ""; previewImg.hidden = true;  // free memory
+    previewImg.src = ""; previewImg.hidden = true;
     const ph = $("previewUnavailable"); if (ph) ph.hidden = true;
     return;
   }
-  // Ensure a row/file is selected so we know which PDF to preview.
   if (!state.fileId && state.rows.length) {
     const r0 = state.rows[0];
     state.selected = r0.id; state.fileId = r0.source_file_id; state.page = r0.page_no || 1;
     render(); loadAudit(r0.id); await ensurePageCount();
   }
-  // Do NOT load the preview image yet — wait until the user picks a field.
-  if (!remapField) msg("Click a field in the editor to load the invoice preview, then drag a region.", "");
+  if (!remapField) msg("Click a field in the editor to activate remap for that field.", "");
   else if (state.fileId) refreshPreview();
 });
 
@@ -441,6 +515,8 @@ window.addEventListener("mouseup", async (e) => {
     remapSel.hidden = true;
     return; // accidental click / too-small
   }
+  const lockMsg = remapLockReason();
+  if (lockMsg) { remapSel.hidden = true; msg(lockMsg, "error"); return; }
   const row = state.rows.find(x => x.id === state.selected);
   if (!row) { msg("Select a row first.", "error"); return; }
   if (!confirm(`Save region for field "${remapField}" on page ${state.page}?`)) {

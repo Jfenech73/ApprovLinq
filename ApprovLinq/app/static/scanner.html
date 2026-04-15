@@ -103,31 +103,43 @@
 
         <section class="card full-width">
           <div class="section-head">
-            <h2 style="margin:0">Batches</h2>
+            <div style="display:flex;align-items:center;gap:8px">
+              <button id="batchesSectionToggle" class="btn btn-sm" type="button"
+                      aria-expanded="true" style="padding:2px 7px;font-size:12px" title="Collapse/expand">▼</button>
+              <h2 style="margin:0">Batches</h2>
+            </div>
             <span class="muted">Click a batch to work on it.</span>
           </div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Batch</th><th>Status</th><th>Pages</th><th>Created</th><th>Processed</th></tr></thead>
-              <tbody id="batchesTableBody"></tbody>
-            </table>
+          <div id="batchesSectionBody">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Batch</th><th>Status</th><th>Pages</th><th>Created</th><th>Processed</th></tr></thead>
+                <tbody id="batchesTableBody"></tbody>
+              </table>
+            </div>
           </div>
         </section>
 
         <section class="card full-width">
           <div class="section-head">
-            <h2 style="margin:0">Extracted rows</h2>
+            <div style="display:flex;align-items:center;gap:8px">
+              <button id="rowsSectionToggle" class="btn btn-sm" type="button"
+                      aria-expanded="true" style="padding:2px 7px;font-size:12px" title="Collapse/expand">▼</button>
+              <h2 style="margin:0">Extracted rows</h2>
+            </div>
             <div class="row gap-sm wrap">
               <button id="refreshRowsBtn" class="btn btn-sm" type="button">Refresh rows</button>
               <button id="reviewBtn" class="btn btn-sm" type="button">Review</button>
               <button id="exportBtn" class="btn btn-sm btn-primary" type="button">Export Excel</button>
             </div>
           </div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Source file</th><th>Page</th><th>Supplier</th><th>Invoice no</th><th>Date</th><th>Description</th><th>Total</th><th>Confidence</th><th>Review</th></tr></thead>
-              <tbody id="rowsTableBody"></tbody>
-            </table>
+          <div id="rowsSectionBody">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Source file</th><th>Page</th><th>Supplier</th><th>Invoice no</th><th>Date</th><th>Description</th><th>Total</th><th>Confidence</th><th>Tool</th><th>Review</th></tr></thead>
+                <tbody id="rowsTableBody"></tbody>
+              </table>
+            </div>
           </div>
         </section>
       </main>
