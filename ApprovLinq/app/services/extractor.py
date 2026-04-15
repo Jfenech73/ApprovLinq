@@ -1628,6 +1628,9 @@ def azure_di_extract_invoice(
         "line_items_structured": line_items,
         "document_type":    "invoice",
         "extraction_status": "complete" if (supplier_name and invoice_number and total_amount) else "partial",
+        # Full OCR text from Azure DI — used by the BCRS split logic in batches.py
+        # for scanned/image pages where the native PDF text layer is absent.
+        "di_page_text":     getattr(result, "content", None) or "",
         "ai_confidence": {
             "supplier": round(s_conf, 2),
             "customer": round(c_conf, 2),
@@ -2005,6 +2008,7 @@ def merge_ai_fields(
         "ai_issues", "ai_confidence",
         "line_items_structured",   # structured list from Azure DI / OpenAI
         "extraction_source",       # tracks which engine produced the result
+        "di_page_text",            # full OCR text from Azure DI (used by BCRS detection)
     ):
         if ai.get(field) is not None:
             merged[field] = ai[field]
@@ -2421,7 +2425,19 @@ def process_pdf_page(
         if extracted.get("currency"):
             _totals_parts.append(f"Currency: {extracted['currency']}")
         totals_raw    = " | ".join(_totals_parts) if _totals_parts else None
-        page_text_raw = f"[Scanned page — no text layer — extracted via {method}]\n" + header_raw
+        # For scanned/image pages, Azure DI returns result.content (full OCR text).
+        # Use it for page_text_raw and totals_raw so the BCRS split logic in
+        # batches.py can find labelled deposit/BCRS lines (e.g. "BCRS Deposit 2.40").
+        _di_text = extracted.get("di_page_text") or ""
+        if _di_text and len(_di_text.strip()) > 20:
+            page_text_raw = _di_text[:20000]
+            # Override totals_raw with the last lines of the DI text so BCRS labels
+            # are available even when only the synthetic "Net: X | VAT: Y" was built.
+            _di_lines = [ln.strip() for ln in _di_text.splitlines() if ln.strip()]
+            if _di_lines:
+                totals_raw = "\n".join(_di_lines[-15:])
+        else:
+            page_text_raw = f"[Scanned page — no text layer — extracted via {method}]\n" + header_raw
     else:
         header_raw    = "\n".join(final_text.splitlines()[:12])
         totals_raw    = "\n".join(final_text.splitlines()[-10:])
