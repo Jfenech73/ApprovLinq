@@ -126,6 +126,8 @@ def get_review_workspace(batch_id: UUID, db: Session = Depends(get_db), user=Dep
             "review_required": r.review_required,
             "review_priority": r.review_priority,
             "review_fields": (r.review_fields or "").split(",") if r.review_fields else [],
+            "review_reasons": (r.review_reasons or "").split("|") if r.review_reasons else [],
+            "method_used": r.method_used or "",
             "row_reviewed": bool(c.row_reviewed) if c else False,
             "reviewed_fields": (c.reviewed_fields or "").split(",") if c and c.reviewed_fields else [],
             "is_corrected": was_corrected,
@@ -452,16 +454,42 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         if batch.company_id:
             supplier_q = supplier_q.where(M.TenantSupplier.company_id == batch.company_id)
         supplier = db.execute(supplier_q).scalar_one_or_none()
-    hint = RemapHint(
-        tenant_id=batch.tenant_id, company_id=batch.company_id,
-        supplier_id=supplier.id if supplier else None,
-        supplier_name_snapshot=row.supplier_name,
-        field_name=payload.field_name, page_no=payload.page_no,
-        x=payload.x, y=payload.y, w=payload.w, h=payload.h,
-        source_batch_id=batch.id, source_file_id=payload.file_id or row.source_file_id,
-        source_row_id=row.id, created_by=user.id,
-    )
-    db.add(hint)
+    # Reuse existing RemapHint for the same supplier+field+page rather than
+    # accumulating duplicate rows. Match on tenant + supplier name snapshot +
+    # field + page; update the coordinates in place if one already exists.
+    existing_hint = db.execute(
+        select(RemapHint).where(
+            RemapHint.tenant_id == batch.tenant_id,
+            RemapHint.field_name == payload.field_name,
+            RemapHint.supplier_name_snapshot == row.supplier_name,
+            RemapHint.page_no == payload.page_no,
+        ).limit(1)
+    ).scalar_one_or_none()
+
+    if existing_hint:
+        # Update coordinates and re-activate if it was disabled
+        existing_hint.x = payload.x
+        existing_hint.y = payload.y
+        existing_hint.w = payload.w
+        existing_hint.h = payload.h
+        existing_hint.active = True
+        existing_hint.source_batch_id = batch.id
+        existing_hint.source_file_id  = payload.file_id or row.source_file_id
+        existing_hint.source_row_id   = row.id
+        if supplier:
+            existing_hint.supplier_id = supplier.id
+        hint = existing_hint
+    else:
+        hint = RemapHint(
+            tenant_id=batch.tenant_id, company_id=batch.company_id,
+            supplier_id=supplier.id if supplier else None,
+            supplier_name_snapshot=row.supplier_name,
+            field_name=payload.field_name, page_no=payload.page_no,
+            x=payload.x, y=payload.y, w=payload.w, h=payload.h,
+            source_batch_id=batch.id, source_file_id=payload.file_id or row.source_file_id,
+            source_row_id=row.id, created_by=user.id,
+        )
+        db.add(hint)
     db.commit()
 
     # Optionally read the text inside the region and return it so the UI can
