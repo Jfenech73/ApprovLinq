@@ -9,7 +9,6 @@
   </script>
   <link rel="stylesheet" href="/static/css/tokens.css" />
   <link rel="stylesheet" href="/static/css/components.css" />
-  <link rel="stylesheet" href="/static/css/app.css" />
 </head>
 <body class="ap-app">
   <div data-ap-shell='{"active":"","crumb":[["Work",""],["Batches",""],["Review","cur"]]}'></div>
@@ -58,13 +57,6 @@
               <h2 style="margin:0">Edit selected row</h2>
             </div>
             <div id="rowEditor" class="stack"></div>
-            <!-- hidden remap/page controls retained so review.js can bind safely without showing preview UI -->
-            <div style="display:none">
-              <button id="prevPageBtn" type="button"></button>
-              <button id="nextPageBtn" type="button"></button>
-              <span id="pageLabel"></span>
-              <input id="remapMode" type="checkbox" />
-            </div>
             <!-- remap controls kept (hidden) so review.js remap logic still works -->
             <div id="remapHint" class="remap-hint" hidden>
               <span id="remapTargetLabel" class="remap-target"></span>

@@ -128,7 +128,7 @@ function render() {
     d.onclick = async () => {
       state.selected = r.id; state.fileId = r.source_file_id; state.page = r.page_no || 1;
       render(); loadAudit(r.id); await ensurePageCount();
-      if (remapModeEl && remapModeEl.checked) refreshPreview();
+      if ($("remapMode").checked) refreshPreview();
     };
     list.appendChild(d);
   });
@@ -291,12 +291,9 @@ async function fetchPageCount() {
 }
 
 function updatePageControls() {
-  const pageLabel = $("pageLabel");
-  const prevBtn = $("prevPageBtn");
-  const nextBtn = $("nextPageBtn");
-  if (pageLabel) pageLabel.textContent = `page ${state.page} / ${state.pageCount}`;
-  if (prevBtn) prevBtn.disabled = state.page <= 1;
-  if (nextBtn) nextBtn.disabled = state.page >= state.pageCount;
+  $("pageLabel").textContent = `page ${state.page} / ${state.pageCount}`;
+  $("prevPageBtn").disabled = state.page <= 1;
+  $("nextPageBtn").disabled = state.page >= state.pageCount;
 }
 
 let _previewBlobUrl = null;
@@ -320,7 +317,6 @@ function _showPreviewImage(blobUrl) {
 }
 async function refreshPreview() {
   const img = $("previewImg");
-  if (!img) return;
   if (!state.fileId) {
     img.src = ""; img.hidden = true;
     const ph = $("previewUnavailable"); if (ph) ph.hidden = true;
@@ -366,13 +362,11 @@ async function ensurePageCount() {
   }
 }
 
-const _prevPageBtn = $("prevPageBtn");
-if (_prevPageBtn) _prevPageBtn.onclick = async () => {
+$("prevPageBtn").onclick = async () => {
   await ensurePageCount();
   if (state.page > 1) { state.page--; refreshPreview(); }
 };
-const _nextPageBtn = $("nextPageBtn");
-if (_nextPageBtn) _nextPageBtn.onclick = async () => {
+$("nextPageBtn").onclick = async () => {
   await ensurePageCount();
   if (state.page < state.pageCount) { state.page++; refreshPreview(); }
 };
@@ -423,15 +417,14 @@ const remapTargetLabel = $("remapTargetLabel");
 const previewWrap = $("previewWrap");
 const previewImg = $("previewImg");
 const remapSel = $("remapSelection");
-const remapModeEl = $("remapMode");
 
 // refreshPreview() now surfaces exact server errors via msg(); no <img> onerror needed.
 
 function setRemapField(name) {
   remapField = name || null;
-  if (remapTargetLabel) remapTargetLabel.textContent = remapField ? `field: ${remapField}` : "";
+  remapTargetLabel.textContent = remapField ? `field: ${remapField}` : "";
   // Only now (remap mode on + field chosen) do we load the preview image.
-  if (remapModeEl && remapModeEl.checked && remapField && state.fileId && previewImg && !previewImg.src) {
+  if ($("remapMode").checked && remapField && state.fileId && !previewImg.src) {
     refreshPreview();
   }
 }
@@ -462,7 +455,7 @@ function remapLockReason() {
   return null;
 }
 
-if (remapModeEl) remapModeEl.addEventListener("change", async (e) => {
+$("remapMode").addEventListener("change", async (e) => {
   const on = e.target.checked;
   // Enforce lock when turning remap on
   if (on) {
@@ -520,14 +513,14 @@ function drawSel(a, b) {
   return { x: x / a.w, y: y / a.h, wN: w / a.w, hN: h / a.h };
 }
 
-if (previewImg) previewImg.addEventListener("mousedown", (e) => {
+previewImg.addEventListener("mousedown", (e) => {
   if (!$("remapMode").checked) return;
   if (!remapField) { msg("Click a field in the editor first, then drag on the preview.", "error"); return; }
   e.preventDefault();
   dragStart = imgPxFromEvent(e);
   drawSel(dragStart, dragStart);
 });
-if (previewWrap) previewWrap.addEventListener("mousemove", (e) => {
+previewWrap.addEventListener("mousemove", (e) => {
   if (!dragStart) return;
   drawSel(dragStart, imgPxFromEvent(e));
 });
