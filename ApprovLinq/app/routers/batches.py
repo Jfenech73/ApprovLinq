@@ -237,12 +237,13 @@ def _collect_summary_region_lines(payload: dict) -> list[str]:
 
 def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     reasons = str(payload.get('review_reasons') or '')
+    implied_deposit_amount = None
     m = re.search(r'deposit_component_detected:(\d+(?:\.\d{2})?)', reasons)
     if m:
         try:
-            return round(float(m.group(1)), 2)
+            implied_deposit_amount = round(float(m.group(1)), 2)
         except Exception:
-            pass
+            implied_deposit_amount = None
 
     total_amount = _parse_first_money(payload.get('total_amount'))
     net_amount = _parse_first_money(payload.get('net_amount'))
@@ -255,8 +256,15 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     label_re = re.compile(r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit|deposit|surcharge)\b", re.I)
     summary_text = "\n".join(lines)
     ranked: list[tuple[int, float]] = []
+    has_label_line = False
 
-    def _add_candidate(score: int, val: float | None) -> None:
+    def _looks_like_std_totals_only(block: str) -> bool:
+        low = (block or '').lower()
+        has_std = all(k in low for k in ('subtotal', 'vat', 'total')) or all(k in low for k in ('net', 'vat', 'total'))
+        has_dep_word = bool(label_re.search(low))
+        return has_std and not has_dep_word
+
+    def _add_candidate(score: int, val: float | None, *, require_strength: bool = True) -> None:
         if val is None:
             return
         try:
@@ -264,6 +272,15 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
         except Exception:
             return
         if f <= 0:
+            return
+        # Never allow values that equal invoice totals/vat/net to masquerade as BCRS.
+        if total_amount is not None and abs(f - total_amount) <= 0.01:
+            return
+        if net_amount is not None and abs(f - net_amount) <= 0.01:
+            return
+        if vat_amount is not None and abs(f - vat_amount) <= 0.01:
+            return
+        if require_strength and score < 12:
             return
         ranked.append((score, f))
 
@@ -276,24 +293,21 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     for pidx, pattern in enumerate(patterns):
         for match in pattern.finditer(summary_text):
             label_span = summary_text[max(0, match.start()-40):min(len(summary_text), match.end()+40)].lower()
+            # Find which collected line this match falls on
+            match_line = ""
+            pos = 0
+            for ln in lines:
+                if pos + len(ln) >= match.start():
+                    match_line = ln
+                    break
+                pos += len(ln) + 1
+
             if pidx == 2:
-                # Plain "deposit" pattern: accept when the surrounding context contains
-                # known summary/totals keywords OR when the matched line itself is in a
-                # summary context (catches "Deposit Summary" laid out as separate lines).
+                # Plain deposit is weak: require summary-specific neighbourhood and reject
+                # zero-value/ambiguous deposit summaries.
                 has_context_window = (
-                    'bcrs' in label_span
-                    or 'summary' in label_span
-                    or 'total' in label_span
-                    or 'refundable' in label_span
+                    'bcrs' in label_span or 'summary' in label_span or 'total' in label_span or 'refundable' in label_span
                 )
-                # Find which collected line this match falls on
-                match_line = ""
-                pos = 0
-                for ln in lines:
-                    if pos + len(ln) >= match.start():
-                        match_line = ln
-                        break
-                    pos += len(ln) + 1  # +1 for the "\n" join
                 has_summary_line = _is_summary_context(match_line)
                 if not has_context_window and not has_summary_line:
                     continue
@@ -302,13 +316,18 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
                 val = float(raw.replace(',', '.'))
             except Exception:
                 continue
-            score = 18 if pidx == 0 else 16 if pidx == 1 else 12
+            if val <= 0:
+                continue
+            has_label_line = True
+            score = 18 if pidx == 0 else 16 if pidx == 1 else 11
+            if _is_summary_context(match_line):
+                score += 4
             if total_amount is not None and net_amount is not None and vat_amount is not None:
                 if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
                     score += 12
                 elif total_amount > 0 and 0 < val < total_amount:
-                    score += 2
-            _add_candidate(score, val)
+                    score += 1
+            _add_candidate(score, val, require_strength=False)
 
     # Pass 2: line-based scoring within the summary region.
     for idx, line in enumerate(lines):
@@ -318,15 +337,14 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
             continue
         if _is_body_or_item_context(line) and not _is_summary_context(line):
             continue
+        has_label_line = True
 
         plain_deposit_only = ('deposit' in low and 'bcrs' not in low and 'refundable' not in low and 'surcharge' not in low)
-        neighborhood = ' '.join(lines[max(0, idx - 1): min(len(lines), idx + 2)]).lower()
+        neighborhood_lines = lines[max(0, idx - 1): min(len(lines), idx + 3)]
+        neighborhood = ' '.join(neighborhood_lines).lower()
         if plain_deposit_only:
-            # Build a list of neighbouring lines that are themselves summary context
-            # (not body/item lines). This prevents the "Total" column header in an
-            # item table from acting as a false summary signal.
             summary_neighbours = [
-                lines[nidx] for nidx in range(max(0, idx - 1), min(len(lines), idx + 2))
+                lines[nidx] for nidx in range(max(0, idx - 1), min(len(lines), idx + 3))
                 if nidx != idx and _is_summary_context(lines[nidx]) and not _is_body_or_item_context(lines[nidx])
             ]
             has_summary_neighbour = bool(summary_neighbours)
@@ -356,27 +374,28 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
                         if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
                             score += 12
                     _add_candidate(score, val)
+            # same-line amounts without a right-of-label relationship are much weaker
             for val in same_line_vals:
-                score = 12
+                score = 8
                 if 'bcrs' in low:
                     score += 8
                 if 'deposit' in low:
                     score += 4
                 if _is_summary_context(line):
-                    score += 4
+                    score += 3
                 if total_amount is not None and net_amount is not None and vat_amount is not None:
                     if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
-                        score += 10
-                _add_candidate(score, val)
+                        score += 8
+                _add_candidate(score, val, require_strength=False)
 
-        for nidx in range(max(0, idx - 1), min(len(lines), idx + 2)):
+        for nidx in range(max(0, idx - 1), min(len(lines), idx + 3)):
             if nidx == idx:
                 continue
             cand_line = lines[nidx]
             if _is_body_or_item_context(cand_line) and not _is_summary_context(cand_line):
                 continue
             for val in _parse_money_candidates(cand_line):
-                score = 8
+                score = 6
                 if 'bcrs' in low:
                     score += 8
                 if 'refundable' in low:
@@ -388,14 +407,34 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
                 if total_amount is not None and net_amount is not None and vat_amount is not None:
                     if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
                         score += 10
-                _add_candidate(score, val)
+                _add_candidate(score, val, require_strength=False)
+
+    # Guardrail 1: never split a standard balanced invoice with no summary-level label.
+    if not has_label_line and _looks_like_std_totals_only(summary_text):
+        return None
+
+    # Guardrail 2: arithmetic mismatch alone is never enough. Only use implied deposit
+    # amount as a small boost when there is already real label evidence.
+    if implied_deposit_amount and has_label_line:
+        label_text = summary_text.lower()
+        exact_label_boost = 3 if ('bcrs' in label_text or 'refundable deposit' in label_text) else 1
+        if total_amount is not None and net_amount is not None and vat_amount is not None:
+            if abs((net_amount + vat_amount + implied_deposit_amount) - total_amount) <= 0.06:
+                _add_candidate(12 + exact_label_boost, implied_deposit_amount, require_strength=False)
 
     if not ranked:
         return None
 
     ranked.sort(key=lambda x: (x[0], -abs(x[1])), reverse=True)
     best_score, best_val = ranked[0]
-    return best_val if best_score >= 12 else None
+
+    # Final guardrails:
+    # - require strong evidence
+    # - reject weak deposit-summary ambiguity when zero/unclear
+    # - plain deposit with weak score should not split
+    if best_score < 14:
+        return None
+    return best_val
 
 
 def _build_bcrs_row(row: InvoiceRow, amount: float) -> InvoiceRow:
