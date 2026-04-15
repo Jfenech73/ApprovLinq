@@ -137,6 +137,7 @@ function render() {
   });
 
   renderEditor();
+  updateRemapUI();
 }
 
 function renderEditor() {
@@ -441,6 +442,33 @@ function remapLockReason() {
   return null;
 }
 
+// Update the remap checkbox appearance based on current lock state.
+// Called after every render() so the UI always reflects batch/row state.
+function updateRemapUI() {
+  const cb     = $("remapMode");
+  const reason = remapLockReason();
+  if (!cb) return;
+  const lbl = cb.closest("label");
+  if (reason) {
+    cb.disabled = true;
+    cb.title    = reason;
+    cb.checked  = false;
+    if (lbl) { lbl.style.opacity = "0.4"; lbl.style.cursor = "not-allowed"; }
+    const prev = $("prevPageBtn"); const next = $("nextPageBtn");
+    if (prev) { prev.disabled = true;  prev.title = reason; }
+    if (next) { next.disabled = true;  next.title = reason; }
+    previewWrap.style.display = "none";
+    remapHint.hidden = true;
+  } else {
+    cb.disabled = false;
+    cb.title    = "Enable remap mode to re-draw field regions on the source PDF";
+    if (lbl) { lbl.style.opacity = ""; lbl.style.cursor = ""; }
+    const prev = $("prevPageBtn"); const next = $("nextPageBtn");
+    if (prev) { prev.disabled = false; prev.title = ""; }
+    if (next) { next.disabled = false; next.title = ""; }
+  }
+}
+
 $("remapMode").addEventListener("change", async (e) => {
   const on = e.target.checked;
   if (on) {
@@ -448,17 +476,22 @@ $("remapMode").addEventListener("change", async (e) => {
     if (reason) {
       e.target.checked = false;
       msg(reason, "error");
+      updateRemapUI();
       return;
     }
   }
-  previewWrap.classList.toggle("remap-active", on);
   remapHint.hidden = !on;
   if (!on) {
     remapSel.hidden = true; dragStart = null;
     previewImg.src = ""; previewImg.hidden = true;
     const ph = $("previewUnavailable"); if (ph) ph.hidden = true;
+    previewWrap.style.display = "none";
+    previewWrap.classList.remove("remap-active");
     return;
   }
+  // Show preview panel when remap activates
+  previewWrap.style.display = "";
+  previewWrap.classList.add("remap-active");
   if (!state.fileId && state.rows.length) {
     const r0 = state.rows[0];
     state.selected = r0.id; state.fileId = r0.source_file_id; state.page = r0.page_no || 1;
