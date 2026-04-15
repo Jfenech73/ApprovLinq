@@ -236,12 +236,13 @@ def _collect_summary_region_lines(payload: dict) -> list[str]:
 
 
 def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
-    # NOTE: We deliberately do NOT use the arithmetic deposit_component_detected
-    # shortcut here.  That signal (from validate_invoice) is stored in
-    # review_reasons purely as metadata.  It is NOT sufficient evidence for a
-    # BCRS split because it fires on any arithmetic mismatch that lands on a
-    # common denomination, even when no BCRS/deposit label exists in the document.
-    # A BCRS split requires confirmed label+region evidence (see below).
+    reasons = str(payload.get('review_reasons') or '')
+    m = re.search(r'deposit_component_detected:(\d+(?:\.\d{2})?)', reasons)
+    if m:
+        try:
+            return round(float(m.group(1)), 2)
+        except Exception:
+            pass
 
     total_amount = _parse_first_money(payload.get('total_amount'))
     net_amount = _parse_first_money(payload.get('net_amount'))
@@ -394,47 +395,7 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
 
     ranked.sort(key=lambda x: (x[0], -abs(x[1])), reverse=True)
     best_score, best_val = ranked[0]
-    if best_score < 20:
-        return None
-
-    # ── Final guard: require at least one line with an actual BCRS/deposit label
-    # and a monetary value.  This prevents false splits when only ordinary totals
-    # (subtotal / VAT / total) exist with no independent deposit/BCRS label line —
-    # i.e. the "Dione false positive" pattern where a reconciliation match alone
-    # would otherwise promote a spurious candidate.
-    _TOTALS_ONLY_RE = re.compile(
-        r'^\s*(?:sub\s*total|subtotal|net\s*amount|net|v\.?a\.?t\.?|vat|tax|'
-        r'invoice\s*total|grand\s*total|total\s*(?:due|amount|eur|incl|net)?'
-        r'|amount\s*due|balance\s*due)\s*[:\-]?\s*[€$£]?[\d.,]+\s*$',
-        re.I,
-    )
-    _DEPOSIT_LABEL_RE = re.compile(
-        r'\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit|deposit\s+summary'
-        r'|deposit\s+surcharge|returnable(?:\s+deposit)?|surcharge|deposit)\b',
-        re.I,
-    )
-    has_label_line = False
-    for ln in lines:
-        ln_low = ln.lower()
-        if _DEPOSIT_LABEL_RE.search(ln_low):
-            is_pure_total = bool(_TOTALS_ONLY_RE.match(ln))
-            if not is_pure_total:
-                if _parse_money_candidates(ln):
-                    has_label_line = True
-                    break
-                # Value may be on an immediate neighbour line
-                idx = lines.index(ln)
-                for nidx in range(max(0, idx - 1), min(len(lines), idx + 2)):
-                    if nidx != idx and _parse_money_candidates(lines[nidx]):
-                        has_label_line = True
-                        break
-            if has_label_line:
-                break
-
-    if not has_label_line:
-        return None
-
-    return best_val
+    return best_val if best_score >= 12 else None
 
 
 def _build_bcrs_row(row: InvoiceRow, amount: float) -> InvoiceRow:
