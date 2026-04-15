@@ -55,6 +55,12 @@
           <section class="card">
             <div class="section-head">
               <h2 style="margin:0">Edit selected row</h2>
+              <div class="row gap-sm wrap" style="display:none">
+                <button id="prevPageBtn" class="btn btn-sm" type="button">◀</button>
+                <span id="pageLabel" class="muted">page — / —</span>
+                <button id="nextPageBtn" class="btn btn-sm" type="button">▶</button>
+                <label><input id="remapMode" type="checkbox" /> Remap mode</label>
+              </div>
             </div>
             <div id="rowEditor" class="stack"></div>
             <!-- remap controls kept (hidden) so review.js remap logic still works -->

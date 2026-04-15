@@ -128,7 +128,7 @@ function render() {
     d.onclick = async () => {
       state.selected = r.id; state.fileId = r.source_file_id; state.page = r.page_no || 1;
       render(); loadAudit(r.id); await ensurePageCount();
-      if ($("remapMode").checked) refreshPreview();
+      const rm = $("remapMode"); if (rm && rm.checked) refreshPreview();
     };
     list.appendChild(d);
   });
@@ -291,17 +291,19 @@ async function fetchPageCount() {
 }
 
 function updatePageControls() {
-  $("pageLabel").textContent = `page ${state.page} / ${state.pageCount}`;
-  $("prevPageBtn").disabled = state.page <= 1;
-  $("nextPageBtn").disabled = state.page >= state.pageCount;
+  const pageLabel = $("pageLabel");
+  const prevPageBtn = $("prevPageBtn");
+  const nextPageBtn = $("nextPageBtn");
+  if (pageLabel) pageLabel.textContent = `page ${state.page} / ${state.pageCount}`;
+  if (prevPageBtn) prevPageBtn.disabled = state.page <= 1;
+  if (nextPageBtn) nextPageBtn.disabled = state.page >= state.pageCount;
 }
 
 let _previewBlobUrl = null;
 function _showPreviewUnavailable(message) {
   const img = $("previewImg");
   const ph  = $("previewUnavailable");
-  img.src = "";
-  img.hidden = true;
+  if (img) { img.src = ""; img.hidden = true; }
   if (ph) {
     const msgEl = $("previewUnavailableMsg");
     if (msgEl && message) msgEl.textContent = message;
@@ -312,20 +314,24 @@ function _showPreviewImage(blobUrl) {
   const img = $("previewImg");
   const ph  = $("previewUnavailable");
   if (ph) ph.hidden = true;
+  if (!img) return;
   img.hidden = false;
   img.src = blobUrl;
 }
 async function refreshPreview() {
   const img = $("previewImg");
+  const pageLabel = $("pageLabel");
+  const ph = $("previewUnavailable");
+  if (!img && !ph) return;
   if (!state.fileId) {
-    img.src = ""; img.hidden = true;
-    const ph = $("previewUnavailable"); if (ph) ph.hidden = true;
-    $("pageLabel").textContent = "page — / —";
+    if (img) { img.src = ""; img.hidden = true; }
+    if (ph) ph.hidden = true;
+    if (pageLabel) pageLabel.textContent = "page — / —";
     return;
   }
   // Reset to loading state: hide placeholder, show (empty) img
-  const ph = $("previewUnavailable"); if (ph) ph.hidden = true;
-  img.hidden = false;
+  if (ph) ph.hidden = true;
+  if (img) img.hidden = false;
   updatePageControls();
   try {
     const r = await fetch(`/review/files/${state.fileId}/preview?page=${state.page}`, { headers: hdrs() });
@@ -362,11 +368,13 @@ async function ensurePageCount() {
   }
 }
 
-$("prevPageBtn").onclick = async () => {
+const prevPageBtn = $("prevPageBtn");
+if (prevPageBtn) prevPageBtn.onclick = async () => {
   await ensurePageCount();
   if (state.page > 1) { state.page--; refreshPreview(); }
 };
-$("nextPageBtn").onclick = async () => {
+const nextPageBtn = $("nextPageBtn");
+if (nextPageBtn) nextPageBtn.onclick = async () => {
   await ensurePageCount();
   if (state.page < state.pageCount) { state.page++; refreshPreview(); }
 };
@@ -422,9 +430,10 @@ const remapSel = $("remapSelection");
 
 function setRemapField(name) {
   remapField = name || null;
-  remapTargetLabel.textContent = remapField ? `field: ${remapField}` : "";
+  if (remapTargetLabel) remapTargetLabel.textContent = remapField ? `field: ${remapField}` : "";
   // Only now (remap mode on + field chosen) do we load the preview image.
-  if ($("remapMode").checked && remapField && state.fileId && !previewImg.src) {
+  const remapMode = $("remapMode");
+  if (remapMode && remapMode.checked && remapField && state.fileId && previewImg && !previewImg.src) {
     refreshPreview();
   }
 }
@@ -455,7 +464,8 @@ function remapLockReason() {
   return null;
 }
 
-$("remapMode").addEventListener("change", async (e) => {
+const remapModeEl = $("remapMode");
+if (remapModeEl) remapModeEl.addEventListener("change", async (e) => {
   const on = e.target.checked;
   // Enforce lock when turning remap on
   if (on) {
@@ -466,11 +476,11 @@ $("remapMode").addEventListener("change", async (e) => {
       return;
     }
   }
-  previewWrap.classList.toggle("remap-active", on);
-  remapHint.hidden = !on;
+  if (previewWrap) previewWrap.classList.toggle("remap-active", on);
+  if (remapHint) remapHint.hidden = !on;
   if (!on) {
-    remapSel.hidden = true; dragStart = null;
-    previewImg.src = ""; previewImg.hidden = true;
+    if (remapSel) remapSel.hidden = true; dragStart = null;
+    if (previewImg) { previewImg.src = ""; previewImg.hidden = true; }
     const ph = $("previewUnavailable"); if (ph) ph.hidden = true;
     return;
   }
@@ -488,6 +498,7 @@ let dragStart = null;        // {xPx, yPx} pixel coords relative to image top-le
 let imgRectCache = null;     // cached image getBoundingClientRect
 
 function imgPxFromEvent(e) {
+  if (!previewImg) return {xPx:0,yPx:0,w:1,h:1};
   const r = previewImg.getBoundingClientRect();
   const x = Math.min(r.width,  Math.max(0, e.clientX - r.left));
   const y = Math.min(r.height, Math.max(0, e.clientY - r.top));
@@ -497,6 +508,7 @@ function drawSel(a, b) {
   // Position the overlay in pixel coordinates relative to the WRAPPER,
   // by computing the image's offset inside the wrapper. This guarantees the
   // rectangle aligns to the rendered image regardless of wrapper padding/margins.
+  if (!previewImg || !previewWrap || !remapSel) return { x: 0, y: 0, wN: 0, hN: 0 };
   const imgRect = previewImg.getBoundingClientRect();
   const wrapRect = previewWrap.getBoundingClientRect();
   const offX = imgRect.left - wrapRect.left;
@@ -509,18 +521,19 @@ function drawSel(a, b) {
   remapSel.style.top    = (offY + y) + "px";
   remapSel.style.width  = w + "px";
   remapSel.style.height = h + "px";
-  remapSel.hidden = false;
+  if (remapSel) remapSel.hidden = false;
   return { x: x / a.w, y: y / a.h, wN: w / a.w, hN: h / a.h };
 }
 
-previewImg.addEventListener("mousedown", (e) => {
-  if (!$("remapMode").checked) return;
+if (previewImg) previewImg.addEventListener("mousedown", (e) => {
+  const remapMode = $("remapMode");
+  if (!remapMode || !remapMode.checked) return;
   if (!remapField) { msg("Click a field in the editor first, then drag on the preview.", "error"); return; }
   e.preventDefault();
   dragStart = imgPxFromEvent(e);
   drawSel(dragStart, dragStart);
 });
-previewWrap.addEventListener("mousemove", (e) => {
+if (previewWrap) previewWrap.addEventListener("mousemove", (e) => {
   if (!dragStart) return;
   drawSel(dragStart, imgPxFromEvent(e));
 });
@@ -530,20 +543,20 @@ window.addEventListener("mouseup", async (e) => {
   const region = drawSel(dragStart, end);
   dragStart = null;
   if (region.wN < 0.01 || region.hN < 0.01) {
-    remapSel.hidden = true;
+    if (remapSel) remapSel.hidden = true;
     return; // accidental click / too-small
   }
   // Re-check lock before saving (belt-and-suspenders vs. the checkbox guard)
   const lockReason = remapLockReason();
   if (lockReason) {
-    remapSel.hidden = true;
+    if (remapSel) remapSel.hidden = true;
     msg(lockReason, "error");
     return;
   }
   const row = state.rows.find(x => x.id === state.selected);
   if (!row) { msg("Select a row first.", "error"); return; }
   if (!confirm(`Save region for field "${remapField}" on page ${state.page}?`)) {
-    remapSel.hidden = true;
+    if (remapSel) remapSel.hidden = true;
     return;
   }
   const r = await fetch(`/review/batches/${batchId}/rows/${row.id}/remap`, {
@@ -571,7 +584,7 @@ window.addEventListener("mouseup", async (e) => {
   } else {
     msg(`Remap saved for ${remapField} (no text detected — region stored for future learning).`, "success");
   }
-  setTimeout(() => { remapSel.hidden = true; }, 1200);
+  setTimeout(() => { if (remapSel) remapSel.hidden = true; }, 1200);
 });
 
 if (typeof ensureAuth === "function" && !ensureAuth()) {
