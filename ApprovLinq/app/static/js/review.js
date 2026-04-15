@@ -128,7 +128,7 @@ function render() {
     d.onclick = async () => {
       state.selected = r.id; state.fileId = r.source_file_id; state.page = r.page_no || 1;
       render(); loadAudit(r.id); await ensurePageCount();
-      if ($("remapMode").checked) refreshPreview();
+      if (remapModeEl && remapModeEl.checked) refreshPreview();
     };
     list.appendChild(d);
   });
@@ -144,24 +144,28 @@ function renderEditor() {
   const r = state.rows.find(x => x.id === state.selected);
   const ed = $("rowEditor");
   if (!r) { ed.innerHTML = '<div class="muted">Select a row from the left.</div>'; return; }
-
-  // Build a field→reason map from review_reasons entries.
-  const reasonMap = {};
+  let html = '<div class="field-grid">';
+  // Build a field→reason map from the pipe-separated review_reasons string
+  // Format stored: "reason_code|reason_code|field:reason|field:reason"
+  // Simple heuristic: if a reason_code contains the field name it belongs to that field,
+  // otherwise treat as global reasons shown on all flagged fields.
+  const reasonMap = {};  // field → [human reason, ...]
   const globalReasons = [];
   const REASON_LABELS = {
-    no_supplier:            "Supplier unclear",
-    invoice_number_missing: "Invoice number missing",
-    no_amount:              "No amount found",
-    ambiguous_date_locale:  "Date format ambiguous",
-    vat_missing:            "VAT amount missing",
-    vat_anomaly:            "VAT rate unusual",
-    totals_mismatch:        "Totals do not reconcile",
-    low_confidence:         "Low extraction confidence",
+    no_supplier:           "Supplier unclear",
+    invoice_number_missing:"Invoice number missing",
+    no_amount:             "No amount found",
+    ambiguous_date_locale: "Date format ambiguous",
+    vat_missing:           "VAT amount missing",
+    vat_anomaly:           "VAT rate unusual",
+    totals_mismatch:       "Totals do not reconcile",
+    low_confidence:        "Low extraction confidence",
     deposit_component_detected: "Deposit/BCRS detected",
-    subtotal_not_found:     "Sub-total not found",
+    subtotal_not_found:    "Sub-total not found",
   };
   (r.review_reasons || []).forEach(raw => {
     const s = String(raw || "");
+    // Check if it encodes a field-specific reason like "low_conf:supplier_name"
     const colonIdx = s.indexOf(":");
     if (colonIdx > 0) {
       const field = s.slice(colonIdx + 1);
@@ -173,29 +177,34 @@ function renderEditor() {
     }
   });
 
+  // Tool marker row at top of editor
   const toolLabel = (() => {
     const m = (r.method_used || "").toLowerCase();
-    if (m.includes("azure_di") || m.includes("di")) return "Azure Document Intelligence (DI)";
+    if (m.includes("azure_di") || m.includes("di"))       return "Azure Document Intelligence (DI)";
     if (m.includes("openai") || m.includes("vision") || m.includes("ai")) return "AI (OpenAI / Vision)";
-    if (m.includes("ocr")) return "OCR";
-    if (m && m !== "") return "Native text extraction";
+    if (m.includes("ocr"))                                 return "OCR";
+    if (m && m !== "")                                     return "Native text extraction";
     return "Unknown";
   })();
-
-  let html = '';
   if (r.method_used) {
-    html += `<div class="review-editor-meta muted" style="margin-bottom:8px"><strong>Extraction tool:</strong> ${esc(toolLabel)}</div>`;
+    html += `<div style="margin-bottom:8px;font-size:12px;color:var(--ap-text-sub)">
+      <strong>Extraction tool:</strong> ${esc(toolLabel)}
+    </div>`;
   }
+
+  // Global reasons banner (not field-specific)
   if (r.review_required && globalReasons.length) {
     html += `<div class="review-reasons-banner">⚠ ${globalReasons.map(esc).join(" · ")}</div>`;
   }
 
-  html += '<div class="field-grid">';
   FIELDS.forEach(f => {
     const cur = r.current[f] == null ? "" : r.current[f];
     const orig = r.original[f] == null ? "" : r.original[f];
     const flagged = (r.review_fields || []).includes(f);
-    const fieldReasons = reasonMap[f] || [];
+    const fieldReasons = [
+      ...(reasonMap[f] || []),
+      ...(flagged && globalReasons.length === 0 ? globalReasons : []),
+    ];
     const reasonHtml = fieldReasons.length
       ? `<div class="field-reason">⚠ ${fieldReasons.map(esc).join(" · ")}</div>`
       : "";
@@ -206,7 +215,7 @@ function renderEditor() {
        <button class="btn btn-secondary" data-revert="${esc(f)}" type="button" title="Revert to original">↶</button>
        <div class="orig">original: ${esc(orig) || "—"}${reasonHtml}</div>`;
   });
-  html += '</div>';
+  html += "</div>";
   html +=
     `<div class="stack" style="margin-top:10px">
       <label class="row gap-sm" style="align-items:center">
@@ -282,9 +291,12 @@ async function fetchPageCount() {
 }
 
 function updatePageControls() {
-  $("pageLabel").textContent = `page ${state.page} / ${state.pageCount}`;
-  $("prevPageBtn").disabled = state.page <= 1;
-  $("nextPageBtn").disabled = state.page >= state.pageCount;
+  const pageLabel = $("pageLabel");
+  const prevBtn = $("prevPageBtn");
+  const nextBtn = $("nextPageBtn");
+  if (pageLabel) pageLabel.textContent = `page ${state.page} / ${state.pageCount}`;
+  if (prevBtn) prevBtn.disabled = state.page <= 1;
+  if (nextBtn) nextBtn.disabled = state.page >= state.pageCount;
 }
 
 let _previewBlobUrl = null;
@@ -308,6 +320,7 @@ function _showPreviewImage(blobUrl) {
 }
 async function refreshPreview() {
   const img = $("previewImg");
+  if (!img) return;
   if (!state.fileId) {
     img.src = ""; img.hidden = true;
     const ph = $("previewUnavailable"); if (ph) ph.hidden = true;
@@ -353,11 +366,13 @@ async function ensurePageCount() {
   }
 }
 
-$("prevPageBtn").onclick = async () => {
+const _prevPageBtn = $("prevPageBtn");
+if (_prevPageBtn) _prevPageBtn.onclick = async () => {
   await ensurePageCount();
   if (state.page > 1) { state.page--; refreshPreview(); }
 };
-$("nextPageBtn").onclick = async () => {
+const _nextPageBtn = $("nextPageBtn");
+if (_nextPageBtn) _nextPageBtn.onclick = async () => {
   await ensurePageCount();
   if (state.page < state.pageCount) { state.page++; refreshPreview(); }
 };
@@ -408,14 +423,15 @@ const remapTargetLabel = $("remapTargetLabel");
 const previewWrap = $("previewWrap");
 const previewImg = $("previewImg");
 const remapSel = $("remapSelection");
+const remapModeEl = $("remapMode");
 
 // refreshPreview() now surfaces exact server errors via msg(); no <img> onerror needed.
 
 function setRemapField(name) {
   remapField = name || null;
-  remapTargetLabel.textContent = remapField ? `field: ${remapField}` : "";
+  if (remapTargetLabel) remapTargetLabel.textContent = remapField ? `field: ${remapField}` : "";
   // Only now (remap mode on + field chosen) do we load the preview image.
-  if ($("remapMode").checked && remapField && state.fileId && !previewImg.src) {
+  if (remapModeEl && remapModeEl.checked && remapField && state.fileId && previewImg && !previewImg.src) {
     refreshPreview();
   }
 }
@@ -446,7 +462,7 @@ function remapLockReason() {
   return null;
 }
 
-$("remapMode").addEventListener("change", async (e) => {
+if (remapModeEl) remapModeEl.addEventListener("change", async (e) => {
   const on = e.target.checked;
   // Enforce lock when turning remap on
   if (on) {
@@ -504,14 +520,14 @@ function drawSel(a, b) {
   return { x: x / a.w, y: y / a.h, wN: w / a.w, hN: h / a.h };
 }
 
-previewImg.addEventListener("mousedown", (e) => {
+if (previewImg) previewImg.addEventListener("mousedown", (e) => {
   if (!$("remapMode").checked) return;
   if (!remapField) { msg("Click a field in the editor first, then drag on the preview.", "error"); return; }
   e.preventDefault();
   dragStart = imgPxFromEvent(e);
   drawSel(dragStart, dragStart);
 });
-previewWrap.addEventListener("mousemove", (e) => {
+if (previewWrap) previewWrap.addEventListener("mousemove", (e) => {
   if (!dragStart) return;
   drawSel(dragStart, imgPxFromEvent(e));
 });
