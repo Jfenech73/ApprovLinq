@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Platform admin — Approvlinq</title>
+  <script>
+    (function(){ try { var t = localStorage.getItem("ap_theme"); if (t==="light"||t==="dark") document.documentElement.setAttribute("data-theme", t); } catch(e){} })();
+  </script>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/components.css" />
+  
+</head>
+<body class="ap-app">
+  <div data-ap-shell='{"active":"admin","crumb":[["Configure",""],["Platform admin","cur"]]}'></div>
+  <div data-ap-page-body>
+    <div class="ap-page">
+<div id="pageMessage" class="message"></div>
+
+    <main class="grid">
+      <section class="card">
+        <div class="section-head">
+          <h2>Create Tenant</h2>
+          <span class="muted">Keep this simple. You can add more detail later.</span>
+        </div>
+        <form id="tenantForm" class="stack">
+          <input id="tenantCode" type="text" placeholder="Tenant code" required />
+          <input id="tenantName" type="text" placeholder="Tenant name" required />
+          <input id="tenantContactName" type="text" placeholder="Contact name" />
+          <input id="tenantContactEmail" type="text" placeholder="Contact email" />
+          <select id="tenantStatus">
+            <option value="active" selected>Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
+          <textarea id="tenantNotes" placeholder="Notes"></textarea>
+          <button class="btn btn-primary" type="submit">Create Tenant</button>
+        </form>
+        <div id="tenantMessage" class="message"></div>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <h2>Create User</h2>
+          <span class="muted">One tenant selection keeps setup simple.</span>
+        </div>
+        <form id="userForm" class="stack">
+          <input id="userFullName" type="text" placeholder="Full name" required />
+          <input id="userEmail" type="text" placeholder="Email" required />
+          <input id="userPassword" type="password" placeholder="Temporary password" required />
+          <select id="userRole">
+            <option value="tenant" selected>Tenant user</option>
+            <option value="admin">Platform admin</option>
+          </select>
+          <select id="userIsActive">
+            <option value="true" selected>Active</option>
+            <option value="false">Inactive</option>
+          </select>
+          <label for="userTenantId">Assign tenant</label>
+          <select id="userTenantId">
+            <option value="">No tenant selected</option>
+          </select>
+          <button class="btn btn-primary" type="submit">Create User</button>
+        </form>
+        <div id="userMessage" class="message"></div>
+      </section>
+
+      <section class="card full-width">
+        <div class="section-head">
+          <h2>Tenant List</h2>
+          <span class="muted">Use the action button to set active or inactive.</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tenant</th>
+                <th>Code</th>
+                <th>Status</th>
+                <th>Active</th>
+                <th>Contact</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="tenantsTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card full-width">
+        <div class="section-head">
+          <h2>User List</h2>
+          <span class="muted">Quickly set users active or inactive.</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Role</th>
+                <th>Active</th>
+                <th>Created</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="usersTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card full-width">
+        <div class="section-head">
+          <h2>Capacity Usage by Tenant</h2>
+          <button id="refreshCapacityBtn" class="btn btn-secondary" type="button">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tenant</th>
+                <th>Status</th>
+                <th>Companies</th>
+                <th>Batches</th>
+                <th>Files</th>
+                <th>Rows</th>
+                <th>Storage MB</th>
+              </tr>
+            </thead>
+            <tbody id="capacityTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card full-width">
+        <div class="section-head">
+          <h2>Issue Log</h2>
+          <span class="muted">Pending, in progress, resolved.</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Tenant</th>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Priority</th>
+                <th>Resolution</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="issuesTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    </div>
+  </div>
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/admin.js"></script>
+  <script src="/static/js/ap-ui.js"></script>
+</body>
+</html>

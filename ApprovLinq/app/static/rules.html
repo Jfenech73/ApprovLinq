@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rules — Approvlinq</title>
+  <script>
+    (function(){ try { var t = localStorage.getItem("ap_theme"); if (t==="light"||t==="dark") document.documentElement.setAttribute("data-theme", t); } catch(e){} })();
+  </script>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/components.css" />
+</head>
+<body class="ap-app">
+  <div data-ap-shell='{"active":"rules","crumb":[["Configure",""],["Rules","cur"]]}'></div>
+  <div data-ap-page-body>
+    <div class="ap-page">
+      <h1 class="ap-h1">Rules</h1>
+      <p class="ap-sub">Correction rules are applied automatically during scanning to normalise supplier names, nominal codes, and other fields. Disabled rules are skipped.</p>
+
+      <div class="ap-card" style="padding:var(--ap-s-3) var(--ap-s-5);">
+        <div class="row gap-sm wrap" style="align-items:center">
+          <label class="ap-label" for="companyFilter" style="margin:0">Company</label>
+          <select id="companyFilter" class="ap-select" style="min-width:200px">
+            <option value="">All companies</option>
+          </select>
+
+          <label class="ap-label" for="statusFilter" style="margin:0">Status</label>
+          <select id="statusFilter" class="ap-select" style="min-width:130px">
+            <option value="">All</option>
+            <option value="active">Active only</option>
+            <option value="disabled">Disabled only</option>
+          </select>
+
+          <input id="searchInput" type="text" class="ap-input"
+                 placeholder="Search field, source or target…"
+                 style="min-width:220px;flex:1" />
+
+          <button id="refreshBtn" class="ap-btn ap-btn-sm" type="button">Refresh</button>
+        </div>
+      </div>
+
+      <div id="pageMessage" class="message" style="margin-top:var(--ap-s-3)"></div>
+
+      <div class="card full-width" style="margin-top:var(--ap-s-3)">
+        <div class="section-head">
+          <h2 style="margin:0">Correction rules</h2>
+          <span id="ruleCount" class="muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="rulesTable">
+            <thead>
+              <tr>
+                <th>Field</th>
+                <th>Source (matches)</th>
+                <th>Target (replaces with)</th>
+                <th>Scope</th>
+                <th>Status</th>
+                <th>Created</th>
+                <th style="text-align:right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="rulesTableBody">
+              <tr><td colspan="7" class="muted" style="text-align:center;padding:24px">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit Modal -->
+  <div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:var(--ap-bg-surface);border:1px solid var(--ap-border);border-radius:var(--ap-r-lg);padding:var(--ap-s-6);width:min(480px,92vw);box-shadow:0 8px 32px rgba(0,0,0,.18)">
+      <h2 style="margin:0 0 var(--ap-s-1);font-size:var(--ap-fs-16)">Edit rule</h2>
+      <p id="editField" class="muted" style="margin:0 0 var(--ap-s-4);font-size:var(--ap-fs-12)"></p>
+      <div class="stack">
+        <div>
+          <label class="ap-label" for="editSource">Source pattern <span class="muted">(stored as lowercase — what the scanner sees)</span></label>
+          <input id="editSource" type="text" class="ap-input" style="width:100%" autocomplete="off" />
+        </div>
+        <div>
+          <label class="ap-label" for="editTarget">Target value <span class="muted">(what it should become)</span></label>
+          <input id="editTarget" type="text" class="ap-input" style="width:100%" autocomplete="off" />
+        </div>
+        <div id="editMessage" class="message"></div>
+      </div>
+      <div class="row gap-sm" style="margin-top:var(--ap-s-5);justify-content:flex-end">
+        <button id="editCancelBtn" class="ap-btn" type="button">Cancel</button>
+        <button id="editSaveBtn"   class="ap-btn ap-btn-primary" type="button">Save changes</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/rules.js"></script>
+  <script src="/static/js/ap-ui.js"></script>
+</body>
+</html>

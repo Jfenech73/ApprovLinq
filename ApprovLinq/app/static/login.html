@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in — Approvlinq</title>
+  <script>
+    (function(){ try { var t = localStorage.getItem("ap_theme"); if (t==="light"||t==="dark") document.documentElement.setAttribute("data-theme", t); } catch(e){} })();
+  </script>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/components.css" />
+</head>
+<body class="ap-app">
+  <div style="position:absolute; top:16px; right:16px;">
+    <button class="ap-theme-toggle" data-ap-theme-toggle type="button" aria-label="Toggle theme"></button>
+  </div>
+
+  <div class="ap-login-wrap">
+    <div class="ap-login-card">
+      <div class="ap-login-logo" data-ap-logo="wordmark"></div>
+      <h1 class="ap-login-h">Welcome back</h1>
+      <p class="ap-login-s">Invoice scanning solution</p>
+
+      <form id="loginForm">
+        <div class="ap-field">
+          <label class="ap-label" for="email">Email</label>
+          <input id="email" class="ap-input" type="text" placeholder="you@company.com" autocomplete="username" required />
+        </div>
+        <div class="ap-field">
+          <label class="ap-label" for="password">Password</label>
+          <input id="password" class="ap-input" type="password" placeholder="••••••••" autocomplete="current-password" required />
+        </div>
+        <button class="ap-btn ap-btn-primary" type="submit" style="width:100%; margin-top:4px;">Sign in</button>
+      </form>
+
+      <div id="loginMessage" class="ap-message" style="margin-top:16px;"></div>
+
+      <p style="text-align:center; margin:20px 0 0;">
+        <button id="helpBtn" class="ap-btn ap-btn-ghost ap-btn-sm" type="button" aria-label="Open help">Need help?</button>
+      </p>
+    </div>
+  </div>
+
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/login.js"></script>
+  <script src="/static/js/ap-ui.js"></script>
+</body>
+</html>

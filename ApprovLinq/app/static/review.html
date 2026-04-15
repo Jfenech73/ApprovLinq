@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Review — Approvlinq</title>
+  <script>
+    (function(){ try { var t = localStorage.getItem("ap_theme"); if (t==="light"||t==="dark") document.documentElement.setAttribute("data-theme", t); } catch(e){} })();
+  </script>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/components.css" />
+</head>
+<body class="ap-app">
+  <div data-ap-shell='{"active":"","crumb":[["Work",""],["Batches",""],["Review","cur"]]}'></div>
+  <div data-ap-page-body>
+    <div class="ap-page">
+      <div id="pageMessage" class="message"></div>
+
+      <main class="stack-lg">
+        <section class="card">
+          <div class="section-head">
+            <div style="display:flex;align-items:center;gap:12px">
+              <h2 id="batchTitle" style="margin:0">Loading…</h2>
+              <span class="pill" id="batchStatusPill">—</span>
+            </div>
+            <div class="row gap-sm wrap">
+              <button id="approveBtn" class="btn" type="button">Approve</button>
+              <button id="markFileReviewedBtn" class="btn" type="button" hidden>Mark file reviewed</button>
+              <button id="exportBtn"  class="btn btn-primary"   type="button">Export Excel</button>
+              <button id="reopenBtn"  class="btn" type="button">Reopen</button>
+            </div>
+          </div>
+          <div class="batch-meta">
+            <div><span class="label">Rows</span><span id="statRows">-</span></div>
+            <div><span class="label">Corrected</span><span id="statCorrected">-</span></div>
+            <div><span class="label">Flagged</span><span id="statFlagged">-</span></div>
+            <div><span class="label">Export version</span><span id="statVersion">-</span></div>
+          </div>
+        </section>
+
+        <div class="review-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <section class="card">
+            <div class="section-head">
+              <h2 style="margin:0">Rows</h2>
+              <div class="row gap-sm wrap filter-chips">
+                <button class="btn btn-sm active" data-filter="all" type="button">All</button>
+                <button class="btn btn-sm"        data-filter="needs_review" type="button">Needs review</button>
+                <button class="btn btn-sm"        data-filter="corrected"    type="button">Corrected</button>
+                <button class="btn btn-sm"        data-filter="low_conf"     type="button">Low confidence</button>
+              </div>
+            </div>
+            <div id="rowList" class="row-list"></div>
+          </section>
+
+          <section class="card">
+            <div class="section-head">
+              <h2 style="margin:0">Edit selected row</h2>
+              <div class="row gap-sm wrap">
+                <button id="prevPageBtn" class="btn btn-sm" type="button">◀</button>
+                <span id="pageLabel" class="muted">page 1</span>
+                <button id="nextPageBtn" class="btn btn-sm" type="button">▶</button>
+                <label class="row gap-sm" style="align-items:center;font-size:12px">
+                  <input type="checkbox" id="remapMode" /> Remap mode
+                </label>
+              </div>
+            </div>
+            <div id="rowEditor" class="stack"></div>
+            <div id="remapHint" class="remap-hint" hidden>
+              <span>Remap mode: click a field above, then drag on the preview to mark its region.</span>
+              <span id="remapTargetLabel" class="remap-target"></span>
+            </div>
+            <div id="previewWrap" class="preview-wrap">
+              <img id="previewImg" class="preview-img" alt="" draggable="false" />
+              <div id="remapSelection" class="remap-selection" hidden></div>
+              <div id="previewUnavailable" class="preview-unavailable" hidden>
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="17" x2="12" y2="11"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                <p id="previewUnavailableMsg">Source PDF is not available for preview.</p>
+                <span class="preview-unavailable-hint">Row data above can still be reviewed and corrected.</span>
+              </div>
+            </div>
+            <div class="stack" style="margin-top:12px">
+              <h3>Row history</h3>
+              <div id="auditList"></div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/review.js"></script>
+  <script src="/static/js/ap-ui.js"></script>
+</body>
+</html>

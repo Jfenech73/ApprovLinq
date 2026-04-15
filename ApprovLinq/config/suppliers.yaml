@@ -1,0 +1,203 @@
+# Supplier Master Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# Each supplier entry supports:
+#   canonical       - the normalized display name stored in DB
+#   vat_number      - VAT number for authoritative matching
+#   aliases         - OCR variants and abbreviations (case-insensitive)
+#   date_locale     - "dmy" (default) or "mdy" if invoices use month-first
+#   nominal_hint    - substring to match against nominal account names
+#   product_families - expected product categories for this supplier
+#   invoice_number_pattern - regex hint for validating invoice numbers
+
+suppliers:
+
+  - canonical: "Imperial Tobacco Malta"
+    vat_number: ""
+    aliases:
+      - imperial tobacco
+      - imperial tobacco malta
+      - imperial tobacco ltd
+      - itl
+      - imp tobacco
+    date_locale: dmy
+    nominal_hint: "Tobacco"
+    product_families:
+      - Cigarettes
+      - Tobacco
+      - Vaping
+
+  - canonical: "Philip Morris Malta"
+    vat_number: ""
+    aliases:
+      - philip morris
+      - philip morris malta
+      - pm malta
+      - pmi
+      - philip morris international
+    date_locale: dmy
+    nominal_hint: "Tobacco"
+    product_families:
+      - Cigarettes
+      - Tobacco
+
+  - canonical: "British American Tobacco Malta"
+    vat_number: ""
+    aliases:
+      - british american tobacco
+      - bat malta
+      - b.a.t.
+      - bat
+      - british american tobacco ltd
+    date_locale: dmy
+    nominal_hint: "Tobacco"
+    product_families:
+      - Cigarettes
+      - Tobacco
+
+  - canonical: "Simonds Farsons Cisk"
+    vat_number: ""
+    aliases:
+      - simonds farsons
+      - farsons
+      - sfc
+      - simonds farsons cisk plc
+      - farsons brewery
+    date_locale: dmy
+    nominal_hint: "Alcohol"
+    product_families:
+      - Beer
+      - Soft Drinks
+
+  - canonical: "Campari Malta"
+    vat_number: ""
+    aliases:
+      - campari malta
+      - campari
+      - campari group
+    date_locale: dmy
+    nominal_hint: "Alcohol"
+    product_families:
+      - Spirits
+      - Liqueur
+
+  - canonical: "Coca-Cola HBC Malta"
+    vat_number: ""
+    aliases:
+      - coca-cola hbc
+      - coca cola hbc
+      - cchbc
+      - ccep malta
+      - coke hbc
+    date_locale: dmy
+    nominal_hint: "Beverages"
+    product_families:
+      - Soft Drinks
+      - Water
+
+  - canonical: "Pepsi-Cola Malta"
+    vat_number: ""
+    aliases:
+      - pepsi malta
+      - pepsi-cola malta
+      - pepsi cola malta
+      - britvic malta
+    date_locale: dmy
+    nominal_hint: "Beverages"
+    product_families:
+      - Soft Drinks
+      - Juices
+
+  - canonical: "GFS Malta"
+    vat_number: ""
+    aliases:
+      - gfs
+      - gfs malta
+      - general foodstuffs
+      - general food stores
+    date_locale: dmy
+    nominal_hint: "Food"
+    product_families:
+      - Food
+      - Catering
+
+  - canonical: "Marsa Foods"
+    vat_number: ""
+    aliases:
+      - marsa foods
+      - marsa food
+      - marsafood
+    date_locale: dmy
+    nominal_hint: "Food"
+    product_families:
+      - Food
+      - Fresh Produce
+
+  - canonical: "Eden Leisure Group"
+    vat_number: ""
+    aliases:
+      - eden leisure
+      - eden leisure group
+      - elg
+    date_locale: dmy
+    nominal_hint: ""
+    product_families: []
+
+  - canonical: "Malta Post"
+    vat_number: ""
+    aliases:
+      - malta post
+      - maltapost
+      - malta post plc
+    date_locale: dmy
+    nominal_hint: "Postage"
+    product_families:
+      - Postage
+      - Courier
+
+  - canonical: "GO plc"
+    vat_number: ""
+    aliases:
+      - go plc
+      - go malta
+      - go telecommunications
+      - go internet
+    date_locale: dmy
+    nominal_hint: "Telecommunications"
+    product_families:
+      - Telecom
+
+  - canonical: "Melita plc"
+    vat_number: ""
+    aliases:
+      - melita
+      - melita cable
+      - melita plc
+      - melita mobile
+    date_locale: dmy
+    nominal_hint: "Telecommunications"
+    product_families:
+      - Telecom
+
+  - canonical: "Enemalta"
+    vat_number: ""
+    aliases:
+      - enemalta
+      - enemalta plc
+      - enemalta corporation
+      - malta electricity
+    date_locale: dmy
+    nominal_hint: "Utilities"
+    product_families:
+      - Electricity
+
+  - canonical: "Water Services Corporation"
+    vat_number: ""
+    aliases:
+      - water services
+      - water services corporation
+      - wsc
+      - wsc malta
+    date_locale: dmy
+    nominal_hint: "Utilities"
+    product_families:
+      - Water Utilities
