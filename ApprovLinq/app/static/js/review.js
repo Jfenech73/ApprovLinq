@@ -143,8 +143,9 @@ function renderEditor() {
   const r = state.rows.find(x => x.id === state.selected);
   const ed = $("rowEditor");
   if (!r) { ed.innerHTML = '<div class="muted">Select a row from the left.</div>'; return; }
-  let html = '<div class="field-grid">';
-  // Tool source label
+
+  // ── Header block: tool label + reasons (rendered OUTSIDE .field-grid) ────
+  let header = '';
   const toolLabel = (() => {
     const m = (r.method_used || "").toLowerCase();
     if (m.includes("azure_di") || m.includes("_di"))           return "Azure Document Intelligence (DI)";
@@ -153,9 +154,8 @@ function renderEditor() {
     if (m)                  return "Native text extraction";
     return "";
   })();
-  if (toolLabel) html += `<div style="font-size:12px;color:var(--ap-text-sub);margin-bottom:8px"><strong>Source:</strong> ${esc(toolLabel)}</div>`;
+  if (toolLabel) header += `<div class="editor-source-label"><strong>Source:</strong> ${esc(toolLabel)}</div>`;
 
-  // Build per-field reason map from pipe-separated review_reasons
   const REASON_LABELS = {
     no_supplier:             "Supplier unclear",
     invoice_number_missing:  "Invoice number missing",
@@ -183,22 +183,24 @@ function renderEditor() {
     }
   });
   if (r.review_required && globalReasons.length) {
-    html += `<div class="review-reasons-banner">⚠ ${globalReasons.map(esc).join(" · ")}</div>`;
+    header += `<div class="review-reasons-banner">&#9888; ${globalReasons.map(esc).join(" &middot; ")}</div>`;
   }
 
+  // ── Field grid ────────────────────────────────────────────────────────────
+  let html = '<div class="field-grid">';
   FIELDS.forEach(f => {
     const cur = r.current[f] == null ? "" : r.current[f];
     const orig = r.original[f] == null ? "" : r.original[f];
     const flagged = (r.review_fields || []).includes(f);
     const fieldReasons = reasonMap[f] || [];
     const reasonHtml = fieldReasons.length
-      ? `<div class="field-reason">⚠ ${fieldReasons.map(esc).join(" · ")}</div>` : "";
+      ? `<div class="field-reason">&#9888; ${fieldReasons.map(esc).join(" &middot; ")}</div>` : "";
     html +=
-      `<label>${esc(f)}${flagged ? " ⚠" : ""}</label>
+      `<label>${esc(f)}${flagged ? " \u26a0" : ""}</label>
        <input data-field="${esc(f)}"${flagged ? ' class="flagged-field"' : ''} value="${esc(cur)}" />
        <label class="rule-cb"><input type="checkbox" data-rule="${esc(f)}" /> rule</label>
-       <button class="btn btn-secondary" data-revert="${esc(f)}" type="button" title="Revert to original">↶</button>
-       <div class="orig">original: ${esc(orig) || "—"}${reasonHtml}</div>`;
+       <button class="btn btn-secondary" data-revert="${esc(f)}" type="button" title="Revert to original">&#8630;</button>
+       <div class="orig">original: ${esc(orig) || "\u2014"}${reasonHtml}</div>`;
   });
   html += "</div>";
   html +=
@@ -211,7 +213,7 @@ function renderEditor() {
         <button id="saveBtn" class="btn btn-primary" type="button">Save corrections</button>
       </div>
     </div>`;
-  ed.innerHTML = html;
+  ed.innerHTML = header + html;
   $("saveBtn").onclick = saveRow;
   ed.querySelectorAll("[data-revert]").forEach(b => b.onclick = () => revertField(b.dataset.revert));
 }
