@@ -560,11 +560,12 @@ html[data-theme="dark"] .ap-app .stat-value { color: var(--ap-text) !important; 
 
 /* Row content layout */
 .ap-app .row-primary {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 1fr auto auto;
   align-items: baseline;
-  gap: 8px;
+  gap: 6px;
   margin-bottom: 3px;
+  min-width: 0;
 }
 .ap-app .row-supplier {
   font-weight: 600;
@@ -573,20 +574,23 @@ html[data-theme="dark"] .ap-app .stat-value { color: var(--ap-text) !important; 
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 70%;
+  min-width: 0;
 }
 .ap-app .row-amount {
   font-size: var(--ap-fs-12);
   color: var(--ap-text-muted);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-width: 52px;
 }
 .ap-app .row-meta {
   display: flex;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   font-size: var(--ap-fs-11);
   color: var(--ap-text-muted);
+  overflow: hidden;
 }
 .ap-app .row-meta span { white-space: nowrap; }
 
