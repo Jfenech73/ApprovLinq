@@ -57,7 +57,7 @@
               <h2 style="margin:0">Edit selected row</h2>
             </div>
             <div id="rowEditor" class="stack"></div>
-            <!-- Hidden stubs keep review.js remap references valid -->
+            <!-- Hidden stubs keep review.js remap/pagination references valid -->
             <div id="remapHint" class="remap-hint" hidden>
               <span id="remapTargetLabel" class="remap-target"></span>
             </div>
@@ -67,6 +67,13 @@
               <div id="previewUnavailable" hidden>
                 <p id="previewUnavailableMsg"></p>
               </div>
+            </div>
+            <!-- Page controls stub (hidden — preview removed but JS still references them) -->
+            <div style="display:none">
+              <button id="prevPageBtn" type="button">◀</button>
+              <span id="pageLabel"></span>
+              <button id="nextPageBtn" type="button">▶</button>
+              <input type="checkbox" id="remapMode" />
             </div>
             <div class="stack" style="margin-top:12px">
               <h3>Row history</h3>
