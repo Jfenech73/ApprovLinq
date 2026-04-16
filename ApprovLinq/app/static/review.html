@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Review — Approvlinq</title>
+  <script>
+    (function(){ try { var t = localStorage.getItem("ap_theme"); if (t==="light"||t==="dark") document.documentElement.setAttribute("data-theme", t); } catch(e){} })();
+  </script>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/components.css" />
+</head>
+<body class="ap-app">
+  <div data-ap-shell='{"active":"","crumb":[[\"Work\",\"\"],[\"Batches\",\"\"],[\"Review\",\"cur\"]]}'></div>
+  <div data-ap-page-body class="review-page-body">
+
+    <!-- Batch header bar -->
+    <div class="review-batch-bar">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <h2 id="batchTitle" style="margin:0;font-size:16px">Loading…</h2>
+        <span class="pill" id="batchStatusPill">—</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <div class="batch-meta">
+          <div><span class="label">Rows</span><span id="statRows">-</span></div>
+          <div><span class="label">Corrected</span><span id="statCorrected">-</span></div>
+          <div><span class="label">Flagged</span><span id="statFlagged">-</span></div>
+          <div><span class="label">Version</span><span id="statVersion">-</span></div>
+        </div>
+        <div class="row gap-sm">
+          <button id="approveBtn"          class="btn btn-sm"         type="button">Approve</button>
+          <button id="markFileReviewedBtn" class="btn btn-sm"         type="button" hidden>Mark file reviewed</button>
+          <button id="exportBtn"           class="btn btn-sm btn-primary" type="button">Export Excel</button>
+          <button id="reopenBtn"           class="btn btn-sm"         type="button">Reopen</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Global message banner -->
+    <div id="pageMessage" class="message" style="margin:0;border-radius:0;border-left:none;border-right:none"></div>
+
+    <!-- 3-column grid -->
+    <div class="review-3col">
+
+      <!-- ── Col 1: Rows ── -->
+      <div class="review-col review-col-rows">
+        <div class="review-col-head">
+          <h2>Rows</h2>
+          <div class="row gap-sm filter-chips" style="flex-wrap:wrap">
+            <button class="btn btn-sm active" data-filter="all"         type="button">All</button>
+            <button class="btn btn-sm"        data-filter="needs_review" type="button">Needs review</button>
+            <button class="btn btn-sm"        data-filter="corrected"   type="button">Corrected</button>
+            <button class="btn btn-sm"        data-filter="low_conf"    type="button">Low conf</button>
+          </div>
+        </div>
+        <div class="review-col-body" style="padding:8px">
+          <div id="rowList" class="row-list"></div>
+        </div>
+      </div>
+
+      <!-- ── Col 2: Edit Row ── -->
+      <div class="review-col review-col-edit">
+        <div class="review-col-head">
+          <h2>Edit selected row</h2>
+          <button id="duplicateRowBtn" class="btn btn-sm" type="button"
+                  title="Create a duplicate of this row for manual BCRS/deposit entry">
+            Duplicate Row
+          </button>
+        </div>
+        <div class="review-col-body">
+          <div id="rowEditor" class="stack"></div>
+        </div>
+      </div>
+
+      <!-- ── Col 3: Remap / Invoice Viewer ── -->
+      <div class="review-col review-col-remap">
+        <div class="review-col-head">
+          <h2>Remap &amp; Preview</h2>
+          <div class="review-page-nav">
+            <button id="prevPageBtn" class="btn btn-sm" type="button">◀</button>
+            <span id="pageLabel" class="muted" style="font-size:12px;min-width:70px;text-align:center">page 1</span>
+            <button id="nextPageBtn" class="btn btn-sm" type="button">▶</button>
+          </div>
+        </div>
+        <div class="review-col-body">
+
+          <!-- Remap controls -->
+          <div class="remap-controls">
+            <div class="remap-controls-row">
+              <label class="row gap-sm" style="align-items:center;font-size:13px;cursor:pointer;margin:0">
+                <input type="checkbox" id="remapMode" /> Enable remap mode
+              </label>
+            </div>
+            <div id="remapHint" class="remap-hint" hidden>
+              <span>Click a field in the editor, then drag on the invoice to mark its region.</span>
+              <span id="remapTargetLabel" class="remap-target"></span>
+            </div>
+          </div>
+
+          <!-- Invoice preview -->
+          <div id="previewWrap" class="preview-wrap" style="display:flex;flex-direction:column;flex:1;min-height:300px;position:relative">
+            <img id="previewImg" class="preview-img" alt="" draggable="false" style="width:100%;height:auto;display:block" />
+            <div id="remapSelection" class="remap-selection" hidden></div>
+            <div id="previewUnavailable" class="preview-unavailable" hidden>
+              <p id="previewUnavailableMsg">Source PDF is not available for preview.</p>
+              <span class="preview-unavailable-hint">Row data can still be reviewed and corrected.</span>
+            </div>
+          </div>
+
+          <!-- Row audit history -->
+          <div class="stack" style="margin-top:8px">
+            <h3 style="font-size:13px;font-weight:600;color:var(--ap-text-muted);margin:0 0 6px">Row history</h3>
+            <div id="auditList"></div>
+          </div>
+
+        </div>
+      </div>
+
+    </div><!-- /.review-3col -->
+
+  </div><!-- /data-ap-page-body -->
+
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/review.js"></script>
+  <script src="/static/js/ap-ui.js"></script>
+</body>
+</html>

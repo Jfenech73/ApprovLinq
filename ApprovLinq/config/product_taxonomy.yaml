@@ -1,0 +1,299 @@
+# Product & Brand Taxonomy
+# ─────────────────────────────────────────────────────────────────────────────
+# Each category maps brands/products to a nominal account hint.
+# Classification order: taxonomy_match → supplier_rule → historical → llm_fallback
+#
+# Fields per entry:
+#   brand       - canonical brand/product name
+#   aliases     - OCR-noise and spelling variants (lowercase, no punctuation)
+#   product_family
+#   subcategory
+#   nominal_hint - substring to match against tenant nominal account names
+#   supplier_hints - canonical supplier name substrings that sell this brand
+
+categories:
+
+  Tobacco:
+    nominal_hint: "Tobacco"
+    entries:
+      - brand: "Rothmans"
+        aliases: [rothmans, rothman, rothman's, rothmans king size, rothmans ks]
+        product_family: Cigarettes
+        subcategory: King Size
+
+      - brand: "Pall Mall"
+        aliases: [pall mall, pallmall, pall-mall, pall mall ks, pall mall blue]
+        product_family: Cigarettes
+        subcategory: King Size
+
+      - brand: "Lucky Strike"
+        aliases: [lucky strike, lucky-strike, luckystrike, l.s., ls original, ls click]
+        product_family: Cigarettes
+        subcategory: King Size
+
+      - brand: "Marlboro"
+        aliases: [marlboro, marlborough, marlboro gold, marlboro red, marlboro blue, marl]
+        product_family: Cigarettes
+        subcategory: King Size
+
+      - brand: "Dunhill"
+        aliases: [dunhill, dunhills, dunhill international, dunhill ks]
+        product_family: Cigarettes
+        subcategory: King Size
+
+      - brand: "Winston"
+        aliases: [winston, winston cigarette, winston ks, winston blue]
+        product_family: Cigarettes
+        subcategory: King Size
+
+      - brand: "Camel"
+        aliases: [camel, camel cigarette, camel blue, camel yellow, camel filters]
+        product_family: Cigarettes
+        subcategory: King Size
+
+      - brand: "Chesterfield"
+        aliases: [chesterfield, chesterfield ks, chesterfield red]
+        product_family: Cigarettes
+        subcategory: King Size
+
+      - brand: "Benson & Hedges"
+        aliases: [benson hedges, benson & hedges, b&h, b & h, benson and hedges]
+        product_family: Cigarettes
+        subcategory: King Size
+
+      - brand: "Royals"
+        aliases: [royals, royals cigarette, royals ks]
+        product_family: Cigarettes
+        subcategory: King Size
+
+      - brand: "Du Maurier"
+        aliases: [du maurier, du-maurier, dumaurier]
+        product_family: Cigarettes
+        subcategory: King Size
+
+      - brand: "Parliament"
+        aliases: [parliament, parliament cigarette, parliament lights]
+        product_family: Cigarettes
+        subcategory: King Size
+
+      - brand: "HQD"
+        aliases: [hqd, hqd vape, hqd disposable]
+        product_family: Vaping
+        subcategory: Disposable
+
+      - brand: "Elfbar"
+        aliases: [elfbar, elf bar, elf-bar, elfa]
+        product_family: Vaping
+        subcategory: Disposable
+
+  Alcohol:
+    nominal_hint: "Alcohol"
+    entries:
+      - brand: "Heineken"
+        aliases: [heineken, heineken beer, heineken 0.0, heineken lager]
+        product_family: Beer
+        subcategory: Lager
+
+      - brand: "Carlsberg"
+        aliases: [carlsberg, carlsberg beer, carlsberg lager]
+        product_family: Beer
+        subcategory: Lager
+
+      - brand: "Amstel"
+        aliases: [amstel, amstel beer, amstel lager]
+        product_family: Beer
+        subcategory: Lager
+
+      - brand: "Corona"
+        aliases: [corona beer, corona extra, corona light]
+        product_family: Beer
+        subcategory: Imported Lager
+
+      - brand: "Guinness"
+        aliases: [guinness, guinness draft, guinness extra stout]
+        product_family: Beer
+        subcategory: Stout
+
+      - brand: "Peroni"
+        aliases: [peroni, peroni nastro, peroni beer]
+        product_family: Beer
+        subcategory: Lager
+
+      - brand: "Cisk"
+        aliases: [cisk, cisk beer, cisk lager, cisk excel, cisk strong]
+        product_family: Beer
+        subcategory: Local Lager
+
+      - brand: "Hopleaf"
+        aliases: [hopleaf, hop leaf, hopleaf beer]
+        product_family: Beer
+        subcategory: Local Beer
+
+      - brand: "Jack Daniel's"
+        aliases: [jack daniels, jack daniel's, jack daniel, jd, jd whiskey]
+        product_family: Spirits
+        subcategory: Whiskey
+
+      - brand: "Johnnie Walker"
+        aliases: [johnnie walker, johnie walker, jw, jw red label, jw black]
+        product_family: Spirits
+        subcategory: Whiskey
+
+      - brand: "Absolut"
+        aliases: [absolut vodka, absolut, absolut blue]
+        product_family: Spirits
+        subcategory: Vodka
+
+      - brand: "Baileys"
+        aliases: [baileys, baileys irish cream, bailey's]
+        product_family: Spirits
+        subcategory: Liqueur
+
+      - brand: "Campari"
+        aliases: [campari, campari bitter]
+        product_family: Spirits
+        subcategory: Bitter
+
+      - brand: "Aperol"
+        aliases: [aperol, aperol spritz]
+        product_family: Spirits
+        subcategory: Bitter
+
+      - brand: "Prosecco"
+        aliases: [prosecco, prosecco doc]
+        product_family: Wine
+        subcategory: Sparkling
+
+  Beverages:
+    nominal_hint: "Beverages"
+    entries:
+      - brand: "Coca-Cola"
+        aliases: [coca cola, coke, coca-cola, coca cola classic, cola]
+        product_family: Soft Drinks
+        subcategory: Cola
+
+      - brand: "Coke Zero"
+        aliases: [coke zero, coca cola zero, coke zero sugar]
+        product_family: Soft Drinks
+        subcategory: Cola Zero Sugar
+
+      - brand: "Pepsi"
+        aliases: [pepsi cola, pepsi, pepsi max, pepsi zero]
+        product_family: Soft Drinks
+        subcategory: Cola
+
+      - brand: "Fanta"
+        aliases: [fanta, fanta orange, fanta lemon, fanta watermelon]
+        product_family: Soft Drinks
+        subcategory: Carbonated
+
+      - brand: "Sprite"
+        aliases: [sprite, sprite zero, sprite lemon]
+        product_family: Soft Drinks
+        subcategory: Carbonated
+
+      - brand: "Ribena"
+        aliases: [ribena, ribena blackcurrant]
+        product_family: Soft Drinks
+        subcategory: Juice Drink
+
+      - brand: "Monster Energy"
+        aliases: [monster energy, monster, monster ultra]
+        product_family: Energy Drinks
+        subcategory: Energy
+
+      - brand: "Red Bull"
+        aliases: [red bull, redbull, red bull energy]
+        product_family: Energy Drinks
+        subcategory: Energy
+
+      - brand: "Lucozade"
+        aliases: [lucozade, lucozade energy, lucozade sport]
+        product_family: Energy Drinks
+        subcategory: Sports
+
+      - brand: "7UP"
+        aliases: [7up, seven up, 7-up, 7up free]
+        product_family: Soft Drinks
+        subcategory: Carbonated
+
+      - brand: "Kinnie"
+        aliases: [kinnie, kinnie sparkling, kinnie light]
+        product_family: Soft Drinks
+        subcategory: Local Carbonated
+
+      - brand: "San Pellegrino"
+        aliases: [san pellegrino, s.pellegrino, pellegrino, s pellegrino]
+        product_family: Water
+        subcategory: Sparkling
+
+      - brand: "Acqua Panna"
+        aliases: [acqua panna, panna, acquapanna]
+        product_family: Water
+        subcategory: Still
+
+      - brand: "Evian"
+        aliases: [evian, evian water]
+        product_family: Water
+        subcategory: Still
+
+      - brand: "Nesquik"
+        aliases: [nesquik, nesquick, nestle nesquik]
+        product_family: Soft Drinks
+        subcategory: Flavoured Milk Drink
+
+  Food:
+    nominal_hint: "Food"
+    entries:
+      - brand: "Bigilla"
+        aliases: [bigilla, bigilla maltese]
+        product_family: Condiments
+        subcategory: Maltese Paste
+
+      - brand: "Ftira"
+        aliases: [ftira, maltese ftira, ftira bread]
+        product_family: Bakery
+        subcategory: Maltese Bread
+
+      - brand: "Baguette"
+        aliases: [baguette, baguettes, french baguette]
+        product_family: Bakery
+        subcategory: Bread
+
+      - brand: "Olive Oil"
+        aliases: [olive oil, extra virgin olive oil, evoo, olio]
+        product_family: Condiments
+        subcategory: Oil
+
+      - brand: "Fresh Seafood"
+        aliases: [fresh seafood, seafood, fresh fish, fish]
+        product_family: Fresh Produce
+        subcategory: Seafood
+
+      - brand: "Fresh Produce"
+        aliases: [fresh produce, vegetables, fruits, fresh veg]
+        product_family: Fresh Produce
+        subcategory: Vegetables
+
+      - brand: "Catering Supplies"
+        aliases: [catering supplies, catering, kitchen supplies]
+        product_family: Catering
+        subcategory: General
+
+  Cleaning:
+    nominal_hint: "Cleaning"
+    entries:
+      - brand: "Flash"
+        aliases: [flash, flash cleaner, flash liquid]
+        product_family: Cleaning Products
+        subcategory: Surface Cleaner
+
+      - brand: "Dettol"
+        aliases: [dettol, dettol antiseptic, dettol liquid]
+        product_family: Cleaning Products
+        subcategory: Antiseptic
+
+      - brand: "Domestos"
+        aliases: [domestos, domestos bleach]
+        product_family: Cleaning Products
+        subcategory: Bleach

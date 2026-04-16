@@ -1,0 +1,966 @@
+/* ============================================================================
+   Approvlinq — Components
+   ----------------------------------------------------------------------------
+   All selectors are prefixed `.ap-` so they CANNOT accidentally cascade onto
+   legacy pages still using app.css. Migration = adding .ap-app to <body> and
+   replacing legacy markup with .ap- classes, one page at a time.
+   ============================================================================ */
+
+/* Base reset on the app shell only (not global) */
+.ap-app, .ap-app * { box-sizing: border-box; }
+.ap-app {
+  font-family: var(--ap-font);
+  font-size: var(--ap-fs-13);
+  line-height: 1.5;
+  color: var(--ap-text);
+  background: var(--ap-bg-page);
+  min-height: 100vh;
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Until JS runs and injects the shell, hide the raw page-body element so
+   it doesn't flash OR duplicate if a stale ap-ui.js failed to remove it.
+   Once the shell is injected, the body HTML lives inside .ap-shell > .ap-main
+   and is no longer an [data-ap-page-body] attribute match — so this rule
+   stops applying and the content becomes visible. */
+.ap-app > [data-ap-page-body] { display: none; }
+
+/* ───── Shell layout ───── */
+.ap-shell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  min-height: 100vh;
+}
+@media (max-width: 768px) {
+  .ap-shell { grid-template-columns: 1fr; }
+  .ap-side  { display: none; }
+}
+
+/* ───── Sidebar ───── */
+.ap-side {
+  background: var(--ap-bg-surface);
+  border-right: 1px solid var(--ap-border);
+  padding: var(--ap-s-4) var(--ap-s-3);
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+.ap-brand {
+  display: flex; align-items: center; gap: var(--ap-s-3);
+  padding: var(--ap-s-2) var(--ap-s-3) var(--ap-s-5);
+  text-decoration: none;
+}
+.ap-brand-word {
+  font-size: 17px; font-weight: 700; letter-spacing: -0.02em;
+}
+.ap-brand-word .a { color: var(--ap-logo-1); }
+.ap-brand-word .b { color: var(--ap-logo-2); }
+
+.ap-nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.ap-nav-section {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+  color: var(--ap-text-dim); padding: var(--ap-s-4) var(--ap-s-3) var(--ap-s-1);
+  text-transform: uppercase;
+}
+.ap-nav-item {
+  display: flex; align-items: center; gap: var(--ap-s-3);
+  padding: var(--ap-s-2) var(--ap-s-3);
+  border-radius: var(--ap-r-md);
+  font-size: var(--ap-fs-13);
+  color: var(--ap-text-muted);
+  background: none; border: 0; cursor: pointer;
+  font-family: inherit; text-align: left;
+  text-decoration: none;
+}
+.ap-nav-item:hover { background: var(--ap-bg-sub); color: var(--ap-text); }
+.ap-nav-item.active {
+  background: var(--ap-bg-sub); color: var(--ap-navy); font-weight: 500;
+}
+.ap-nav-item svg { width: 16px; height: 16px; flex-shrink: 0; stroke-width: 1.5; }
+
+.ap-user {
+  display: flex; align-items: center; gap: var(--ap-s-3);
+  padding: var(--ap-s-3);
+  border-top: 1px solid var(--ap-border);
+  font-size: var(--ap-fs-12); color: var(--ap-text-muted);
+  margin-top: auto;
+}
+.ap-user .ap-avatar {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--ap-navy); color: var(--ap-text-invert);
+  display: flex; align-items: center; justify-content: center;
+  font-size: var(--ap-fs-11); font-weight: 600;
+}
+.ap-user-name { color: var(--ap-text); font-weight: 500; font-size: var(--ap-fs-12); }
+
+/* ───── Sidebar collapse toggle ───── */
+.ap-sidebar-toggle {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  border-radius: var(--ap-r-md);
+  border: 1px solid var(--ap-border);
+  background: none;
+  color: var(--ap-text-muted);
+  cursor: pointer;
+  margin-bottom: var(--ap-s-3);
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+  align-self: flex-end;
+}
+.ap-sidebar-toggle:hover { background: var(--ap-bg-sub); color: var(--ap-text); }
+.ap-sidebar-toggle svg { pointer-events: none; }
+
+/* ───── Collapsed sidebar state ───── */
+.ap-shell.sidebar-collapsed {
+  grid-template-columns: 52px 1fr;
+}
+.ap-side.collapsed {
+  padding: var(--ap-s-4) var(--ap-s-2);
+  align-items: center;
+}
+.ap-side.collapsed .ap-brand { padding: var(--ap-s-2) 0 var(--ap-s-4); justify-content: center; }
+.ap-side.collapsed .ap-brand span { display: none; }
+.ap-side.collapsed .ap-nav-section { display: none; }
+.ap-side.collapsed .ap-nav-item span,
+.ap-side.collapsed .ap-nav-item .ap-nav-label { display: none; }
+.ap-side.collapsed .ap-nav-item {
+  padding: var(--ap-s-2);
+  justify-content: center;
+  width: 100%;
+}
+.ap-side.collapsed .ap-user .ap-user-name,
+.ap-side.collapsed .ap-user > div:not(.ap-avatar),
+.ap-side.collapsed #logoutBtn { display: none; }
+.ap-side.collapsed .ap-user { justify-content: center; padding: var(--ap-s-3) 0; }
+.ap-side.collapsed .ap-sidebar-toggle { align-self: center; }
+
+/* Transition */
+.ap-side { transition: padding 0.2s ease; }
+.ap-shell { transition: grid-template-columns 0.2s ease; }
+
+/* ───── Main pane ───── */
+.ap-main {
+  display: flex; flex-direction: column;
+  background: var(--ap-bg-page);
+  min-width: 0;
+  /* Do NOT set height:100vh or overflow:hidden here — that would prevent
+     pages from scrolling. The shell grid makes .ap-main fill the viewport
+     width; individual pages control their own overflow. */
+}
+/* Page body is a normal flex column — no overflow trapping */
+.ap-main > [data-ap-page-body] {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ───── Topbar ───── */
+.ap-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--ap-s-3) var(--ap-s-6);
+  border-bottom: 1px solid var(--ap-border);
+  background: var(--ap-bg-surface);
+  position: sticky; top: 0; z-index: 10;
+}
+.ap-crumb { font-size: var(--ap-fs-12); color: var(--ap-text-muted); }
+.ap-crumb a { color: inherit; text-decoration: none; }
+.ap-crumb a:hover { color: var(--ap-text); }
+.ap-crumb .sep { margin: 0 var(--ap-s-2); color: var(--ap-text-dim); }
+.ap-crumb .cur { color: var(--ap-text); font-weight: 500; }
+.ap-top-actions { display: flex; align-items: center; gap: var(--ap-s-2); }
+
+.ap-theme-toggle {
+  width: 32px; height: 32px;
+  border-radius: var(--ap-r-md);
+  border: 1px solid var(--ap-border);
+  background: var(--ap-bg-surface);
+  color: var(--ap-text-muted);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.ap-theme-toggle:hover { color: var(--ap-text); border-color: var(--ap-border-strong); }
+
+/* ───── Page ───── */
+.ap-page {
+  padding: var(--ap-s-6);
+  max-width: 1280px;
+  width: 100%;
+}
+.ap-h1 { font-size: var(--ap-fs-22); font-weight: 600; margin: 0 0 var(--ap-s-1); letter-spacing: -0.01em; }
+.ap-h2 { font-size: var(--ap-fs-20); font-weight: 600; margin: 0 0 var(--ap-s-2); }
+.ap-h3 { font-size: var(--ap-fs-14); font-weight: 600; margin: 0 0 var(--ap-s-3); color: var(--ap-text); }
+.ap-sub { font-size: var(--ap-fs-13); color: var(--ap-text-muted); margin: 0 0 var(--ap-s-5); }
+
+/* ───── Cards ───── */
+.ap-card {
+  background: var(--ap-bg-surface);
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-lg);
+  padding: var(--ap-s-5);
+  margin-bottom: var(--ap-s-4);
+}
+.ap-card-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: var(--ap-s-3);
+  gap: var(--ap-s-3);
+}
+
+/* ───── Metrics ───── */
+.ap-metric-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--ap-s-3);
+  margin-bottom: var(--ap-s-4);
+}
+.ap-metric {
+  background: var(--ap-bg-surface);
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-lg);
+  padding: var(--ap-s-3) var(--ap-s-4);
+}
+.ap-metric-label {
+  font-size: var(--ap-fs-11); color: var(--ap-text-muted);
+  text-transform: uppercase; letter-spacing: 0.04em; font-weight: 500;
+}
+.ap-metric-value {
+  font-size: var(--ap-fs-22); font-weight: 600; margin-top: var(--ap-s-1);
+  color: var(--ap-text);
+}
+.ap-metric-value.warn { color: var(--ap-warn-fg); }
+
+/* ───── Forms ───── */
+.ap-input, .ap-select, .ap-textarea {
+  height: 34px; padding: 0 var(--ap-s-3);
+  font-size: var(--ap-fs-13); font-family: inherit;
+  border: 1px solid var(--ap-border); border-radius: var(--ap-r-md);
+  background: var(--ap-bg-surface); color: var(--ap-text);
+  outline: none;
+  transition: border-color 0.1s, box-shadow 0.1s;
+}
+.ap-textarea { height: auto; padding: var(--ap-s-2) var(--ap-s-3); min-height: 68px; resize: vertical; line-height: 1.5; }
+.ap-input:hover, .ap-select:hover, .ap-textarea:hover { border-color: var(--ap-border-strong); }
+.ap-input:focus, .ap-select:focus, .ap-textarea:focus {
+  border-color: var(--ap-navy);
+  box-shadow: var(--ap-shadow-focus);
+}
+.ap-label {
+  display: block; font-size: var(--ap-fs-12); color: var(--ap-text-muted);
+  margin-bottom: var(--ap-s-1); font-weight: 500;
+}
+.ap-field { margin-bottom: var(--ap-s-3); }
+.ap-field .ap-input,
+.ap-field .ap-select,
+.ap-field .ap-textarea { width: 100%; }
+
+/* ───── Buttons ───── */
+.ap-btn {
+  height: 34px; padding: 0 var(--ap-s-4);
+  font-size: var(--ap-fs-13); font-weight: 500; font-family: inherit;
+  border-radius: var(--ap-r-md);
+  border: 1px solid var(--ap-border);
+  background: var(--ap-bg-surface); color: var(--ap-text);
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: var(--ap-s-2);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.ap-btn:hover { border-color: var(--ap-border-strong); background: var(--ap-bg-hover); }
+.ap-btn:active { transform: translateY(0.5px); }
+.ap-btn:focus-visible { box-shadow: var(--ap-shadow-focus); outline: none; }
+.ap-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.ap-btn-primary {
+  background: var(--ap-navy); border-color: var(--ap-navy);
+  color: var(--ap-text-invert);
+}
+.ap-btn-primary:hover {
+  background: var(--ap-navy-hover); border-color: var(--ap-navy-hover);
+}
+
+.ap-btn-sm { height: 28px; padding: 0 var(--ap-s-3); font-size: var(--ap-fs-12); }
+.ap-btn-ghost { border-color: transparent; background: transparent; }
+.ap-btn-ghost:hover { background: var(--ap-bg-sub); border-color: transparent; }
+
+/* ───── Tables ───── */
+.ap-table { width: 100%; border-collapse: collapse; font-size: var(--ap-fs-13); }
+.ap-table th {
+  text-align: left; font-weight: 500;
+  color: var(--ap-text-muted);
+  font-size: var(--ap-fs-11); text-transform: uppercase; letter-spacing: 0.04em;
+  padding: var(--ap-s-3);
+  border-bottom: 1px solid var(--ap-border);
+  background: var(--ap-bg-surface);
+}
+.ap-table td {
+  padding: var(--ap-s-3);
+  border-bottom: 1px solid var(--ap-border);
+  vertical-align: middle;
+}
+.ap-table tr:hover td { background: var(--ap-bg-hover); }
+.ap-table tr:last-child td { border-bottom: 0; }
+.ap-table tr.needs-review td { background: var(--ap-warn-bg); }
+.ap-table tr.needs-review:hover td { background: var(--ap-warn-bg); filter: brightness(0.97); }
+
+/* ───── Pills / status ───── */
+.ap-pill {
+  display: inline-block; padding: 3px var(--ap-s-2);
+  border-radius: var(--ap-r-sm);
+  font-size: var(--ap-fs-11); font-weight: 500;
+  line-height: 1.4;
+}
+.ap-pill-ok    { background: var(--ap-ok-bg);   color: var(--ap-ok-fg); }
+.ap-pill-warn  { background: var(--ap-warn-bg); color: var(--ap-warn-fg); }
+.ap-pill-info  { background: var(--ap-info-bg); color: var(--ap-info-fg); }
+.ap-pill-err   { background: var(--ap-err-bg);  color: var(--ap-err-fg); }
+.ap-pill-muted { background: var(--ap-bg-sub);  color: var(--ap-text-muted); }
+
+/* ───── Utilities ───── */
+.ap-row { display: flex; gap: var(--ap-s-2); align-items: center; flex-wrap: wrap; }
+.ap-stack { display: flex; flex-direction: column; gap: var(--ap-s-3); }
+.ap-spacer { flex: 1; }
+.ap-muted { color: var(--ap-text-muted); }
+.ap-mono { font-family: var(--ap-font-mono); font-size: 92%; }
+.ap-hidden { display: none !important; }
+.ap-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+/* ───── Message banner ───── */
+.ap-message {
+  padding: var(--ap-s-3) var(--ap-s-4);
+  border-radius: var(--ap-r-md);
+  font-size: var(--ap-fs-13);
+  margin-bottom: var(--ap-s-3);
+  border: 1px solid transparent;
+}
+.ap-message.ok    { background: var(--ap-ok-bg);   color: var(--ap-ok-fg);   border-color: var(--ap-ok-fg); }
+.ap-message.warn  { background: var(--ap-warn-bg); color: var(--ap-warn-fg); border-color: var(--ap-warn-border); }
+.ap-message.err   { background: var(--ap-err-bg);  color: var(--ap-err-fg);  border-color: var(--ap-err-fg); }
+.ap-message.info  { background: var(--ap-info-bg); color: var(--ap-info-fg); border-color: var(--ap-info-fg); }
+.ap-message:empty { display: none; }
+
+/* ───── Login page (full-screen centered card) ───── */
+.ap-login-wrap {
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--ap-bg-page);
+  padding: var(--ap-s-10);
+}
+.ap-login-card {
+  width: 360px; max-width: 100%;
+  background: var(--ap-bg-surface);
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-xl);
+  padding: var(--ap-s-8);
+}
+.ap-login-logo { display: flex; justify-content: center; margin-bottom: var(--ap-s-6); }
+.ap-login-h { font-size: var(--ap-fs-20); font-weight: 600; text-align: center; margin: 0 0 var(--ap-s-1); color: var(--ap-text); }
+.ap-login-s { font-size: var(--ap-fs-13); color: var(--ap-text-muted); text-align: center; margin: 0 0 var(--ap-s-6); }
+
+/* ============================================================================
+   Legacy class compatibility layer
+   ----------------------------------------------------------------------------
+   Pages migrated to the v2 shell still have inline content generated by the
+   old app.js / review.js / tenant.js etc. using class names from the old
+   app.css. Rather than rewrite every JS file, we map the legacy classes onto
+   the v2 tokens here. Remove when JS is migrated too.
+   ============================================================================ */
+.ap-app .hidden { display: none !important; }
+.ap-app .muted { color: var(--ap-text-muted); }
+
+.ap-app .stack { display: flex; flex-direction: column; gap: var(--ap-s-3); }
+.ap-app .stack-lg { display: flex; flex-direction: column; gap: var(--ap-s-5); }
+.ap-app .row { display: flex; gap: var(--ap-s-3); align-items: center; }
+.ap-app .row.gap-sm { gap: var(--ap-s-2); }
+.ap-app .row.wrap { flex-wrap: wrap; }
+.ap-app .section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--ap-s-3); gap: var(--ap-s-3); }
+.ap-app .section-toolbar { display: flex; align-items: center; gap: var(--ap-s-2); flex-wrap: wrap; }
+/* Used by export_templates.js to show/hide the column editor panel */
+.ap-app #columnEditorSection.visible { display: block !important; }
+
+.ap-app .card {
+  background: var(--ap-bg-surface);
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-lg);
+  padding: var(--ap-s-5);
+  margin-bottom: var(--ap-s-4);
+}
+.ap-app .card.full-width { grid-column: 1 / -1; }
+.ap-app .card h2 { font-size: var(--ap-fs-14); font-weight: 600; margin: 0 0 var(--ap-s-3); color: var(--ap-text); }
+.ap-app .card h3 { font-size: var(--ap-fs-13); font-weight: 500; margin: var(--ap-s-3) 0 var(--ap-s-2); color: var(--ap-text); }
+
+.ap-app main.grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ap-s-4); }
+@media (max-width: 900px) { .ap-app main.grid { grid-template-columns: 1fr; } }
+
+.ap-app .table-wrap { overflow-x: auto; margin-top: var(--ap-s-3); }
+.ap-app .table-wrap table { width: 100%; border-collapse: collapse; font-size: var(--ap-fs-13); }
+.ap-app .table-wrap th {
+  text-align: left; font-weight: 500; color: var(--ap-text-muted);
+  font-size: var(--ap-fs-11); text-transform: uppercase; letter-spacing: 0.04em;
+  padding: var(--ap-s-3); border-bottom: 1px solid var(--ap-border);
+}
+.ap-app .table-wrap td { padding: var(--ap-s-3); border-bottom: 1px solid var(--ap-border); vertical-align: middle; }
+.ap-app .table-wrap tr:hover td { background: var(--ap-bg-hover); }
+.ap-app .table-wrap tr:last-child td { border-bottom: 0; }
+.ap-app .table-wrap tr.needs-review td { background: var(--ap-warn-bg); }
+.ap-app .table-wrap tr.row-flash { animation: ap-row-flash 2.2s ease-out; }
+@keyframes ap-row-flash { 0% { background: var(--ap-warn-border); } 100% { background: transparent; } }
+
+/* Legacy pills */
+.ap-app .pill {
+  display: inline-block; padding: 3px var(--ap-s-2);
+  border-radius: var(--ap-r-sm);
+  font-size: var(--ap-fs-11); font-weight: 500;
+  background: var(--ap-bg-sub); color: var(--ap-text-muted);
+}
+.ap-app .pill-ok,   .ap-app .pill.ok,        .ap-app .pill.pill-ok        { background: var(--ap-ok-bg);   color: var(--ap-ok-fg); }
+.ap-app .pill.warn, .ap-app .pill.pill-warn, .ap-app .pill.needs-review   { background: var(--ap-warn-bg); color: var(--ap-warn-fg); }
+.ap-app .pill.info, .ap-app .pill.pill-info, .ap-app .pill.processing     { background: var(--ap-info-bg); color: var(--ap-info-fg); }
+.ap-app .pill.err,  .ap-app .pill.pill-err,  .ap-app .pill.failed         { background: var(--ap-err-bg);  color: var(--ap-err-fg); }
+
+/* Legacy messages */
+.ap-app .message {
+  padding: var(--ap-s-3) var(--ap-s-4); border-radius: var(--ap-r-md);
+  font-size: var(--ap-fs-13); margin-top: var(--ap-s-2);
+  background: var(--ap-bg-sub); color: var(--ap-text-muted);
+}
+.ap-app .message:empty { display: none; }
+.ap-app .message.muted   { background: var(--ap-bg-sub); color: var(--ap-text-muted); }
+.ap-app .message.success { background: var(--ap-ok-bg); color: var(--ap-ok-fg); }
+.ap-app .message.error   { background: var(--ap-err-bg); color: var(--ap-err-fg); }
+.ap-app .message.warn    { background: var(--ap-warn-bg); color: var(--ap-warn-fg); }
+
+/* Legacy buttons */
+.ap-app .btn {
+  height: 34px; padding: 0 var(--ap-s-4);
+  font-size: var(--ap-fs-13); font-weight: 500; font-family: inherit;
+  border-radius: var(--ap-r-md); border: 1px solid var(--ap-border);
+  background: var(--ap-bg-surface); color: var(--ap-text);
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--ap-s-2);
+  text-decoration: none; white-space: nowrap;
+}
+.ap-app .btn:hover { border-color: var(--ap-border-strong); background: var(--ap-bg-hover); }
+.ap-app .btn-primary { background: var(--ap-navy); border-color: var(--ap-navy); color: var(--ap-text-invert); }
+.ap-app .btn-primary:hover { background: var(--ap-navy-hover); border-color: var(--ap-navy-hover); }
+.ap-app .btn-secondary { /* same as default .btn */ }
+.ap-app .btn-sm { height: 28px; padding: 0 var(--ap-s-3); font-size: var(--ap-fs-12); }
+
+/* Native inputs (without .ap-input class) */
+.ap-app input[type="text"],
+.ap-app input[type="email"],
+.ap-app input[type="password"],
+.ap-app input[type="number"],
+.ap-app input[type="file"],
+.ap-app select, .ap-app textarea {
+  font-family: inherit; padding: 8px 10px; font-size: var(--ap-fs-13);
+  border: 1px solid var(--ap-border); border-radius: var(--ap-r-md);
+  background: var(--ap-bg-surface); color: var(--ap-text);
+}
+.ap-app input:focus, .ap-app select:focus, .ap-app textarea:focus {
+  outline: none; border-color: var(--ap-navy); box-shadow: var(--ap-shadow-focus);
+}
+
+/* Scanner-specific bits */
+.ap-app .batch-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--ap-s-3); padding: var(--ap-s-3); background: var(--ap-bg-sub); border-radius: var(--ap-r-md); }
+.ap-app .batch-meta .label { display: block; font-size: var(--ap-fs-11); text-transform: uppercase; color: var(--ap-text-muted); letter-spacing: 0.04em; font-weight: 500; margin-bottom: 2px; }
+.ap-app .batch-meta code { font-family: var(--ap-font-mono); font-size: var(--ap-fs-12); color: var(--ap-text); }
+.ap-app .scan-mode-group { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ap-s-3); }
+.ap-app .scan-mode-card { display: flex; gap: var(--ap-s-3); padding: var(--ap-s-3); border: 1px solid var(--ap-border); border-radius: var(--ap-r-md); cursor: pointer; align-items: flex-start; background: var(--ap-bg-surface); }
+.ap-app .scan-mode-card:hover { border-color: var(--ap-border-strong); }
+.ap-app .scan-mode-card input { margin-top: 2px; }
+.ap-app .scan-mode-card strong { font-size: var(--ap-fs-13); font-weight: 500; color: var(--ap-text); display: block; }
+.ap-app .scan-mode-card .muted { font-size: var(--ap-fs-12); color: var(--ap-text-muted); margin-top: 2px; }
+
+/* Analytics page legacy classes */
+.ap-app .stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--ap-s-3);
+}
+.ap-app .stat-card {
+  background: var(--ap-bg-surface);
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-lg);
+  padding: var(--ap-s-3) var(--ap-s-4);
+}
+.ap-app .stat-label {
+  font-size: var(--ap-fs-11); color: var(--ap-text-muted);
+  text-transform: uppercase; letter-spacing: 0.04em; font-weight: 500;
+}
+.ap-app .stat-value {
+  font-size: var(--ap-fs-22); font-weight: 600; margin-top: var(--ap-s-1);
+  color: var(--ap-text);
+}
+
+/* Chart.js canvas parents need a bounded height; most analytics pages do
+   this inline, but ensure the default Chart canvas doesn't explode. */
+.ap-app canvas { max-width: 100%; }
+
+/* Admin & tenant forms often use .form-grid */
+.ap-app .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--ap-s-3); }
+.ap-app .section-divider { border: 0; border-top: 1px solid var(--ap-border); margin: var(--ap-s-5) 0; }
+
+/* ============================================================================
+   Dark-mode overrides for legacy app.css
+   ----------------------------------------------------------------------------
+   Legacy app.css hard-codes light-only colours on th/td/table/body. These
+   rules must come AFTER the compat layer so they win the cascade. They only
+   activate when data-theme="dark" is set.
+   ============================================================================ */
+html[data-theme="dark"] .ap-app table,
+html[data-theme="dark"] .ap-app .table-wrap table {
+  color: var(--ap-text) !important;
+  background: transparent !important;
+}
+html[data-theme="dark"] .ap-app th,
+html[data-theme="dark"] .ap-app .table-wrap th {
+  background: var(--ap-bg-sub) !important;
+  color: var(--ap-text-muted) !important;
+  border-bottom-color: var(--ap-border) !important;
+}
+html[data-theme="dark"] .ap-app td,
+html[data-theme="dark"] .ap-app .table-wrap td {
+  color: var(--ap-text) !important;
+  border-bottom-color: var(--ap-border) !important;
+  background: transparent !important;
+}
+html[data-theme="dark"] .ap-app tr:hover td {
+  background: var(--ap-bg-hover) !important;
+}
+/* Legacy code blocks / ids that render as dark-on-dark in dark mode */
+html[data-theme="dark"] .ap-app code,
+html[data-theme="dark"] .ap-app .mono,
+html[data-theme="dark"] .ap-app .meta {
+  color: var(--ap-text-muted) !important;
+}
+/* Reset hard-coded page/body backgrounds the legacy stylesheet set */
+html[data-theme="dark"] .ap-app,
+html[data-theme="dark"] .ap-app .page-shell,
+html[data-theme="dark"] .ap-app .page {
+  background: var(--ap-bg-page) !important;
+}
+/* Inputs and selects in dark mode (legacy CSS sets white bgs) */
+html[data-theme="dark"] .ap-app input[type="text"],
+html[data-theme="dark"] .ap-app input[type="email"],
+html[data-theme="dark"] .ap-app input[type="password"],
+html[data-theme="dark"] .ap-app input[type="number"],
+html[data-theme="dark"] .ap-app input[type="file"],
+html[data-theme="dark"] .ap-app select,
+html[data-theme="dark"] .ap-app textarea {
+  background: var(--ap-bg-surface) !important;
+  color: var(--ap-text) !important;
+  border-color: var(--ap-border) !important;
+}
+/* Analytics-specific stat cards from legacy css */
+html[data-theme="dark"] .ap-app .stat-card,
+html[data-theme="dark"] .ap-app .chart-card {
+  background: var(--ap-bg-surface) !important;
+  border-color: var(--ap-border) !important;
+  color: var(--ap-text) !important;
+}
+html[data-theme="dark"] .ap-app .stat-label,
+html[data-theme="dark"] .ap-app .stat-card .label { color: var(--ap-text-muted) !important; }
+html[data-theme="dark"] .ap-app .stat-value { color: var(--ap-text) !important; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   REVIEW PAGE — row list cards
+   ═══════════════════════════════════════════════════════════════════════════ */
+.ap-app .row-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow-y: auto;
+  max-height: 60vh;
+}
+
+/* Base row card */
+.ap-app .review-row {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ap-border);
+  cursor: pointer;
+  transition: background 0.1s;
+  position: relative;
+  border-left: 3px solid transparent;
+}
+.ap-app .review-row:first-child { border-top: 1px solid var(--ap-border); }
+.ap-app .review-row:hover { background: var(--ap-bg-hover); }
+
+/* Selected */
+.ap-app .review-row.selected {
+  background: var(--ap-primary-light, #eff6ff);
+  border-left-color: var(--ap-navy, #1e3a5f);
+}
+.ap-app .review-row.selected:hover { background: var(--ap-primary-light, #eff6ff); }
+
+/* Corrected — green left accent */
+.ap-app .review-row.corrected {
+  border-left-color: #16a34a;
+}
+.ap-app .review-row.corrected .row-supplier { color: #15803d; }
+
+/* Urgent / needs immediate review — amber left accent + tint */
+.ap-app .review-row.urgent {
+  background: #fffbeb;
+  border-left-color: #d97706;
+}
+.ap-app .review-row.urgent:hover { background: #fef3c7; }
+.ap-app .review-row.urgent.selected {
+  background: #fef3c7;
+  border-left-color: #b45309;
+}
+
+/* Row content layout */
+.ap-app .row-primary {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 3px;
+  min-width: 0;
+}
+.ap-app .row-supplier {
+  font-weight: 600;
+  font-size: var(--ap-fs-13);
+  color: var(--ap-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.ap-app .row-amount {
+  font-size: var(--ap-fs-12);
+  color: var(--ap-text-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-width: 52px;
+}
+.ap-app .row-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
+  font-size: var(--ap-fs-11);
+  color: var(--ap-text-muted);
+  overflow: hidden;
+}
+.ap-app .row-meta span { white-space: nowrap; }
+
+/* Confidence colouring */
+.ap-app .row-conf {
+  font-variant-numeric: tabular-nums;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: var(--ap-fs-11);
+  background: #dcfce7; color: #166534;
+}
+.ap-app .row-conf.row-conf-mid { background: #fef9c3; color: #854d0e; }
+.ap-app .row-conf.row-conf-low { background: #fee2e2; color: #991b1b; }
+
+/* Badges */
+.ap-app .row-badges { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
+.ap-app .row-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.ap-app .row-badge-urgent   { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+.ap-app .row-badge-reviewed { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+.ap-app .row-badge-corrected{ background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   REVIEW PAGE — preview unavailable placeholder
+   ═══════════════════════════════════════════════════════════════════════════ */
+.ap-app .preview-unavailable {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 180px;
+  margin-top: 12px;
+  padding: 28px 20px;
+  background: var(--ap-bg-sub);
+  border: 1px dashed var(--ap-border-strong);
+  border-radius: 8px;
+  color: var(--ap-text-muted);
+  text-align: center;
+}
+.ap-app .preview-unavailable svg { opacity: 0.4; }
+.ap-app .preview-unavailable p {
+  margin: 0;
+  font-size: var(--ap-fs-13);
+  font-weight: 500;
+  color: var(--ap-text);
+}
+.ap-app .preview-unavailable-hint {
+  font-size: var(--ap-fs-12);
+  color: var(--ap-text-muted);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   EXPORT TEMPLATES — preview table
+   ═══════════════════════════════════════════════════════════════════════════ */
+.ap-app .preview-sheet-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: var(--ap-fs-13);
+  color: var(--ap-text-muted);
+}
+.ap-app .preview-sheet-header strong {
+  color: var(--ap-text);
+  font-weight: 600;
+}
+.ap-app .preview-sheet-badge {
+  margin-left: auto;
+  font-size: var(--ap-fs-11);
+  font-weight: 500;
+  background: #dbeafe;
+  color: #1e40af;
+  padding: 2px 8px;
+  border-radius: 10px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.ap-app .preview-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-md);
+}
+.ap-app .preview-table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: max-content;
+  font-size: var(--ap-fs-12);
+  font-family: var(--ap-font-mono, monospace);
+}
+.ap-app .preview-table thead tr {
+  background: var(--ap-bg-sub);
+}
+.ap-app .preview-table th {
+  padding: 8px 12px;
+  text-align: left;
+  font-size: var(--ap-fs-11);
+  font-weight: 600;
+  font-family: var(--ap-font-sans, inherit);
+  color: var(--ap-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--ap-border);
+  white-space: nowrap;
+}
+.ap-app .preview-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ap-border);
+  color: var(--ap-text);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ap-app .preview-table tbody tr:last-child td { border-bottom: 0; }
+.ap-app .preview-table tbody tr:hover td { background: var(--ap-bg-hover); }
+.ap-app .preview-table td.preview-cell-empty { color: var(--ap-text-muted); font-style: italic; }
+.ap-app .preview-table td.preview-cell-empty::before { content: "—"; }
+
+/* Dark mode adjustments */
+html[data-theme="dark"] .ap-app .review-row.urgent { background: rgba(217,119,6,0.08); }
+html[data-theme="dark"] .ap-app .review-row.urgent:hover { background: rgba(217,119,6,0.14); }
+html[data-theme="dark"] .ap-app .preview-unavailable { background: var(--ap-bg-sub); }
+
+/* ── Collapsible scanner sections ─────────────────────────────────────────── */
+.ap-app .section-collapsed { display: none; }
+
+/* ── Tool source badges ──────────────────────────────────────────────────── */
+.tool-badge {
+  display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .03em;
+  padding: 1px 5px; border-radius: 3px; vertical-align: middle; line-height: 1.5;
+  margin-left: 4px;
+}
+.tool-di     { background: #dbeafe; color: #1e40af; }
+.tool-ai     { background: #ede9fe; color: #5b21b6; }
+.tool-ocr    { background: #fef3c7; color: #92400e; }
+.tool-native { background: #f0fdf4; color: #166534; }
+html[data-theme="dark"] .tool-di     { background: rgba(30,64,175,.25);  color: #93c5fd; }
+html[data-theme="dark"] .tool-ai     { background: rgba(91,33,182,.25);  color: #c4b5fd; }
+html[data-theme="dark"] .tool-ocr    { background: rgba(146,64,14,.25);  color: #fde68a; }
+html[data-theme="dark"] .tool-native { background: rgba(22,101,52,.25);  color: #86efac; }
+
+/* ── Field-level review reasons ──────────────────────────────────────────── */
+.ap-app .review-reasons-banner {
+  background: var(--ap-warn-bg, #fffbea); border: 1px solid var(--ap-warn-border, #f0c36d);
+  color: var(--ap-warn-fg, #663c00); border-radius: var(--ap-r-sm, 4px);
+  padding: 6px 10px; font-size: 12px; margin-bottom: 8px;
+}
+html[data-theme="dark"] .ap-app .review-reasons-banner {
+  background: rgba(146,64,14,.15); border-color: rgba(146,64,14,.4); color: #fde68a;
+}
+.ap-app .field-reason { font-size: 11px; color: var(--ap-warn-fg, #92400e); margin-top: 2px; }
+html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Review page — 3-column layout
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* The review page body fills the main pane height using dvh/vh so the
+   3-col grid can have internally scrollable columns on desktop.
+   This class is only applied to review.html, not to other pages. */
+.review-page-body {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;    /* fills viewport; fallback below */
+  height: 100vh;     /* fallback for browsers without dvh */
+  min-height: 0;
+  overflow: hidden;  /* the columns inside handle their own scroll */
+}
+@supports (height: 100dvh) {
+  .review-page-body { height: 100dvh; }
+}
+
+/* Override the inline style on .review-grid */
+.review-3col {
+  display: grid;
+  grid-template-columns: 300px 1fr 380px;
+  gap: 0;
+  /* Use min-height so columns can grow beyond viewport, but don't trap scroll.
+     On larger screens the sticky sidebar + topbar give a natural viewport feel.
+     overflow must NOT be hidden — that prevents column bodies from scrolling. */
+  min-height: 0;
+  flex: 1;
+}
+
+/* Each column scrolls independently */
+.review-3col > .review-col {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;  /* clip horizontally only via child overflow-y:auto */
+  min-height: 0;
+  border-right: 1px solid var(--ap-border);
+}
+.review-3col > .review-col:last-child { border-right: none; }
+
+/* Column headers — sticky */
+.review-col-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--ap-s-2);
+  padding: var(--ap-s-3) var(--ap-s-4);
+  border-bottom: 1px solid var(--ap-border);
+  background: var(--ap-bg-surface);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  flex-shrink: 0;
+}
+.review-col-head h2 { margin: 0; font-size: var(--ap-fs-14); font-weight: 600; }
+
+/* Scrollable body inside each column */
+.review-col-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--ap-s-3) var(--ap-s-4);
+}
+
+/* Col 1 — rows list */
+.review-col-rows .review-col-body { padding: var(--ap-s-2); }
+
+/* Col 3 — remap + viewer */
+.review-col-remap .review-col-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ap-s-3);
+  padding: var(--ap-s-3);
+}
+
+/* Preview inside col 3 grows to fill available space */
+.review-col-remap .preview-wrap {
+  flex: 1;
+  min-height: 200px;
+  position: relative;
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-md);
+  overflow: hidden;
+  background: var(--ap-bg-sub);
+}
+.review-col-remap .preview-img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* Remap controls group */
+.remap-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ap-s-2);
+  padding: var(--ap-s-3);
+  background: var(--ap-bg-sub);
+  border-radius: var(--ap-r-md);
+  border: 1px solid var(--ap-border);
+  flex-shrink: 0;
+}
+.remap-controls-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ap-s-2);
+}
+
+/* Page nav in col 3 header */
+.review-page-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--ap-s-2);
+}
+
+/* Responsive: stack columns on narrow screens */
+@media (max-width: 1100px) {
+  .review-3col {
+    grid-template-columns: 260px 1fr 340px;
+  }
+}
+@media (max-width: 900px) {
+  .review-3col {
+    grid-template-columns: 1fr;
+    height: auto;
+    overflow: visible;
+  }
+  .review-3col > .review-col {
+    border-right: none;
+    border-bottom: 1px solid var(--ap-border);
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+  .review-3col > .review-col:last-child { border-bottom: none; }
+}
+
+/* Batch header bar stays compact */
+.review-batch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--ap-s-3);
+  padding: var(--ap-s-3) var(--ap-s-5);
+  background: var(--ap-bg-surface);
+  border-bottom: 1px solid var(--ap-border);
+  flex-shrink: 0;
+}
+.review-batch-bar .batch-meta {
+  display: flex; gap: var(--ap-s-5); font-size: var(--ap-fs-12);
+}
+.review-batch-bar .batch-meta .label {
+  color: var(--ap-text-muted); margin-right: var(--ap-s-1);
+}
