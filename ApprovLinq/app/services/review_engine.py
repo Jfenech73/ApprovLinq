@@ -61,6 +61,7 @@ _REASON_WEIGHTS: dict[str, tuple[int, str, list[str]]] = {
     "page_quality_low":          (15,  "low",    ["_general"]),
     "subtotal_not_found":        (15,  "low",    ["net_amount"]),
     "deposit_component_detected":(10,  "low",    ["total_amount"]),
+    "totals_mismatch_advisory":  (35,  "medium", ["net_amount", "vat_amount", "total_amount"]),
     "line_sum_mismatch":         (10,  "low",    ["line_items_raw"]),
     "mixed_category_invoice":    (10,  "low",    ["nominal_account_code"]),
     "low_evidence_density":      (5,   "low",    ["_general"]),
@@ -69,7 +70,6 @@ _REASON_WEIGHTS: dict[str, tuple[int, str, list[str]]] = {
 # Reasons in this set may be auto-approved if no high/medium reasons are present
 _AUTO_APPROVABLE_REASONS = {
     "page_quality_low",
-    "deposit_component_detected",
     "line_sum_mismatch",
     "mixed_category_invoice",
     "low_evidence_density",

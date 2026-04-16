@@ -153,7 +153,12 @@ def validate_invoice(extracted: dict) -> InvoiceValidation:
                 result.totals_reconciliation_reason = (
                     f"Difference of {diff:.2f} attributed to deposit/BCRS surcharge"
                 )
+                # NOTE: deposit_component_detected is purely advisory metadata.
+                # It is intentionally NOT used as the basis for an automatic split in
+                # batches.py — that requires confirmed label+region evidence.
+                # Here it only flags the row for review so a human can verify.
                 reasons.append(f"deposit_component_detected:{diff:.2f}")
+                reasons.append("totals_mismatch_advisory")
             else:
                 result.other_charges_amount = diff
                 result.totals_reconciliation_status = "totals_mismatch"

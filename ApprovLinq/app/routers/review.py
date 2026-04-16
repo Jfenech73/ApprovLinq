@@ -172,6 +172,82 @@ def save_corrections(batch_id: UUID, row_id: int, payload: RowCorrectionIn,
     return {"audited": len(audits)}
 
 
+@router.post("/batches/{batch_id}/rows/{row_id}/duplicate")
+def duplicate_row(batch_id: UUID, row_id: int,
+                  db: Session = Depends(get_db), user=Depends(current_user)):
+    """Create a manual duplicate of an invoice row for BCRS/deposit editing.
+
+    The duplicate:
+    - copies all invoice header fields (supplier, invoice number, date, source file)
+    - sets amounts to zero so the reviewer can enter the correct deposit/BCRS values
+    - is marked review_required=True with reason 'manually_duplicated_for_bcrs'
+    - is included in export just like any other row
+    """
+    batch = _get_batch(db, batch_id)
+    row = db.get(M.InvoiceRow, row_id)
+    if not row or row.batch_id != batch.id:
+        raise HTTPException(404, "Row not found in batch")
+
+    from datetime import datetime as _dt
+    duplicate = M.InvoiceRow(
+        batch_id=row.batch_id,
+        tenant_id=row.tenant_id,
+        company_id=row.company_id,
+        source_file_id=row.source_file_id,
+        source_filename=row.source_filename,
+        page_no=row.page_no,
+        supplier_name=row.supplier_name,
+        supplier_posting_account=row.supplier_posting_account,
+        nominal_account_code=row.nominal_account_code,
+        invoice_number=row.invoice_number,
+        invoice_date=row.invoice_date,
+        description=(f"{row.description or ''} - BCRS/Deposit (manual)").strip(" -"),
+        line_items_raw=None,
+        # Amounts zero — reviewer fills in the deposit/BCRS amount
+        net_amount=0.0,
+        vat_amount=0.0,
+        total_amount=0.0,
+        currency=row.currency,
+        tax_code=row.tax_code,
+        method_used="manual_duplicate",
+        confidence_score=None,
+        validation_status="manual",
+        review_required=True,
+        review_priority="high",
+        review_reasons="manually_duplicated_for_bcrs",
+        review_fields="net_amount|vat_amount|total_amount",
+        auto_approved=False,
+        page_quality_score=None,
+        totals_raw=row.totals_raw,
+        page_text_raw=row.page_text_raw,
+        header_raw=row.header_raw,
+    )
+    db.add(duplicate)
+    db.flush()  # get the new id
+
+    # Audit the original row so history shows a duplicate was created
+    from app.db.review_models import InvoiceRowFieldAudit
+    audit = InvoiceRowFieldAudit(
+        batch_id=batch.id,
+        row_id=row.id,
+        field_name="_action",
+        old_value=None,
+        new_value=f"duplicated → row {duplicate.id}",
+        action="duplicate_created",
+        note="Manual duplicate created for BCRS/deposit entry",
+        user_id=user.id,
+        username=getattr(user, "email", None) or str(user.id),
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "duplicate_id": duplicate.id,
+        "original_id":  row.id,
+        "message": "Duplicate row created. Edit it to enter the BCRS/deposit amount, then save corrections.",
+    }
+
+
 @router.post("/batches/{batch_id}/rows/{row_id}/revert/{field}")
 def revert(batch_id: UUID, row_id: int, field: str,
            db: Session = Depends(get_db), user=Depends(current_user)):

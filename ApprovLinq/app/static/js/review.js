@@ -391,6 +391,30 @@ $("exportBtn").onclick = async () => {
     msg(String(e), "error");
   }
 };
+// ── Duplicate row for BCRS/deposit manual entry ──────────────────────────────
+$("duplicateRowBtn").onclick = async () => {
+  if (state.selected == null) { msg("Select a row first.", "error"); return; }
+  if (!confirm("Create a duplicate of this row for manual BCRS/deposit entry?\n\nThe duplicate will have zero amounts — edit it to enter the correct deposit value.")) return;
+  try {
+    const r = await fetch(`/review/batches/${batchId}/rows/${state.selected}/duplicate`, {
+      method: "POST", headers: hdrs(),
+    });
+    if (!r.ok) { msg(await r.text(), "error"); return; }
+    const data = await r.json();
+    msg(`Duplicate row ${data.duplicate_id} created. ${data.message}`, "success");
+    await load();
+    // Auto-select the new duplicate so reviewer can edit it immediately
+    const dup = state.rows.find(x => x.id === data.duplicate_id);
+    if (dup) {
+      state.selected = dup.id;
+      state.fileId   = dup.source_file_id;
+      state.page     = dup.page_no || 1;
+      render();
+      loadAudit(dup.id);
+    }
+  } catch (e) { msg(String(e), "error"); }
+};
+
 $("reopenBtn").onclick = async () => {
   const r = await fetch(`/review/batches/${batchId}/reopen`, { method: "POST", headers: hdrs() });
   if (!r.ok) msg(await r.text(), "error"); else load();
