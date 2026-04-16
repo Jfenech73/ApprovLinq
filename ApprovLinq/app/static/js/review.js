@@ -579,32 +579,75 @@ window.addEventListener("mouseup", async (e) => {
   dragStart = null;
   if (region.wN < 0.01 || region.hN < 0.01) {
     remapSel.hidden = true;
-    return; // accidental click / too-small
+    return; // accidental click / too-small drag
   }
   const lockMsg = remapLockReason();
   if (lockMsg) { remapSel.hidden = true; msg(lockMsg, "error"); return; }
   const row = state.rows.find(x => x.id === state.selected);
   if (!row) { msg("Select a row first.", "error"); return; }
-  if (!confirm(`Save region for field "${remapField}" on page ${state.page}?`)) {
+
+  // ── Capture any text-layer selection the user may have made ───────────────
+  // The preview is an <img> so native text selection is unavailable.
+  // However if the user selected text in the page (e.g. a native PDF viewer
+  // embedded elsewhere) we can pick it up from window.getSelection().
+  // In normal preview-image mode this will usually be empty — the backend
+  // will fall back to OCR/text-layer extraction from the bounding box.
+  const domSel = window.getSelection();
+  const selectedText = (domSel && domSel.toString()) ? domSel.toString().trim() : "";
+  if (selectedText) {
+    // Clear selection so it does not linger visually
+    domSel.removeAllRanges();
+  }
+
+  // Show what we captured before asking user to confirm
+  const previewLabel = selectedText
+    ? `Selected text: "${selectedText.slice(0, 60)}${selectedText.length > 60 ? "…" : ""}"`
+    : `Region: x=${region.x.toFixed(3)}, y=${region.y.toFixed(3)}, w=${region.wN.toFixed(3)}, h=${region.hN.toFixed(3)}`;
+  if (!confirm(`Apply remap for field "${remapField}" on page ${state.page}?\n\n${previewLabel}`)) {
     remapSel.hidden = true;
     return;
   }
-  const r = await fetch(`/review/batches/${batchId}/rows/${row.id}/remap`, {
-    method: "POST", headers: hdrs(),
-    body: JSON.stringify({
-      field_name: remapField,
-      page_no: state.page,
-      x: region.x, y: region.y, w: region.wN, h: region.hN,
-      file_id: state.fileId,
-      apply_as_value: true,
-    }),
-  });
-  if (!r.ok) { msg(await r.text(), "error"); return; }
-  const data = await r.json().catch(() => ({}));
-  // If the backend was able to read text from the region, drop it straight
-  // into the field input so the correction can be saved normally.
+
+  msg(`Reading region for "${remapField}"…`, "");
+
+  let rResp;
+  try {
+    rResp = await fetch(`/review/batches/${batchId}/rows/${row.id}/remap`, {
+      method: "POST", headers: hdrs(),
+      body: JSON.stringify({
+        field_name:    remapField,
+        page_no:       state.page,
+        x: region.x, y: region.y, w: region.wN, h: region.hN,
+        file_id:       state.fileId,
+        apply_as_value: true,
+        selected_text: selectedText || null,
+      }),
+    });
+  } catch (fetchErr) {
+    msg(`Network error during remap: ${fetchErr}`, "error");
+    remapSel.hidden = true;
+    return;
+  }
+
+  if (!rResp.ok) {
+    const errText = await rResp.text().catch(() => String(rResp.status));
+    msg(`Remap failed (${rResp.status}): ${errText}`, "error");
+    remapSel.hidden = true;
+    return;
+  }
+
+  const data = await rResp.json().catch(() => ({}));
   const fieldLabel = remapField;
+
+  if (data && data.error) {
+    // Backend returned an explicit failure (e.g. empty region)
+    msg(`Remap: ${data.error}`, "error");
+    remapSel.hidden = true;
+    return;
+  }
+
   if (data && data.read_text) {
+    // Update the editor field immediately so the user sees the value
     const inp = document.querySelector(`#rowEditor [data-field="${fieldLabel}"]`);
     if (inp) {
       inp.value = data.read_text;
@@ -614,18 +657,19 @@ window.addEventListener("mouseup", async (e) => {
     const ruleNote = data.rule_created
       ? " Future rule saved — this supplier's invoices will auto-fill this field."
       : (data.saved_as_hint ? " Region saved as future remap hint." : "");
-    msg(`Remap saved — read "${data.read_text}" into ${fieldLabel}.${ruleNote} Value auto-saved.`, "success");
-    // Reload so the row list reflects the persisted correction immediately
+    msg(`Remap applied — "${data.read_text}" → ${fieldLabel}.${ruleNote}`, "success");
+    // Reload so the row list shows the persisted correction immediately
     await load();
   } else {
+    // Hint saved but no text resolved — give informative message
     const hintNote = data && data.saved_as_hint
-      ? " Region stored as a future remap hint for this supplier."
-      : " Region recorded.";
-    msg(`Remap saved for ${fieldLabel} (no text detected).${hintNote}`, "success");
+      ? " Coordinates stored as future remap hint for this supplier."
+      : "";
+    msg(`Remap region saved for "${fieldLabel}" — no text detected in selected area.${hintNote}`, "warning");
   }
-  // Keep the selection visible briefly so the user sees what was saved, then hide
+
+  // Keep selection rectangle visible briefly then hide
   setTimeout(() => { remapSel.hidden = true; }, 1800);
-  // Keep remapField active so the user can save corrections immediately
 });
 
 if (typeof ensureAuth === "function" && !ensureAuth()) {
