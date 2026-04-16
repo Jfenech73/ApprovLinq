@@ -53,6 +53,7 @@ async function load() {
     if (state.selected != null) {
       loadAudit(state.selected);
       await ensurePageCount();
+      refreshPreview(); // load preview on initial selection
     }
   } catch (e) { msg("Load failed: " + e.message, "error"); }
 }
@@ -127,7 +128,7 @@ function render() {
     d.onclick = async () => {
       state.selected = r.id; state.fileId = r.source_file_id; state.page = r.page_no || 1;
       render(); loadAudit(r.id); await ensurePageCount();
-      if ($("remapMode").checked) refreshPreview();
+      refreshPreview(); // always load preview in 3-col layout
     };
     list.appendChild(d);
   });
@@ -481,7 +482,6 @@ function updateRemapUI() {
     const prev = $("prevPageBtn"); const next = $("nextPageBtn");
     if (prev) { prev.disabled = true;  prev.title = reason; }
     if (next) { next.disabled = true;  next.title = reason; }
-    previewWrap.style.display = "none";
     remapHint.hidden = true;
   } else {
     cb.disabled = false;
@@ -507,14 +507,10 @@ $("remapMode").addEventListener("change", async (e) => {
   remapHint.hidden = !on;
   if (!on) {
     remapSel.hidden = true; dragStart = null;
-    previewImg.src = ""; previewImg.hidden = true;
-    const ph = $("previewUnavailable"); if (ph) ph.hidden = true;
-    previewWrap.style.display = "none";
     previewWrap.classList.remove("remap-active");
     return;
   }
-  // Show preview panel when remap activates
-  previewWrap.style.display = "";
+  // Show remap-active styling when remap mode activates
   previewWrap.classList.add("remap-active");
   if (!state.fileId && state.rows.length) {
     const r0 = state.rows[0];
