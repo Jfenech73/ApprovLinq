@@ -239,7 +239,17 @@ def _parse_money_candidates(text: str) -> list[float]:
 
 
 def _parse_first_money(value: object) -> float | None:
-    vals = _parse_money_candidates(str(value or ""))
+    """Return the first monetary value from value.
+
+    Handles numeric inputs directly to avoid str(float) precision loss:
+    str(61.80) == '61.8' which fails the two-decimal-place regex.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        f = round(float(value), 2)
+        return f if f > 0 else None
+    vals = _parse_money_candidates(str(value))
     return vals[0] if vals else None
 
 
@@ -255,6 +265,34 @@ def _is_body_or_item_context(line: str) -> bool:
     low = (line or '').lower()
     return bool(re.search(
         r"\b(qty|quantity|unit|uom|barcode|item|description|pcs|price|w/sale|retail|consumer|code|stock|salesperson|order no|delivery note)\b",
+        low,
+    ))
+
+
+def _is_vat_line(line: str) -> bool:
+    """True when a line represents a VAT / tax amount row.
+
+    These lines must never be selected as a BCRS candidate — they carry the
+    VAT value, not the deposit/BCRS value.
+    """
+    low = (line or '').strip().lower()
+    return bool(re.match(
+        r"(?:v\.?a\.?t\.?|vat(?:\s+amount|\s+total)?|tax(?:\s+amount|\s+total)?|value\s+added\s+tax)"
+        r"\s*[:\-]?\s*(?:€\s*)?[\d.,]",
+        low,
+    ))
+
+
+def _is_total_incl_line(line: str) -> bool:
+    """True when a line is a combined invoice total that *mentions* BCRS/deposit
+    in its label (e.g. 'Total incl VAT & BCRS 80.12', 'Invoice Total 98.72').
+
+    The value on such a line is the **invoice total**, not the BCRS amount.
+    We must never select this value as the BCRS candidate.
+    """
+    low = (line or '').strip().lower()
+    return bool(re.match(
+        r"(?:total|grand\s+total|invoice\s+total|amount\s+due|balance\s+due)",
         low,
     ))
 
@@ -319,6 +357,25 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     ]
     for pidx, pattern in enumerate(patterns):
         for match in pattern.finditer(summary_text):
+            # Identify which collected line this match falls on
+            match_line = ""
+            pos = 0
+            for ln in lines:
+                if pos + len(ln) >= match.start():
+                    match_line = ln
+                    break
+                pos += len(ln) + 1  # +1 for the "\n" join
+
+            # Hard rejection: if the match line is a combined-total line (e.g.
+            # "Total incl VAT & BCRS 80.12"), the value is the invoice total,
+            # not the BCRS amount.  Skip entirely.
+            if _is_total_incl_line(match_line):
+                continue
+
+            # Hard rejection: if the match line is a VAT/tax row, skip.
+            if _is_vat_line(match_line):
+                continue
+
             label_span = summary_text[max(0, match.start()-40):min(len(summary_text), match.end()+40)].lower()
             if pidx == 2:
                 # Plain "deposit" pattern: accept when the surrounding context contains
@@ -330,14 +387,6 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
                     or 'total' in label_span
                     or 'refundable' in label_span
                 )
-                # Find which collected line this match falls on
-                match_line = ""
-                pos = 0
-                for ln in lines:
-                    if pos + len(ln) >= match.start():
-                        match_line = ln
-                        break
-                    pos += len(ln) + 1  # +1 for the "\n" join
                 has_summary_line = _is_summary_context(match_line)
                 if not has_context_window and not has_summary_line:
                     continue
@@ -361,6 +410,16 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
         if not label_match:
             continue
         if _is_body_or_item_context(line) and not _is_summary_context(line):
+            continue
+
+        # Hard rejection: a combined-total line that mentions BCRS/deposit in its
+        # label (e.g. "Total incl VAT & BCRS 80.12") carries the invoice total,
+        # not the BCRS amount.  Skip the whole line.
+        if _is_total_incl_line(line):
+            continue
+
+        # Hard rejection: a VAT/tax row must never be scored as a BCRS candidate.
+        if _is_vat_line(line):
             continue
 
         plain_deposit_only = ('deposit' in low and 'bcrs' not in low and 'refundable' not in low and 'surcharge' not in low)
@@ -418,6 +477,10 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
                 continue
             cand_line = lines[nidx]
             if _is_body_or_item_context(cand_line) and not _is_summary_context(cand_line):
+                continue
+            # Do not use a VAT/tax line or a total-inclusive line as a BCRS
+            # value source even when iterating neighbours of a BCRS label line.
+            if _is_vat_line(cand_line) or _is_total_incl_line(cand_line):
                 continue
             for val in _parse_money_candidates(cand_line):
                 score = 8
