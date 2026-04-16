@@ -92,10 +92,15 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
 
 
 def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
-    """Apply saved RemapHints as extraction guidance for blank fields on this row.
+    """Apply saved RemapHints as extraction guidance.
 
-    Conservative: only fills fields that are currently blank; never overwrites
-    a non-empty value.  Any failure is silently logged and skipped.
+    Fills a field when:
+    - the field is blank, OR
+    - the field is listed in review_fields (flagged for review), OR
+    - the field value looks obviously suspect (very short / clearly wrong format)
+
+    Preference order: supplier_id match first, normalised name fallback.
+    Never overwrites a field that has a solid non-suspect value and is not flagged.
     """
     if not row.supplier_name:
         return
@@ -110,26 +115,64 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
     if not row_norm:
         return
 
-    hints = db.query(RemapHint).filter(
+    # Determine which fields are candidates for remap overwrite:
+    # blank fields + fields explicitly flagged for review
+    _review_fields: set[str] = set()
+    if row.review_fields:
+        sep = "|" if "|" in (row.review_fields or "") else ","
+        _review_fields = {f.strip() for f in row.review_fields.split(sep) if f.strip()}
+
+    _REMAP_FIELDS = (
+        "supplier_name", "invoice_number", "invoice_date",
+        "net_amount", "vat_amount", "total_amount",
+        "nominal_account_code", "description",
+    )
+    target_fields = {
+        f for f in _REMAP_FIELDS
+        if not getattr(row, f, None)                     # blank
+        or f in _review_fields                            # flagged for review
+        or _is_suspect_field_value(f, getattr(row, f, None))  # obviously wrong
+    }
+    if not target_fields:
+        return
+
+    # Query hints: prefer supplier_id match, fall back to name snapshot
+    hints_q = db.query(RemapHint).filter(
         RemapHint.tenant_id == batch.tenant_id,
         RemapHint.active.is_(True),
         RemapHint.page_no == row.page_no,
         RemapHint.x.isnot(None),
-    ).all()
-    if not hints:
+    )
+    all_hints = hints_q.all()
+    if not all_hints:
         return
 
-    matched = [h for h in hints if h.supplier_name_snapshot and _norm(h.supplier_name_snapshot) == row_norm]
+    # Find supplier record for this row (for id-based matching)
+    supplier_id: int | None = None
+    if row.supplier_name:
+        from app.db.models import TenantSupplier as _TS
+        from sqlalchemy import select as _sel
+        sq = _sel(_TS).where(
+            _TS.tenant_id == batch.tenant_id,
+            _TS.supplier_name == row.supplier_name,
+        )
+        if batch.company_id:
+            sq = sq.where(_TS.company_id == batch.company_id)
+        _supp = db.execute(sq).scalar_one_or_none()
+        if _supp:
+            supplier_id = _supp.id
+
+    # Match by supplier_id first, then by normalised name
+    if supplier_id:
+        matched = [h for h in all_hints if h.supplier_id == supplier_id]
+    else:
+        matched = []
     if not matched:
-        return
-
-    blank_fields = {
-        f for f in ("supplier_name", "invoice_number", "invoice_date",
-                    "net_amount", "vat_amount", "total_amount",
-                    "nominal_account_code", "description")
-        if not getattr(row, f, None)
-    }
-    if not blank_fields:
+        matched = [
+            h for h in all_hints
+            if h.supplier_name_snapshot and _norm(h.supplier_name_snapshot) == row_norm
+        ]
+    if not matched:
         return
 
     from app.db.models import InvoiceFile as _IF
@@ -143,7 +186,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         return
 
     for hint in matched:
-        if hint.field_name not in blank_fields:
+        if hint.field_name not in target_fields:
             continue
         try:
             from app.routers.review import _read_region_text
@@ -153,11 +196,35 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             )
             if text:
                 setattr(row, hint.field_name, text)
-                blank_fields.discard(hint.field_name)
+                target_fields.discard(hint.field_name)
                 logger.debug("RemapHint applied: supplier=%r field=%s → %r",
                              row.supplier_name, hint.field_name, text[:40])
         except Exception as exc:
             logger.debug("RemapHint apply failed for field %s: %s", hint.field_name, exc)
+
+
+def _is_suspect_field_value(field: str, value: object) -> bool:
+    """Return True if a field value looks obviously wrong or low-quality.
+
+    Used by _apply_remap_hints to decide whether a remap hint should be
+    allowed to overwrite an existing (but suspect) value.  Conservative —
+    only flags clearly bad values so we never silently destroy good data.
+    """
+    if value is None:
+        return False
+    v = str(value).strip()
+    if not v:
+        return True
+    # Very short strings are suspect for name/description fields
+    if field in ("supplier_name", "description") and len(v) < 3:
+        return True
+    # Numeric fields should not contain only letters
+    if field in ("net_amount", "vat_amount", "total_amount"):
+        try:
+            float(v.replace(",", "."))
+        except ValueError:
+            return True  # not a valid number
+    return False
 
 
 def _parse_money_candidates(text: str) -> list[float]:

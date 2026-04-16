@@ -997,6 +997,192 @@ def summarise_line_items_with_openai(
     return None
 
 
+
+
+def _extract_structured_summary_totals(text: str) -> dict | None:
+    """Parse invoices that have explicit structured summary/analysis blocks.
+
+    Handles layouts with headings like:
+      Tax Analysis         → authoritative net + vat
+      Invoice Summary      → authoritative total_amount
+      Deposit Summary      → deposit candidate for BCRS split
+      Gross Value / Total Discount / Less Returns / Sub Total / Invoice Total
+
+    Rules (all generic — no supplier names hardcoded):
+    1. If a "Tax Analysis" block is found, use its TOTAL row as net + vat.
+    2. If an "Invoice Summary" block is found, use its bottom total as total_amount.
+    3. If a "Deposit Summary" / "Deposits" block is found, capture its value as
+       a deposit candidate (stored in _deposit_candidate; used by BCRS split).
+    4. Reconciliation: prefer a net+vat combination that matches total_amount
+       within €0.10 tolerance.
+    5. Do NOT let Gross Value, Total Discount or Deposits lines replace
+       a reconciled net/vat/total set.
+
+    Returns a dict with any of: net_amount, vat_amount, total_amount,
+    _deposit_candidate, or None if no structured block was found.
+    """
+    import re as _re
+
+    if not text:
+        return None
+
+    lines = text.splitlines()
+
+    def _money(s: str) -> float | None:
+        s = (s or "").strip()
+        # strip currency symbols / separators
+        s = _re.sub(r"[€£$,]", "", s).replace(" ", "")
+        # European decimal: 1.234,56 → 1234.56
+        if _re.match(r"^\d{1,3}(?:\.\d{3})+,\d{2}$", s):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", ".")
+        try:
+            v = float(s)
+            return round(v, 2)
+        except ValueError:
+            return None
+
+    def _find_block_end(start: int, next_heading_re) -> int:
+        for i in range(start + 1, min(start + 30, len(lines))):
+            if next_heading_re.match(lines[i].strip()):
+                return i
+        return min(start + 20, len(lines))
+
+    # Heading patterns (case-insensitive, generous matching)
+    _H_TAX      = _re.compile(r"tax\s+analysis", _re.I)
+    _H_INV_SUM  = _re.compile(r"invoice\s+summary", _re.I)
+    # Heading lines must NOT be followed by a numeric value on the same line
+    # (otherwise a data row like "Deposits   9.60" is wrongly treated as a heading)
+    _H_DEP_SUM  = _re.compile(r"(?:deposit\s+summary|deposits?\s*summary)\s*$", _re.I)
+    _H_ANY      = _re.compile(r"^(tax\s+analysis|invoice\s+summary|deposit\s+summary)\s*$", _re.I)
+
+    # Pattern: "LABEL   123.45" or "LABEL: 123.45" where number is last token
+    _ROW = _re.compile(
+        r"^(.+?)\s{2,}([+-]?\d[\d,. ]*\d|\d+\.\d{2})\s*$|"   # 2+ spaces
+        r"^(.+?)\s*[:\-]\s*([+-]?\d[\d,. ]*\d|\d+\.\d{2})\s*$|"  # colon/dash separator
+        r"^(.+?)\s+([+-]?\d+\.\d{2})\s*$"                         # single space + x.xx
+    )
+
+    def _parse_block_rows(start: int, end: int) -> list[tuple[str, float]]:
+        """Return (label_lower, value) pairs from a block of lines."""
+        pairs = []
+        for i in range(start, end):
+            ln = lines[i].strip()
+            if not ln:
+                continue
+            m = _ROW.match(ln)
+            if not m:
+                continue
+            label = (m.group(1) or m.group(3) or m.group(5) or "").strip().lower()
+            val_str = (m.group(2) or m.group(4) or m.group(6) or "").strip()
+            v = _money(val_str)
+            if v is not None and label:
+                pairs.append((label, v))
+        return pairs
+
+    # ── Locate heading lines ──────────────────────────────────────────────────
+    tax_idx = inv_idx = dep_idx = -1
+    for i, ln in enumerate(lines):
+        ls = ln.strip()
+        if tax_idx < 0 and _H_TAX.search(ls):
+            tax_idx = i
+        elif inv_idx < 0 and _H_INV_SUM.search(ls):
+            inv_idx = i
+        elif dep_idx < 0 and _H_DEP_SUM.search(ls):
+            dep_idx = i
+
+    # If no structured headings found, return None so generic extraction handles it
+    if tax_idx < 0 and inv_idx < 0 and dep_idx < 0:
+        return None
+
+    result: dict = {}
+
+    # ── Tax Analysis block → net + vat ───────────────────────────────────────
+    if tax_idx >= 0:
+        end = _find_block_end(tax_idx, _H_ANY)
+        rows = _parse_block_rows(tax_idx + 1, end)
+        # Look for "total" row at the bottom of the tax analysis block
+        # It should contain net + vat combined
+        ta_total = None
+        ta_tax   = None
+        ta_net   = None
+        for label, val in rows:
+            if "total" in label and "vat" not in label and "tax" not in label and val > 0:
+                ta_total = val
+            if any(k in label for k in ("vat", "tax amount", "tax total", "v.a.t")):
+                ta_tax = val
+            if any(k in label for k in ("net", "sub total", "subtotal", "gross value",
+                                         "nett", "excl")):
+                if ta_net is None or val > ta_net:  # take largest plausible net
+                    ta_net = val
+
+        # Authoritative: if we found a tax-analysis TOTAL (net+vat combined)
+        # and a VAT amount, derive net = total - vat
+        if ta_total is not None and ta_tax is not None and ta_total > 0:
+            derived_net = round(ta_total - ta_tax, 2)
+            if derived_net > 0:
+                result["net_amount"] = derived_net
+                result["vat_amount"] = ta_tax
+        elif ta_net is not None and ta_tax is not None:
+            result["net_amount"] = ta_net
+            result["vat_amount"] = ta_tax
+
+    # ── Invoice Summary block → total_amount ─────────────────────────────────
+    if inv_idx >= 0:
+        end = _find_block_end(inv_idx, _H_ANY)
+        rows = _parse_block_rows(inv_idx + 1, end)
+        # Prefer "invoice total" or "sub total" at the bottom as total_amount
+        # Reject "gross value" and "total discount" as they are intermediate lines
+        _SKIP = _re.compile(r"gross\s*value|total\s*discount|less\s*return|less\s*disc|deposits?", _re.I)
+        candidates = []
+        for label, val in rows:
+            if _SKIP.search(label):
+                continue
+            if any(k in label for k in ("invoice total", "sub total", "subtotal",
+                                         "total payable", "amount due", "balance due",
+                                         "net payable")):
+                candidates.append(val)
+        if candidates:
+            result["total_amount"] = candidates[-1]  # last match is most likely the bottom total
+
+    # ── Deposit Summary block → deposit candidate ─────────────────────────────
+    if dep_idx >= 0:
+        end = _find_block_end(dep_idx, _H_ANY)
+        rows = _parse_block_rows(dep_idx + 1, end)
+        # Look for a specific deposit amount (not zero)
+        for label, val in rows:
+            if val > 0.0 and any(k in label for k in ("deposit", "bcrs", "total", "returnable")):
+                result["_deposit_candidate"] = val
+                break
+
+    # ── Reconciliation pass ───────────────────────────────────────────────────
+    # If we have all three, validate; reject if they don't reconcile
+    net   = result.get("net_amount")
+    vat   = result.get("vat_amount")
+    total = result.get("total_amount")
+    dep   = result.get("_deposit_candidate")
+
+    if net and vat and total:
+        tol = 0.10
+        base_ok = abs((net + vat) - total) <= tol
+        dep_ok  = dep and abs((net + vat + dep) - total) <= tol
+        if not base_ok and not dep_ok:
+            # Reconciliation failed — drop structured result and let generic handle it
+            logger.debug(
+                "_extract_structured_summary_totals: reconciliation failed "
+                "net=%.2f vat=%.2f total=%.2f dep=%s — falling back to generic",
+                net, vat, total, dep,
+            )
+            return None
+
+    if not result:
+        return None
+
+    logger.debug("_extract_structured_summary_totals: result=%s", result)
+    return result
+
+
 def simple_extract(
     text: str,
     openai_api_key: str | None = None,
@@ -1075,6 +1261,21 @@ def simple_extract(
 
     if not description:
         description = "Invoice goods or services"
+
+    # ── Structured summary override ───────────────────────────────────────────
+    # For invoices with explicit Tax Analysis / Invoice Summary / Deposit Summary
+    # blocks, use the structured parser to get more reliable net/vat/total figures.
+    # Only override fields that the structured parser actually found.
+    _struct = _extract_structured_summary_totals(text)
+    if _struct:
+        if _struct.get("net_amount") is not None:
+            net_amount = _struct["net_amount"]
+        if _struct.get("vat_amount") is not None:
+            vat_amount = _struct["vat_amount"]
+        if _struct.get("total_amount") is not None:
+            total_amount = _struct["total_amount"]
+        # _deposit_candidate is passed through the return dict for BCRS detection
+        # in batches.py; it does NOT by itself trigger a split.
 
     return {
         "supplier_name": supplier_name,

@@ -506,8 +506,9 @@ let imgRectCache = null;     // cached image getBoundingClientRect
 
 function imgPxFromEvent(e) {
   const r = previewImg.getBoundingClientRect();
-  const x = Math.min(r.width,  Math.max(0, e.clientX - r.left));
-  const y = Math.min(r.height, Math.max(0, e.clientY - r.top));
+  if (!r.width || !r.height) return { xPx: 0, yPx: 0, w: 1, h: 1 };
+  const x = Math.min(r.width  - 1, Math.max(0, e.clientX - r.left));
+  const y = Math.min(r.height - 1, Math.max(0, e.clientY - r.top));
   return { xPx: x, yPx: y, w: r.width, h: r.height };
 }
 function drawSel(a, b) {
@@ -533,6 +534,12 @@ function drawSel(a, b) {
 previewImg.addEventListener("mousedown", (e) => {
   if (!$("remapMode").checked) return;
   if (!remapField) { msg("Click a field in the editor first, then drag on the preview.", "error"); return; }
+  // Only start a drag when the image is actually loaded and has dimensions
+  const r = previewImg.getBoundingClientRect();
+  if (!r.width || !r.height || !previewImg.complete || !previewImg.naturalWidth) {
+    msg("Preview is still loading — please wait a moment then try again.", "error");
+    return;
+  }
   e.preventDefault();
   dragStart = imgPxFromEvent(e);
   drawSel(dragStart, dragStart);
@@ -572,18 +579,27 @@ window.addEventListener("mouseup", async (e) => {
   const data = await r.json().catch(() => ({}));
   // If the backend was able to read text from the region, drop it straight
   // into the field input so the correction can be saved normally.
+  const fieldLabel = remapField;
   if (data && data.read_text) {
-    const inp = document.querySelector(`#rowEditor [data-field="${remapField}"]`);
+    const inp = document.querySelector(`#rowEditor [data-field="${fieldLabel}"]`);
     if (inp) {
       inp.value = data.read_text;
       inp.dispatchEvent(new Event("input", { bubbles: true }));
       inp.focus();
     }
-    msg(`Remap saved — read "${data.read_text}" into ${remapField}. Click Save corrections to apply.`, "success");
+    const hintNote = data.saved_as_hint
+      ? " Region saved as future remap hint for this supplier."
+      : "";
+    msg(`Remap saved — read "${data.read_text}" into ${fieldLabel}.${hintNote} Click Save corrections to apply.`, "success");
   } else {
-    msg(`Remap saved for ${remapField} (no text detected — region stored for future learning).`, "success");
+    const hintNote = data && data.saved_as_hint
+      ? " Region stored as a future remap hint for this supplier."
+      : " Region recorded.";
+    msg(`Remap saved for ${fieldLabel} (no text detected).${hintNote}`, "success");
   }
-  setTimeout(() => { remapSel.hidden = true; }, 1200);
+  // Keep the selection visible briefly so the user sees what was saved, then hide
+  setTimeout(() => { remapSel.hidden = true; }, 1800);
+  // Keep remapField active so the user can save corrections immediately
 });
 
 if (typeof ensureAuth === "function" && !ensureAuth()) {

@@ -503,7 +503,13 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
                 raise
             except Exception:
                 read_text = ""
-    return {"id": hint.id, "read_text": read_text}
+    return {
+        "id":           hint.id,
+        "field_name":   hint.field_name,
+        "page_no":      hint.page_no,
+        "saved_as_hint": True,
+        "read_text":    read_text,
+    }
 
 
 # ── Rules management (admin + tenant-scoped user access) ──────────────────────

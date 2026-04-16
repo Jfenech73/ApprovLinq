@@ -190,3 +190,42 @@ class TestBcrsFalsePositives:
         s=open("app/routers/batches.py").read()
         fn=s.split("def _extract_bcrs_amount_from_summary")[1].split("def _build_bcrs_row")[0]
         assert "has_label_line" in fn
+
+
+class TestRemapFlowImprovements:
+    """Checks for the improved remap hint flow."""
+
+    def test_save_remap_returns_saved_as_hint(self):
+        src = open("app/routers/review.py").read()
+        save_fn = src[src.find("def save_remap"):src.find("\n@router", src.find("def save_remap")+1)]
+        assert '"saved_as_hint"' in save_fn
+
+    def test_save_remap_returns_field_name(self):
+        src = open("app/routers/review.py").read()
+        save_fn = src[src.find("def save_remap"):src.find("\n@router", src.find("def save_remap")+1)]
+        assert '"field_name"' in save_fn
+
+    def test_js_handles_saved_as_hint(self):
+        js = open("app/static/js/review.js").read()
+        assert "data.saved_as_hint" in js
+
+    def test_js_message_mentions_future_hint(self):
+        js = open("app/static/js/review.js").read()
+        assert "future remap hint" in js
+
+    def test_js_guards_drag_on_loaded_image(self):
+        js = open("app/static/js/review.js").read()
+        assert "naturalWidth" in js
+
+    def test_remap_hints_check_supplier_id(self):
+        src = open("app/routers/batches.py").read()
+        rh = src[src.find("def _apply_remap_hints"):src.find("def _parse_money_candidates")]
+        assert "supplier_id" in rh
+
+    def test_remap_hints_check_review_fields(self):
+        src = open("app/routers/batches.py").read()
+        rh = src[src.find("def _apply_remap_hints"):src.find("def _parse_money_candidates")]
+        assert "_review_fields" in rh
+
+    def test_is_suspect_field_value_defined(self):
+        assert "def _is_suspect_field_value" in open("app/routers/batches.py").read()
