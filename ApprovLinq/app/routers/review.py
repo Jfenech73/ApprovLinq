@@ -579,12 +579,104 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
                 raise
             except Exception:
                 read_text = ""
+
+    read_text = read_text.strip() if read_text else ""
+    logger.debug(
+        "save_remap: field=%r supplier=%r read_text=%r",
+        payload.field_name, row.supplier_name, read_text[:80] if read_text else "",
+    )
+
+    # ── Auto-persist the extracted value into the correction record ───────────
+    # This ensures the field is saved immediately without the user needing to
+    # click "Save corrections" separately — critical for the remap workflow.
+    if read_text and payload.apply_as_value:
+        correction = cs.get_or_create_correction(db, row)
+        old_val = cs.effective_value(row, correction, payload.field_name)
+        if str(old_val or "").strip() != read_text:
+            setattr(correction, payload.field_name, read_text)
+            audit = InvoiceRowFieldAudit(
+                batch_id=batch.id,
+                row_id=row.id,
+                field_name=payload.field_name,
+                old_value=str(old_val) if old_val is not None else None,
+                new_value=read_text,
+                action="remap",
+                note="Applied via region remap",
+                rule_created=False,
+                user_id=user.id,
+                username=getattr(user, "email", None) or str(user.id),
+            )
+            db.add(audit)
+            logger.debug(
+                "save_remap: persisted %r=%r for row %d",
+                payload.field_name, read_text, row.id,
+            )
+
+    # ── Create / upsert a reusable supplier-scoped field rule ────────────────
+    # Rule type "remap_field_value" stores the extracted text as a target value
+    # scoped to this supplier so future invoices can reuse it without re-remapping.
+    # source_pattern = normalised supplier name (matches _apply_saved_rules logic).
+    rule_created_now = False
+    if read_text and row.supplier_name:
+        _norm_supplier = re.sub(
+            r"\b(ltd|limited|plc|llc|inc|corp|co|group|trading|holdings|services|solutions)\b",
+            "", row.supplier_name.lower(),
+        )
+        _norm_supplier = re.sub(r"[^a-z0-9 ]", " ", _norm_supplier)
+        _norm_supplier = re.sub(r"\s+", " ", _norm_supplier).strip()
+
+        if _norm_supplier:
+            existing_rule = db.execute(
+                select(CorrectionRule).where(
+                    CorrectionRule.tenant_id == batch.tenant_id,
+                    CorrectionRule.rule_type == "remap_field_value",
+                    CorrectionRule.field_name == payload.field_name,
+                    CorrectionRule.source_pattern == _norm_supplier,
+                    CorrectionRule.target_value == read_text,
+                ).limit(1)
+            ).scalar_one_or_none()
+
+            if existing_rule:
+                # Re-activate if disabled; refresh provenance
+                if not existing_rule.active:
+                    existing_rule.active = True
+                    existing_rule.disabled_by = None
+                    existing_rule.disabled_at = None
+                existing_rule.origin_batch_id = batch.id
+                existing_rule.origin_row_id   = row.id
+                rule_created_now = True
+                logger.debug(
+                    "save_remap: refreshed existing rule id=%d for supplier=%r field=%r",
+                    existing_rule.id, row.supplier_name, payload.field_name,
+                )
+            else:
+                new_rule = CorrectionRule(
+                    tenant_id=batch.tenant_id,
+                    company_id=batch.company_id,
+                    rule_type="remap_field_value",
+                    field_name=payload.field_name,
+                    source_pattern=_norm_supplier,
+                    target_value=read_text,
+                    created_by=user.id,
+                    origin_batch_id=batch.id,
+                    origin_row_id=row.id,
+                )
+                db.add(new_rule)
+                rule_created_now = True
+                logger.debug(
+                    "save_remap: created remap_field_value rule supplier=%r field=%r value=%r",
+                    row.supplier_name, payload.field_name, read_text,
+                )
+
+    db.commit()
+
     return {
-        "id":           hint.id,
-        "field_name":   hint.field_name,
-        "page_no":      hint.page_no,
+        "id":            hint.id,
+        "field_name":    hint.field_name,
+        "page_no":       hint.page_no,
         "saved_as_hint": True,
-        "read_text":    read_text,
+        "rule_created":  rule_created_now,
+        "read_text":     read_text,
     }
 
 

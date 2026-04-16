@@ -88,6 +88,31 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             current = _normalize_rule_value(row.nominal_account_code)
             if current and current == src and rule.target_value:
                 row.nominal_account_code = rule.target_value
+        elif rule.rule_type == "remap_field_value":
+            # Supplier-scoped field value rule created by the remap workflow.
+            # Apply only when the target field is blank or suspect — never
+            # overwrite a confidently extracted value.
+            field = rule.field_name
+            if not field or not rule.target_value:
+                continue
+            current_val = getattr(row, field, None)
+            from app.services.extractor import suspicious_invoice_number as _sus_inv
+            is_blank = not current_val or str(current_val).strip() == ""
+            is_suspect = (
+                field == "invoice_number"
+                and _sus_inv(str(current_val) if current_val else None)
+            )
+            if not (is_blank or is_suspect):
+                continue
+            # Match: normalised supplier name must equal rule.source_pattern
+            current_supplier_norm = _normalize_rule_value(row.supplier_name)
+            if current_supplier_norm and current_supplier_norm == src:
+                setattr(row, field, rule.target_value)
+                logger.debug(
+                    "_apply_saved_rules: remap_field_value applied field=%r value=%r "
+                    "supplier=%r rule_id=%d",
+                    field, rule.target_value, row.supplier_name, rule.id,
+                )
 
 
 

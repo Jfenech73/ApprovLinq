@@ -611,10 +611,12 @@ window.addEventListener("mouseup", async (e) => {
       inp.dispatchEvent(new Event("input", { bubbles: true }));
       inp.focus();
     }
-    const hintNote = data.saved_as_hint
-      ? " Region saved as future remap hint for this supplier."
-      : "";
-    msg(`Remap saved — read "${data.read_text}" into ${fieldLabel}.${hintNote} Click Save corrections to apply.`, "success");
+    const ruleNote = data.rule_created
+      ? " Future rule saved — this supplier's invoices will auto-fill this field."
+      : (data.saved_as_hint ? " Region saved as future remap hint." : "");
+    msg(`Remap saved — read "${data.read_text}" into ${fieldLabel}.${ruleNote} Value auto-saved.`, "success");
+    // Reload so the row list reflects the persisted correction immediately
+    await load();
   } else {
     const hintNote = data && data.saved_as_hint
       ? " Region stored as a future remap hint for this supplier."
