@@ -698,7 +698,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         # source_pattern = normalised supplier name.
         if row.supplier_name:
             _norm = re.sub(
-                r"(ltd|limited|plc|llc|inc|corp|co|group|trading|holdings|services|solutions)",
+                r"\b(ltd|limited|plc|llc|inc|corp|co|group|trading|holdings|services|solutions)\b",
                 "", row.supplier_name.lower(),
             )
             _norm = re.sub(r"[^a-z0-9 ]", " ", _norm)

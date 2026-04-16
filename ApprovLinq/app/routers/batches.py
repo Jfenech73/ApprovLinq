@@ -64,55 +64,195 @@ def _clear_active(batch_id: UUID) -> None:
 
 
 def _normalize_rule_value(value: str | None) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+    """Normalise a rule source_pattern or supplier name for comparison.
+
+    Must produce the SAME output as the normalisation used in save_remap
+    (review.py) when storing source_pattern, so that rule matching is
+    consistent at both creation and replay time.
+
+    Steps:
+    1. Strip known company-type suffixes (ltd, limited, plc, …)
+    2. Replace non-alphanumeric with spaces
+    3. Collapse whitespace and lowercase
+    """
+    import re as _re
+    n = _re.sub(
+        r"\b(ltd|limited|plc|llc|inc|corp|co|group|trading|holdings|services|solutions)\b",
+        "", str(value or "").lower(),
+    )
+    n = _re.sub(r"[^a-z0-9 ]", " ", n)
+    return _re.sub(r"\s+", " ", n).strip()
 
 
 def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
-    rules = db.query(CorrectionRule).filter(
+    """Apply active CorrectionRules to this row.
+
+    Rule types handled:
+      supplier_alias     — rename supplier_name when it matches source_pattern
+      nominal_remap      — remap nominal_account_code
+      remap_field_value  — field-specific value saved via the remap workflow
+
+    For remap_field_value rules the following invariants are ALWAYS enforced:
+      • Rules are matched by (supplier, target_field) — never supplier alone.
+      • A rule for field X can ONLY write to field X.
+      • Invoice-number-like tokens are NEVER written to supplier_name unless
+        the rule's field_name is explicitly "supplier_name".
+      • Text-correction rules (remap_field_value with target_value) are applied
+        before any hint-based (region position) rules.
+      • A field is only eligible for overwrite when it is blank, low-confidence,
+        or flagged for review.
+    """
+    rules_q = db.query(CorrectionRule).filter(
         CorrectionRule.tenant_id == batch.tenant_id,
         CorrectionRule.active.is_(True),
     )
     if batch.company_id:
-        rules = rules.filter((CorrectionRule.company_id == batch.company_id) | (CorrectionRule.company_id.is_(None)))
+        rules_q = rules_q.filter(
+            (CorrectionRule.company_id == batch.company_id)
+            | (CorrectionRule.company_id.is_(None))
+        )
     else:
-        rules = rules.filter(CorrectionRule.company_id.is_(None))
-    for rule in rules.order_by(CorrectionRule.id.asc()).all():
+        rules_q = rules_q.filter(CorrectionRule.company_id.is_(None))
+    all_rules = rules_q.order_by(CorrectionRule.id.asc()).all()
+
+    # ── 1. supplier_alias and nominal_remap ───────────────────────────────
+    for rule in all_rules:
         src = _normalize_rule_value(rule.source_pattern)
         if not src:
             continue
         if rule.rule_type == "supplier_alias":
             current = _normalize_rule_value(row.supplier_name)
             if current and current == src and rule.target_value:
+                logger.debug(
+                    "_apply_saved_rules: supplier_alias %r→%r row=%d",
+                    row.supplier_name, rule.target_value, row.id,
+                )
                 row.supplier_name = rule.target_value
         elif rule.rule_type == "nominal_remap":
             current = _normalize_rule_value(row.nominal_account_code)
             if current and current == src and rule.target_value:
-                row.nominal_account_code = rule.target_value
-        elif rule.rule_type == "remap_field_value":
-            # Supplier-scoped field value rule created by the remap workflow.
-            # Apply only when the target field is blank or suspect — never
-            # overwrite a confidently extracted value.
-            field = rule.field_name
-            if not field or not rule.target_value:
-                continue
-            current_val = getattr(row, field, None)
-            from app.services.extractor import suspicious_invoice_number as _sus_inv
-            is_blank = not current_val or str(current_val).strip() == ""
-            is_suspect = (
-                field == "invoice_number"
-                and _sus_inv(str(current_val) if current_val else None)
-            )
-            if not (is_blank or is_suspect):
-                continue
-            # Match: normalised supplier name must equal rule.source_pattern
-            current_supplier_norm = _normalize_rule_value(row.supplier_name)
-            if current_supplier_norm and current_supplier_norm == src:
-                setattr(row, field, rule.target_value)
                 logger.debug(
-                    "_apply_saved_rules: remap_field_value applied field=%r value=%r "
-                    "supplier=%r rule_id=%d",
-                    field, rule.target_value, row.supplier_name, rule.id,
+                    "_apply_saved_rules: nominal_remap %r→%r row=%d",
+                    row.nominal_account_code, rule.target_value, row.id,
                 )
+                row.nominal_account_code = rule.target_value
+
+    # ── 2. remap_field_value rules ────────────────────────────────────────
+    # These are always field-specific and supplier-scoped.
+    # Evaluate per field independently; text-correction rules have priority.
+    from app.services.extractor import suspicious_invoice_number as _sus_inv
+
+    # Determine which fields are currently eligible for remap overwrite
+    _review_fields_set: set[str] = set()
+    if row.review_fields:
+        sep = "|" if "|" in (row.review_fields or "") else ","
+        _review_fields_set = {f.strip() for f in row.review_fields.split(sep) if f.strip()}
+
+    def _field_is_eligible(field: str) -> bool:
+        """Return True if this field may be overwritten by a remap rule."""
+        current_val = getattr(row, field, None)
+        # Always eligible if blank
+        if not current_val or str(current_val).strip() == "":
+            return True
+        # Eligible if explicitly flagged for review
+        if field in _review_fields_set:
+            return True
+        # Eligible if row-level review is required and confidence is low
+        if row.review_required and (
+            row.confidence_score is None or float(row.confidence_score) < 0.55
+        ):
+            return True
+        # Field-specific suspect checks
+        v = str(current_val).strip()
+        if field == "invoice_number" and _sus_inv(v):
+            return True
+        if field == "supplier_name" and len(v) < 3:
+            return True
+        return False
+
+    def _value_is_appropriate_for_field(field: str, value: str) -> bool:
+        """Return True if value is appropriate to write into field.
+
+        Hard guard against invoice-number-like tokens being written to
+        supplier_name or other non-numeric fields that should never hold
+        a bare numeric/alphanumeric invoice reference.
+        """
+        if not value:
+            return False
+        v = value.strip()
+        if field == "supplier_name":
+            # Reject if value looks like an invoice number:
+            # - mostly digits / alphanumeric with no spaces
+            # - matches typical invoice-ref patterns
+            digits = sum(1 for c in v if c.isdigit())
+            letters = sum(1 for c in v if c.isalpha())
+            # If more than 60% digits, or all-alphanumeric with no spaces, reject
+            if len(v) <= 15 and digits > 0 and (digits / max(len(v), 1)) > 0.4:
+                if " " not in v:
+                    logger.debug(
+                        "_apply_saved_rules: rejected invoice-like value %r for supplier_name",
+                        v,
+                    )
+                    return False
+            # Reject single-word short strings that are purely alphanumeric
+            if re.match(r"^[A-Z0-9\-\/]{2,15}$", v, re.I) and " " not in v:
+                logger.debug(
+                    "_apply_saved_rules: rejected invoice-ref-pattern value %r for supplier_name",
+                    v,
+                )
+                return False
+        return True
+
+    supplier_norm = _normalize_rule_value(row.supplier_name)
+    if not supplier_norm:
+        return
+
+    # Collect remap_field_value rules keyed by field_name
+    # Priority: lower rule.id = earlier created = lower priority than later edits
+    # For the same field, a "text_correction" (non-None target_value with text)
+    # has higher priority than a region/position-only hint.
+    remap_rules_by_field: dict[str, list[CorrectionRule]] = {}
+    for rule in all_rules:
+        if rule.rule_type != "remap_field_value":
+            continue
+        field = rule.field_name
+        if not field or not rule.target_value:
+            continue
+        src = _normalize_rule_value(rule.source_pattern)
+        if not src or src != supplier_norm:
+            # CRITICAL: must match by supplier identity first
+            continue
+        remap_rules_by_field.setdefault(field, []).append(rule)
+
+    # Apply per-field — completely isolated
+    for field, field_rules in remap_rules_by_field.items():
+        if not _field_is_eligible(field):
+            logger.debug(
+                "_apply_saved_rules: field=%r has trusted value %r — skipping remap",
+                field, getattr(row, field, None),
+            )
+            continue
+
+        # Sort: rules with more specific text (longer target_value) first;
+        # ties broken by most recently created (higher id)
+        field_rules.sort(key=lambda r: (len(r.target_value or ""), r.id), reverse=True)
+        chosen_rule = field_rules[0]
+
+        if not _value_is_appropriate_for_field(field, chosen_rule.target_value):
+            logger.debug(
+                "_apply_saved_rules: value %r rejected as inappropriate for field=%r",
+                chosen_rule.target_value, field,
+            )
+            continue
+
+        old_val = getattr(row, field, None)
+        setattr(row, field, chosen_rule.target_value)
+        logger.debug(
+            "_apply_saved_rules: remap_field_value applied "
+            "field=%r value=%r (was %r) supplier=%r rule_id=%d",
+            field, chosen_rule.target_value, old_val,
+            row.supplier_name, chosen_rule.id,
+        )
 
 
 
@@ -220,6 +360,23 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 float(hint.x), float(hint.y), float(hint.w), float(hint.h),
             )
             if text:
+                # Guard: invoice-like tokens must never be written to supplier_name
+                # (e.g. user drew a remap region over an invoice number area while
+                # supplier_name was the active field — reject silently).
+                if hint.field_name == "supplier_name":
+                    _v = text.strip()
+                    _digits = sum(1 for c in _v if c.isdigit())
+                    _is_inv_like = (
+                        (len(_v) <= 15 and _digits > 0 and (_digits / max(len(_v), 1)) > 0.4 and " " not in _v)
+                        or (re.match(r"^[A-Z0-9\-\/]{2,15}$", _v, re.I) and " " not in _v)
+                    )
+                    if _is_inv_like:
+                        logger.debug(
+                            "RemapHint: rejected invoice-like value %r for supplier_name "
+                            "supplier=%r",
+                            text[:40], row.supplier_name,
+                        )
+                        continue
                 setattr(row, hint.field_name, text)
                 target_fields.discard(hint.field_name)
                 logger.debug("RemapHint applied: supplier=%r field=%s → %r",
