@@ -40,17 +40,7 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 _PDF_MAGIC = b"%PDF"
 
 router = APIRouter(prefix="/batches", tags=["batches"])
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine,
-    # expire_on_commit=False: after each db.commit() inside the background job
-    # the batch/file objects remain usable without a round-trip re-load.
-    # This prevents the pattern where commit() expires batch, next attribute
-    # access triggers a lazy SELECT that returns the pre-commit snapshot under
-    # certain isolation levels, and then our progress write is lost.
-    expire_on_commit=False,
-)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 _ACTIVE_BATCHES: set[str] = set()
 _ACTIVE_BATCHES_LOCK = Lock()
 
@@ -1506,36 +1496,17 @@ def _get_batch_for_tenant(db: Session, batch_id: UUID, tenant_id) -> InvoiceBatc
 
 
 def _process_batch_job(batch_id: UUID, tenant_id) -> None:
-    """Background job: process all pages of all files in a batch.
-
-    Progress contract:
-    - batch.page_count = number of pages fully processed so far
-    - batch.notes      = human-readable progress string including percent
-    - both fields are committed to DB after EVERY page so the poller always
-      sees live state
-    - after db.rollback() the batch object is explicitly refreshed before any
-      progress write to prevent stale data being committed
-    - the file-level except never rolls back page-level progress (pages already
-      committed are kept; only the current file's status update is re-tried)
-    """
     db = SessionLocal()
     try:
         batch = db.get(InvoiceBatch, batch_id)
         if not batch or batch.tenant_id != tenant_id:
             return
-
-        files = (
-            db.query(InvoiceFile)
-            .filter(InvoiceFile.batch_id == batch_id)
-            .order_by(InvoiceFile.uploaded_at.asc(), InvoiceFile.id.asc())
-            .all()
-        )
+        files = db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch_id).order_by(InvoiceFile.uploaded_at.asc(), InvoiceFile.id.asc()).all()
         if not files:
             batch.status = "failed"
             batch.notes = "No uploaded files found for this batch"
             batch.processed_at = datetime.utcnow()
             db.commit()
-            logger.warning("_process_batch_job: batch %s has no files — failed", batch_id)
             return
 
         db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch_id).delete()
@@ -1552,52 +1523,42 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
 
         batch.status = "processing"
         batch.page_count = 0
-        batch.notes = f"Queued {len(files)} file(s), {total_target_pages} page(s) total"
+        batch.notes = f"Queued {len(files)} file(s), {total_target_pages} page(s)"
         db.commit()
-        logger.debug(
-            "_process_batch_job: batch %s started — %d file(s), %d total page(s)",
-            batch_id, len(files), total_target_pages,
-        )
 
-        # Snapshot IDs that do not change — avoids touching batch after rollback
-        _batch_tenant_id  = batch.tenant_id
-        _batch_company_id = batch.company_id
-        _batch_scan_mode  = batch.scan_mode or "summary"
-
+        # Look up the company name so the extractor can hard-block it as the
+        # customer name and never return it as a supplier.
         company = db.get(Company, batch.company_id) if batch.company_id else None
         account_company_name: str | None = company.company_name if company else None
 
         processed_pages = processed_files = partial_files = failed_files = total_rows = 0
-
         for file_index, invoice_file in enumerate(files, start=1):
             inserted_rows = 0
             page_failures = 0
-            _file_id       = invoice_file.id
-            _file_name     = invoice_file.original_filename
             try:
                 invoice_file.status = "processing"
                 invoice_file.error_message = None
                 db.commit()
                 page_count = invoice_file.page_count or 0
-
                 for page_index in range(page_count):
-                    logger.debug(
-                        "_process_batch_job: batch %s — file %d/%d '%s' page %d/%d started",
-                        batch_id, file_index, len(files), _file_name,
-                        page_index + 1, page_count,
-                    )
                     try:
                         row_payloads = process_pdf_page_rows(
                             str(resolve_upload_path(invoice_file.file_path)),
                             page_index=page_index,
-                            scan_mode=_batch_scan_mode,
+                            scan_mode=batch.scan_mode or "summary",
                             openai_api_key=settings.openai_api_key if settings.use_openai else None,
                             account_company_name=account_company_name,
                         )
                         for r in row_payloads:
+                            # --- Pattern-based supplier pre-fill ---------
+                            # Before fuzzy matching, check whether we have a
+                            # stored keyword fingerprint for this invoice's
+                            # header. If we get a confident match, override the
+                            # AI/rule-based supplier_name so that
+                            # _apply_account_suggestions can do an exact lookup.
                             header_text = r.get("header_raw") or ""
                             pattern_supplier = _match_supplier_by_pattern(
-                                db, tenant_id, _batch_company_id, header_text
+                                db, tenant_id, batch.company_id, header_text
                             )
                             supplier_name = r.get("supplier_name")
                             supplier_vat  = r.get("supplier_vat")
@@ -1608,12 +1569,13 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                     supplier_name,
                                     r.get("page_no"),
                                 )
+                            # ----------------------------------------------
                             row = InvoiceRow(
                                 batch_id=batch_id,
-                                tenant_id=_batch_tenant_id,
-                                company_id=_batch_company_id,
-                                source_file_id=_file_id,
-                                source_filename=_file_name,
+                                tenant_id=batch.tenant_id,
+                                company_id=batch.company_id,
+                                source_file_id=invoice_file.id,
+                                source_filename=invoice_file.original_filename,
                                 page_no=r.get("page_no") or (page_index + 1),
                                 supplier_name=supplier_name,
                                 invoice_number=r.get("invoice_number"),
@@ -1641,7 +1603,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 page_text_raw=r.get("page_text_raw"),
                             )
                             _apply_account_suggestions(
-                                db, tenant_id, _batch_company_id, row,
+                                db, tenant_id, batch.company_id, row,
                                 supplier_vat=supplier_vat,
                             )
                             _apply_remap_hints(db, batch, row)
@@ -1655,64 +1617,30 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 db.add(bcrs_row)
                                 inserted_rows += 1
                                 total_rows += 1
+                                # Correct the original row total so it no longer includes
+                                # the BCRS component.  After the split:
+                                #   original.total = net + vat  (BCRS excluded)
+                                #   bcrs_row.total = bcrs_amount
+                                #   original.total + bcrs_row.total = real invoice total
                                 _net = round(float(row.net_amount or 0.0), 2)
                                 _vat = round(float(row.vat_amount or 0.0), 2)
                                 _corrected_total = round(_net + _vat, 2)
                                 if _corrected_total >= 0 and _corrected_total < round(float(row.total_amount or 0.0), 2):
                                     row.total_amount = _corrected_total
-
-                        # ── Persist page progress ──────────────────────────────────
                         processed_pages += 1
-                        _pct = int(round((processed_pages / total_target_pages) * 100)) if total_target_pages > 0 else 0
-                        _note = (
-                            f"Processing file {file_index}/{len(files)}: {_file_name}"
-                            f" (page {page_index + 1}/{page_count}, {_pct}%)"
-                        )
-                        # Use a direct UPDATE so we never accidentally overwrite a
-                        # *newer* page_count written by a concurrent session, and so
-                        # the write is always a forward-only increment.
-                        from sqlalchemy import update as _upd
-                        db.execute(
-                            _upd(InvoiceBatch)
-                            .where(
-                                InvoiceBatch.id == batch_id,
-                                # Stale-overwrite protection: only advance if the DB
-                                # value is less than our current counter.
-                                InvoiceBatch.page_count < processed_pages,
-                            )
-                            .values(
-                                page_count=processed_pages,
-                                notes=_note,
-                            )
-                            .execution_options(synchronize_session=False)
-                        )
+                        batch.page_count = processed_pages
+                        batch.notes = f"Processing file {file_index}/{len(files)}: {invoice_file.original_filename} (page {page_index + 1}/{page_count})"
                         db.commit()
-                        logger.debug(
-                            "_process_batch_job: batch %s — page %d/%d committed, "
-                            "processed_pages=%d/%d (%d%%)",
-                            batch_id, page_index + 1, page_count,
-                            processed_pages, total_target_pages, _pct,
-                        )
-
                     except Exception as page_error:
-                        # Roll back the failed page's partial writes.
-                        # DO NOT re-raise — record a review fallback row instead.
                         db.rollback()
-                        logger.warning(
-                            "_process_batch_job: batch %s file '%s' page %d failed: %s",
-                            batch_id, _file_name, page_index + 1, page_error,
-                        )
                         page_failures += 1
                         processed_pages += 1
-
-                        # Build fallback row using only snapshotted IDs — never
-                        # touch the expired batch object after rollback.
                         fallback_row = InvoiceRow(
                             batch_id=batch_id,
-                            tenant_id=_batch_tenant_id,
-                            company_id=_batch_company_id,
-                            source_file_id=_file_id,
-                            source_filename=_file_name,
+                            tenant_id=batch.tenant_id,
+                            company_id=batch.company_id,
+                            source_file_id=invoice_file.id,
+                            source_filename=invoice_file.original_filename,
                             page_no=page_index + 1,
                             description=f"Page processing error: {str(page_error)[:180]}",
                             currency="EUR",
@@ -1723,36 +1651,12 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             page_text_raw=f"PAGE_ERROR={str(page_error)}",
                         )
                         db.add(fallback_row)
-
-                        # Persist progress with error fallback note
-                        _pct = int(round((processed_pages / total_target_pages) * 100)) if total_target_pages > 0 else 0
-                        _note = (
-                            f"Processing file {file_index}/{len(files)}: {_file_name}"
-                            f" (page {page_index + 1}/{page_count}, review fallback, {_pct}%)"
-                        )
-                        from sqlalchemy import update as _upd
-                        db.execute(
-                            _upd(InvoiceBatch)
-                            .where(
-                                InvoiceBatch.id == batch_id,
-                                InvoiceBatch.page_count < processed_pages,
-                            )
-                            .values(
-                                page_count=processed_pages,
-                                notes=_note,
-                            )
-                            .execution_options(synchronize_session=False)
-                        )
                         db.commit()
                         total_rows += 1
                         inserted_rows += 1
-                        logger.debug(
-                            "_process_batch_job: batch %s — error-fallback page %d committed, "
-                            "processed_pages=%d (%d%%)",
-                            batch_id, page_index + 1, processed_pages, _pct,
-                        )
-
-                # File complete — update file status
+                        batch.page_count = processed_pages
+                        batch.notes = f"Processing file {file_index}/{len(files)}: {invoice_file.original_filename} (page {page_index + 1}/{page_count}, review fallback)"
+                        db.commit()
                 if inserted_rows == 0:
                     invoice_file.status = "failed"
                     invoice_file.error_message = "No pages could be processed."
@@ -1767,76 +1671,35 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                     processed_files += 1
                 invoice_file.processed_at = datetime.utcnow()
                 db.commit()
-
             except Exception as file_error:
-                # File-level error: roll back the file-status write only.
-                # Page-level progress was already committed per-page above and
-                # must not be undone here.
                 db.rollback()
-                logger.error(
-                    "_process_batch_job: batch %s file '%s' file-level error: %s",
-                    batch_id, _file_name, file_error,
-                )
-                # Re-write the file status via UPDATE to avoid touching any
-                # other session state.
-                from sqlalchemy import update as _upd2
-                try:
-                    db.execute(
-                        _upd2(InvoiceFile)
-                        .where(InvoiceFile.id == _file_id)
-                        .values(
-                            status="failed",
-                            error_message=str(file_error)[:500],
-                            processed_at=datetime.utcnow(),
-                        )
-                        .execution_options(synchronize_session=False)
-                    )
-                    db.commit()
-                except Exception:
-                    db.rollback()
+                invoice_file.status = "failed"
+                invoice_file.error_message = str(file_error)
+                invoice_file.processed_at = datetime.utcnow()
+                db.commit()
                 failed_files += 1
 
-        # ── Final batch status ─────────────────────────────────────────────────
+        batch.page_count = processed_pages
+        batch.processed_at = datetime.utcnow()
         if processed_files and not failed_files and not partial_files:
-            final_status = "processed"
-            final_notes  = f"Processed {processed_files} file(s), extracted {total_rows} row(s)"
+            batch.status = "processed"
+            batch.notes = f"Processed {processed_files} file(s), extracted {total_rows} row(s)"
         elif processed_files or partial_files:
-            final_status = "partial"
-            final_notes  = (
-                f"Processed {processed_files} file(s), partial {partial_files}, "
-                f"failed {failed_files}, rows {total_rows}"
-            )
+            batch.status = "partial"
+            batch.notes = f"Processed {processed_files} file(s), partial {partial_files}, failed {failed_files}, rows {total_rows}"
         else:
-            final_status = "failed"
-            final_notes  = "Processing failed for all files"
-
-        from sqlalchemy import update as _upd3
-        db.execute(
-            _upd3(InvoiceBatch)
-            .where(InvoiceBatch.id == batch_id)
-            .values(
-                page_count=processed_pages,
-                status=final_status,
-                notes=final_notes,
-                processed_at=datetime.utcnow(),
-            )
-            .execution_options(synchronize_session=False)
-        )
+            batch.status = "failed"
+            batch.notes = "Processing failed for all files"
         db.commit()
-        logger.debug(
-            "_process_batch_job: batch %s completed — status=%r notes=%r "
-            "pages=%d files=%d rows=%d",
-            batch_id, final_status, final_notes,
-            processed_pages, processed_files, total_rows,
-        )
 
         # Learn supplier patterns from this batch's successfully matched rows
-        _learn_supplier_patterns(batch_id, tenant_id, _batch_company_id, db)
+        _learn_supplier_patterns(batch_id, tenant_id, batch.company_id, db)
         # Auto-create issue logs for rows needing review
         _create_batch_issue_logs(batch_id, tenant_id, db)
     finally:
         db.close()
         _clear_active(batch_id)
+
 
 @router.post("", response_model=BatchOut)
 def create_batch(payload: BatchCreate, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
@@ -1977,13 +1840,6 @@ def list_rows(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(c
 @router.get("/{batch_id}/progress")
 def get_batch_progress(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)
-    # Force a fresh reload from the DB so the background job's latest committed
-    # progress (page_count, notes, status) is always visible to the poller.
-    # Without this, SQLAlchemy's identity map may return the object that was
-    # loaded earlier in this same request context with stale field values.
-    db.expire(batch)
-    # Re-read after expire so all attribute accesses below hit the DB once.
-    batch = db.get(InvoiceBatch, batch_id)
     files = db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch_id).order_by(InvoiceFile.uploaded_at.asc(), InvoiceFile.id.asc()).all()
     total_files = len(files)
     processed_files = sum(1 for f in files if f.status in ("processed", "partial"))

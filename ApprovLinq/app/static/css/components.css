@@ -138,7 +138,10 @@
 .ap-side.collapsed .ap-sidebar-toggle { align-self: center; }
 
 /* Transition */
-.ap-side { transition: padding 0.2s ease; }
+.ap-side {
+  transition: width 0.2s ease, padding 0.2s ease;
+  overflow: hidden;
+}
 .ap-shell { transition: grid-template-columns 0.2s ease; }
 
 /* ───── Main pane ───── */
@@ -146,15 +149,16 @@
   display: flex; flex-direction: column;
   background: var(--ap-bg-page);
   min-width: 0;
-  /* Do NOT set height:100vh or overflow:hidden here — that would prevent
-     pages from scrolling. The shell grid makes .ap-main fill the viewport
-     width; individual pages control their own overflow. */
+  height: 100vh;
+  overflow: hidden;
 }
-/* Page body is a normal flex column — no overflow trapping */
+/* Review page body fills the main pane */
 .ap-main > [data-ap-page-body] {
   flex: 1;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
 }
 
 /* ───── Topbar ───── */
@@ -811,39 +815,20 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
    Review page — 3-column layout
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* The review page body fills the main pane height using dvh/vh so the
-   3-col grid can have internally scrollable columns on desktop.
-   This class is only applied to review.html, not to other pages. */
-.review-page-body {
-  display: flex;
-  flex-direction: column;
-  height: 100dvh;    /* fills viewport; fallback below */
-  height: 100vh;     /* fallback for browsers without dvh */
-  min-height: 0;
-  overflow: hidden;  /* the columns inside handle their own scroll */
-}
-@supports (height: 100dvh) {
-  .review-page-body { height: 100dvh; }
-}
-
 /* Override the inline style on .review-grid */
 .review-3col {
   display: grid;
   grid-template-columns: 300px 1fr 380px;
   gap: 0;
-  /* Use min-height so columns can grow beyond viewport, but don't trap scroll.
-     On larger screens the sticky sidebar + topbar give a natural viewport feel.
-     overflow must NOT be hidden — that prevents column bodies from scrolling. */
-  min-height: 0;
-  flex: 1;
+  height: calc(100vh - 120px); /* fill below topbar + batch header */
+  overflow: hidden;
 }
 
 /* Each column scrolls independently */
 .review-3col > .review-col {
   display: flex;
   flex-direction: column;
-  overflow: hidden;  /* clip horizontally only via child overflow-y:auto */
-  min-height: 0;
+  overflow: hidden;
   border-right: 1px solid var(--ap-border);
 }
 .review-3col > .review-col:last-child { border-right: none; }
