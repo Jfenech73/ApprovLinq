@@ -96,11 +96,65 @@
 }
 .ap-user-name { color: var(--ap-text); font-weight: 500; font-size: var(--ap-fs-12); }
 
+/* ───── Sidebar collapse toggle ───── */
+.ap-sidebar-toggle {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  border-radius: var(--ap-r-md);
+  border: 1px solid var(--ap-border);
+  background: none;
+  color: var(--ap-text-muted);
+  cursor: pointer;
+  margin-bottom: var(--ap-s-3);
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+  align-self: flex-end;
+}
+.ap-sidebar-toggle:hover { background: var(--ap-bg-sub); color: var(--ap-text); }
+.ap-sidebar-toggle svg { pointer-events: none; }
+
+/* ───── Collapsed sidebar state ───── */
+.ap-shell.sidebar-collapsed {
+  grid-template-columns: 52px 1fr;
+}
+.ap-side.collapsed {
+  padding: var(--ap-s-4) var(--ap-s-2);
+  align-items: center;
+}
+.ap-side.collapsed .ap-brand { padding: var(--ap-s-2) 0 var(--ap-s-4); justify-content: center; }
+.ap-side.collapsed .ap-brand span { display: none; }
+.ap-side.collapsed .ap-nav-section { display: none; }
+.ap-side.collapsed .ap-nav-item span,
+.ap-side.collapsed .ap-nav-item .ap-nav-label { display: none; }
+.ap-side.collapsed .ap-nav-item {
+  padding: var(--ap-s-2);
+  justify-content: center;
+  width: 100%;
+}
+.ap-side.collapsed .ap-user .ap-user-name,
+.ap-side.collapsed .ap-user > div:not(.ap-avatar),
+.ap-side.collapsed #logoutBtn { display: none; }
+.ap-side.collapsed .ap-user { justify-content: center; padding: var(--ap-s-3) 0; }
+.ap-side.collapsed .ap-sidebar-toggle { align-self: center; }
+
+/* Transition */
+.ap-side { transition: padding 0.2s ease; }
+.ap-shell { transition: grid-template-columns 0.2s ease; }
+
 /* ───── Main pane ───── */
 .ap-main {
   display: flex; flex-direction: column;
   background: var(--ap-bg-page);
   min-width: 0;
+  /* Do NOT set height:100vh or overflow:hidden here — that would prevent
+     pages from scrolling. The shell grid makes .ap-main fill the viewport
+     width; individual pages control their own overflow. */
+}
+/* Page body is a normal flex column — no overflow trapping */
+.ap-main > [data-ap-page-body] {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ───── Topbar ───── */
@@ -751,3 +805,162 @@ html[data-theme="dark"] .ap-app .review-reasons-banner {
 }
 .ap-app .field-reason { font-size: 11px; color: var(--ap-warn-fg, #92400e); margin-top: 2px; }
 html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Review page — 3-column layout
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* The review page body fills the main pane height using dvh/vh so the
+   3-col grid can have internally scrollable columns on desktop.
+   This class is only applied to review.html, not to other pages. */
+.review-page-body {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;    /* fills viewport; fallback below */
+  height: 100vh;     /* fallback for browsers without dvh */
+  min-height: 0;
+  overflow: hidden;  /* the columns inside handle their own scroll */
+}
+@supports (height: 100dvh) {
+  .review-page-body { height: 100dvh; }
+}
+
+/* Override the inline style on .review-grid */
+.review-3col {
+  display: grid;
+  grid-template-columns: 300px 1fr 380px;
+  gap: 0;
+  /* Use min-height so columns can grow beyond viewport, but don't trap scroll.
+     On larger screens the sticky sidebar + topbar give a natural viewport feel.
+     overflow must NOT be hidden — that prevents column bodies from scrolling. */
+  min-height: 0;
+  flex: 1;
+}
+
+/* Each column scrolls independently */
+.review-3col > .review-col {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;  /* clip horizontally only via child overflow-y:auto */
+  min-height: 0;
+  border-right: 1px solid var(--ap-border);
+}
+.review-3col > .review-col:last-child { border-right: none; }
+
+/* Column headers — sticky */
+.review-col-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--ap-s-2);
+  padding: var(--ap-s-3) var(--ap-s-4);
+  border-bottom: 1px solid var(--ap-border);
+  background: var(--ap-bg-surface);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  flex-shrink: 0;
+}
+.review-col-head h2 { margin: 0; font-size: var(--ap-fs-14); font-weight: 600; }
+
+/* Scrollable body inside each column */
+.review-col-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--ap-s-3) var(--ap-s-4);
+}
+
+/* Col 1 — rows list */
+.review-col-rows .review-col-body { padding: var(--ap-s-2); }
+
+/* Col 3 — remap + viewer */
+.review-col-remap .review-col-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ap-s-3);
+  padding: var(--ap-s-3);
+}
+
+/* Preview inside col 3 grows to fill available space */
+.review-col-remap .preview-wrap {
+  flex: 1;
+  min-height: 200px;
+  position: relative;
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-md);
+  overflow: hidden;
+  background: var(--ap-bg-sub);
+}
+.review-col-remap .preview-img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* Remap controls group */
+.remap-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ap-s-2);
+  padding: var(--ap-s-3);
+  background: var(--ap-bg-sub);
+  border-radius: var(--ap-r-md);
+  border: 1px solid var(--ap-border);
+  flex-shrink: 0;
+}
+.remap-controls-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ap-s-2);
+}
+
+/* Page nav in col 3 header */
+.review-page-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--ap-s-2);
+}
+
+/* Responsive: stack columns on narrow screens */
+@media (max-width: 1100px) {
+  .review-3col {
+    grid-template-columns: 260px 1fr 340px;
+  }
+}
+@media (max-width: 900px) {
+  .review-3col {
+    grid-template-columns: 1fr;
+    height: auto;
+    overflow: visible;
+  }
+  .review-3col > .review-col {
+    border-right: none;
+    border-bottom: 1px solid var(--ap-border);
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+  .review-3col > .review-col:last-child { border-bottom: none; }
+}
+
+/* Batch header bar stays compact */
+.review-batch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--ap-s-3);
+  padding: var(--ap-s-3) var(--ap-s-5);
+  background: var(--ap-bg-surface);
+  border-bottom: 1px solid var(--ap-border);
+  flex-shrink: 0;
+}
+.review-batch-bar .batch-meta {
+  display: flex; gap: var(--ap-s-5); font-size: var(--ap-fs-12);
+}
+.review-batch-bar .batch-meta .label {
+  color: var(--ap-text-muted); margin-right: var(--ap-s-1);
+}

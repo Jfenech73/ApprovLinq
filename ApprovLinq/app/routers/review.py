@@ -1,6 +1,7 @@
 """Review, correction, audit, remap, rules, reopen, preview routes."""
 from __future__ import annotations
 import io
+import logging
 import re
 from datetime import datetime
 from typing import Any
@@ -21,6 +22,8 @@ from app.routers.auth import current_user
 from app.utils.security import session_token_hash, utcnow
 from app.services import correction_service as cs
 from app.utils.storage import resolve_upload_path
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/review", tags=["review"])
 
@@ -81,7 +84,8 @@ class RemapIn(BaseModel):
     w: float
     h: float
     file_id: int | None = None
-    apply_as_value: bool = False  # if True, also read text from region and return it
+    apply_as_value: bool = False   # if True, read text from region and persist it
+    selected_text: str | None = None  # direct text selection from UI (preferred over OCR)
 
 
 def _get_batch(db: Session, batch_id: UUID) -> M.InvoiceBatch:
@@ -511,25 +515,48 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
         return ""
 
 
-# ── Remap hints (and optional read-back) ──────────────────────────────────────
+# ── Remap hints + value persistence + rule creation ─────────────────────────
 @router.post("/batches/{batch_id}/rows/{row_id}/remap")
 def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
                db: Session = Depends(get_db), user=Depends(current_user)):
+    """Apply a region remap to a row field.
+
+    Pipeline:
+    1. Upsert a RemapHint (stores bounding-box coordinates for future replay).
+    2. Resolve the text in the selected region:
+       - Use payload.selected_text directly when the UI sent a text-layer selection.
+       - Otherwise call _read_region_text() (PyMuPDF text-layer → OCR fallback).
+    3. If text was resolved AND apply_as_value is True:
+       a. Persist the value into InvoiceRowCorrection immediately (no manual Save step).
+       b. Write an InvoiceRowFieldAudit entry.
+       c. Upsert a CorrectionRule(rule_type="remap_field_value") for future invoices.
+    4. If no text could be resolved, return an explicit error so the UI shows a
+       useful message instead of silently doing nothing.
+    """
+    logger.debug(
+        "save_remap called: batch=%s row=%d field=%r page=%d coords=(%.3f,%.3f,%.3f,%.3f) "
+        "selected_text=%r apply_as_value=%s",
+        batch_id, row_id, payload.field_name, payload.page_no,
+        payload.x, payload.y, payload.w, payload.h,
+        (payload.selected_text or "")[:60], payload.apply_as_value,
+    )
+
     batch = _get_batch(db, batch_id)
     row = db.get(M.InvoiceRow, row_id)
     if not row or row.batch_id != batch.id:
-        raise HTTPException(404)
+        raise HTTPException(404, "Row not found in batch")
+
+    # ── 1. Upsert RemapHint (coordinate region for future replay) ────────────
     supplier = None
     if row.supplier_name:
-        supplier_q = (
-            select(M.TenantSupplier).where(
-                M.TenantSupplier.tenant_id == batch.tenant_id,
-                M.TenantSupplier.supplier_name == row.supplier_name,
-            )
+        supplier_q = select(M.TenantSupplier).where(
+            M.TenantSupplier.tenant_id == batch.tenant_id,
+            M.TenantSupplier.supplier_name == row.supplier_name,
         )
         if batch.company_id:
             supplier_q = supplier_q.where(M.TenantSupplier.company_id == batch.company_id)
         supplier = db.execute(supplier_q).scalar_one_or_none()
+
     existing_hint = db.execute(
         select(RemapHint).where(
             RemapHint.tenant_id == batch.tenant_id,
@@ -551,40 +578,187 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         if supplier:
             existing_hint.supplier_id = supplier.id
         hint = existing_hint
+        logger.debug("save_remap: updated existing RemapHint id=%d", hint.id)
     else:
         hint = RemapHint(
-            tenant_id=batch.tenant_id, company_id=batch.company_id,
+            tenant_id=batch.tenant_id,
+            company_id=batch.company_id,
             supplier_id=supplier.id if supplier else None,
             supplier_name_snapshot=row.supplier_name,
-            field_name=payload.field_name, page_no=payload.page_no,
+            field_name=payload.field_name,
+            page_no=payload.page_no,
             x=payload.x, y=payload.y, w=payload.w, h=payload.h,
-            source_batch_id=batch.id, source_file_id=payload.file_id or row.source_file_id,
-            source_row_id=row.id, created_by=user.id,
+            source_batch_id=batch.id,
+            source_file_id=payload.file_id or row.source_file_id,
+            source_row_id=row.id,
+            created_by=user.id,
         )
         db.add(hint)
-    db.commit()
+        logger.debug("save_remap: created new RemapHint for supplier=%r field=%r",
+                     row.supplier_name, payload.field_name)
 
-    # Optionally read the text inside the region and return it so the UI can
-    # populate the corresponding field immediately.
+    # Flush (not commit) so hint gets its id but we can still roll back if
+    # the rest of the pipeline fails.
+    db.flush()
+
+    # ── 2. Resolve text ───────────────────────────────────────────────────────
+    # Priority order:
+    #   a) Direct text selection sent by the UI (payload.selected_text)
+    #   b) PyMuPDF text-layer extraction from the bounding box
+    #   c) OCR fallback via _read_region_text (renders crop → OCR.space)
     read_text = ""
-    if payload.apply_as_value:
+
+    if payload.selected_text and payload.selected_text.strip():
+        # UI sent a text-layer selection — use it directly (most accurate)
+        read_text = " ".join(payload.selected_text.strip().split())
+        logger.debug("save_remap: using UI-provided selected_text=%r", read_text[:80])
+    elif payload.apply_as_value:
         file_id = payload.file_id or row.source_file_id
         f = db.get(M.InvoiceFile, file_id) if file_id else None
         if f:
             try:
-                read_text = _read_region_text(
-                    str(resolve_upload_path(f.file_path)), payload.page_no, payload.x, payload.y, payload.w, payload.h
+                raw = _read_region_text(
+                    str(resolve_upload_path(f.file_path)),
+                    payload.page_no,
+                    payload.x, payload.y, payload.w, payload.h,
                 )
+                read_text = (raw or "").strip()
+                logger.debug("save_remap: _read_region_text returned %r", read_text[:80])
             except HTTPException:
                 raise
-            except Exception:
+            except Exception as exc:
+                logger.warning("save_remap: _read_region_text failed: %s", exc)
                 read_text = ""
+        else:
+            logger.warning("save_remap: file not found for file_id=%s", file_id)
+
+    # Normalise: collapse whitespace, strip leading/trailing
+    read_text = " ".join(read_text.split()).strip() if read_text else ""
+    logger.debug(
+        "save_remap: resolved text=%r field=%r supplier=%r",
+        read_text[:80], payload.field_name, row.supplier_name,
+    )
+
+    # If apply_as_value was requested but we could not resolve any text,
+    # return an explicit error rather than silently succeeding.
+    if payload.apply_as_value and not read_text:
+        # Still commit the RemapHint so the region is saved for later
+        db.commit()
+        logger.warning(
+            "save_remap: could not resolve text from region "
+            "field=%r page=%d coords=(%.3f,%.3f,%.3f,%.3f)",
+            payload.field_name, payload.page_no,
+            payload.x, payload.y, payload.w, payload.h,
+        )
+        return {
+            "id":            hint.id,
+            "field_name":    hint.field_name,
+            "page_no":       hint.page_no,
+            "saved_as_hint": True,
+            "rule_created":  False,
+            "read_text":     "",
+            "error":         "No text could be read from the selected region. "
+                             "Region coordinates saved — try selecting a different area.",
+        }
+
+    # ── 3a. Persist value into correction record ──────────────────────────────
+    rule_created_now = False
+    if read_text and payload.apply_as_value:
+        correction = cs.get_or_create_correction(db, row)
+        old_val = cs.effective_value(row, correction, payload.field_name)
+        old_str = str(old_val).strip() if old_val is not None else ""
+
+        if old_str != read_text:
+            setattr(correction, payload.field_name, read_text)
+            db.add(InvoiceRowFieldAudit(
+                batch_id=batch.id,
+                row_id=row.id,
+                field_name=payload.field_name,
+                old_value=old_str or None,
+                new_value=read_text,
+                action="remap",
+                note="Applied via region remap",
+                rule_created=False,
+                user_id=user.id,
+                username=getattr(user, "email", None) or str(user.id),
+            ))
+            logger.debug(
+                "save_remap: persisted %r=%r (was %r) for row %d",
+                payload.field_name, read_text, old_str, row.id,
+            )
+        else:
+            logger.debug(
+                "save_remap: %r already has value %r — skipping correction write",
+                payload.field_name, read_text,
+            )
+
+        # ── 3b. Upsert supplier-scoped CorrectionRule ─────────────────────────
+        # rule_type="remap_field_value" lets _apply_saved_rules replay this on
+        # future invoices from the same supplier without re-remapping.
+        # source_pattern = normalised supplier name.
+        if row.supplier_name:
+            _norm = re.sub(
+                r"\b(ltd|limited|plc|llc|inc|corp|co|group|trading|holdings|services|solutions)\b",
+                "", row.supplier_name.lower(),
+            )
+            _norm = re.sub(r"[^a-z0-9 ]", " ", _norm)
+            _norm = re.sub(r"\s+", " ", _norm).strip()
+
+            if _norm:
+                existing_rule = db.execute(
+                    select(CorrectionRule).where(
+                        CorrectionRule.tenant_id == batch.tenant_id,
+                        CorrectionRule.rule_type == "remap_field_value",
+                        CorrectionRule.field_name == payload.field_name,
+                        CorrectionRule.source_pattern == _norm,
+                        CorrectionRule.target_value == read_text,
+                    ).limit(1)
+                ).scalar_one_or_none()
+
+                if existing_rule:
+                    if not existing_rule.active:
+                        existing_rule.active = True
+                        existing_rule.disabled_by = None
+                        existing_rule.disabled_at = None
+                    existing_rule.origin_batch_id = batch.id
+                    existing_rule.origin_row_id   = row.id
+                    rule_created_now = True
+                    logger.debug(
+                        "save_remap: refreshed existing rule id=%d supplier=%r field=%r",
+                        existing_rule.id, row.supplier_name, payload.field_name,
+                    )
+                else:
+                    db.add(CorrectionRule(
+                        tenant_id=batch.tenant_id,
+                        company_id=batch.company_id,
+                        rule_type="remap_field_value",
+                        field_name=payload.field_name,
+                        source_pattern=_norm,
+                        target_value=read_text,
+                        created_by=user.id,
+                        origin_batch_id=batch.id,
+                        origin_row_id=row.id,
+                    ))
+                    rule_created_now = True
+                    logger.debug(
+                        "save_remap: created remap_field_value rule "
+                        "supplier=%r field=%r value=%r",
+                        row.supplier_name, payload.field_name, read_text,
+                    )
+
+    db.commit()
+    logger.debug(
+        "save_remap: committed — hint_id=%d rule_created=%s read_text=%r",
+        hint.id, rule_created_now, read_text[:40] if read_text else "",
+    )
+
     return {
-        "id":           hint.id,
-        "field_name":   hint.field_name,
-        "page_no":      hint.page_no,
+        "id":            hint.id,
+        "field_name":    hint.field_name,
+        "page_no":       hint.page_no,
         "saved_as_hint": True,
-        "read_text":    read_text,
+        "rule_created":  rule_created_now,
+        "read_text":     read_text,
     }
 
 
