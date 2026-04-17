@@ -437,11 +437,32 @@ def preview(
 
 
 # ── Read text from a region of a page ─────────────────────────────────────────
+def _count_meaningful(text: str) -> int:
+    """Count alphanumeric chars — used to gate text-layer results vs junk/artefacts."""
+    import re as _re
+    return len(_re.findall(r"[A-Za-z0-9]", text or ""))
+
+
 def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float, h: float) -> str:
-    """Return text inside the normalized (0-1) rectangle on the page.
-    Tries PyMuPDF's text layer first (digital PDFs); if empty or unavailable,
-    falls back to rendering + OCR via the configured OCR backend."""
-    # 1) PyMuPDF text-layer extraction (fast, free, exact)
+    """Return the best text found inside the normalised (0-1) rectangle on the page.
+
+    Resolution order — first tier yielding >= 2 meaningful alphanumeric chars wins.
+    A bad/sparse text layer does NOT suppress later tiers.
+
+    Tier 1  PyMuPDF get_textbox()         — fast, layout-aware, text PDFs
+    Tier 2  pypdfium2 get_text_bounded()  — independent parser, catches what fitz misses
+    Tier 3  Cropped-region OCR (pypdfium2 render + OCR.space)  — scanned/image pages
+
+    Tier 1 and 2 are both text-layer methods but use different PDF parsers; either
+    may succeed where the other returns garbage on a malformed/low-quality stream.
+    Tier 3 never reruns whole-document OCR — it renders only the selected crop.
+    """
+    logger.debug(
+        "_read_region_text: file=%s page=%d region=(%.3f,%.3f,%.3f,%.3f)",
+        file_path, page_no, x, y, w, h,
+    )
+
+    # ── Tier 1: PyMuPDF get_textbox ───────────────────────────────────────
     try:
         import fitz
         doc = fitz.open(file_path)
@@ -450,70 +471,134 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
                 page = doc.load_page(page_no - 1)
                 pw, ph = page.rect.width, page.rect.height
                 rect = fitz.Rect(x * pw, y * ph, (x + w) * pw, (y + h) * ph)
-                text = (page.get_textbox(rect) or "").strip()
-                if text:
-                    return " ".join(text.split())
+                t1 = " ".join((page.get_textbox(rect) or "").split())
+                m1 = _count_meaningful(t1)
+                logger.debug("_read_region_text: tier1 (fitz) %r meaningful=%d", t1[:60], m1)
+                if m1 >= 2:
+                    logger.debug("_read_region_text: tier1 accepted → %r", t1[:80])
+                    return t1
+                logger.debug(
+                    "_read_region_text: tier1 sparse (%d meaningful chars) → tier2", m1
+                )
         finally:
             doc.close()
-    except Exception:
-        pass
+    except Exception as _e1:
+        logger.debug("_read_region_text: tier1 (fitz) failed: %s", _e1)
 
-    # 2) OCR fallback: render crop with pypdfium2 and POST to OCR.space
+    # ── Tier 2: pypdfium2 get_text_bounded (independent text-layer parser) ─
     try:
-        import pypdfium2 as pdfium
-        from PIL import Image  # bundled with pypdfium2's deps
-        pdf = pdfium.PdfDocument(file_path)
+        import pypdfium2 as _pdfium2
+        _pdf2 = _pdfium2.PdfDocument(file_path)
         try:
-            if page_no < 1 or page_no > len(pdf):
-                return ""
-            pg = pdf.get_page(page_no - 1)
-            try:
-                full = pg.render(scale=3.0).to_pil().convert("RGB")
-            finally:
-                pg.close()
+            if 1 <= page_no <= len(_pdf2):
+                _pg2 = _pdf2.get_page(page_no - 1)
+                try:
+                    _tp = _pg2.get_textpage()
+                    try:
+                        _pw2 = _pg2.get_width()
+                        _ph2 = _pg2.get_height()
+                        # pypdfium2 PDF coords: y=0 at bottom, y=height at top
+                        _left   = x * _pw2
+                        _bottom = (1.0 - (y + h)) * _ph2
+                        _right  = (x + w) * _pw2
+                        _top    = (1.0 - y) * _ph2
+                        t2 = " ".join((_tp.get_text_bounded(
+                            left=_left, bottom=_bottom,
+                            right=_right, top=_top,
+                        ) or "").split())
+                        m2 = _count_meaningful(t2)
+                        logger.debug(
+                            "_read_region_text: tier2 (pypdfium2 textpage) %r meaningful=%d",
+                            t2[:60], m2,
+                        )
+                        if m2 >= 2:
+                            logger.debug("_read_region_text: tier2 accepted → %r", t2[:80])
+                            return t2
+                        logger.debug(
+                            "_read_region_text: tier2 sparse (%d) → tier3 (OCR)", m2
+                        )
+                    finally:
+                        _tp.close()
+                finally:
+                    _pg2.close()
         finally:
-            pdf.close()
-        W, H = full.size
-        box = (int(x * W), int(y * H), int((x + w) * W), int((y + h) * H))
-        if box[2] - box[0] < 4 or box[3] - box[1] < 4:
+            _pdf2.close()
+    except Exception as _e2:
+        logger.debug("_read_region_text: tier2 (pypdfium2 textpage) failed: %s", _e2)
+
+    # ── Tier 3: cropped-region render + OCR (last resort) ─────────────────
+    logger.debug("_read_region_text: tier3 — rendering crop for OCR")
+    _img_bytes: bytes | None = None
+    try:
+        import pypdfium2 as _pdfium3
+        _pdf3 = _pdfium3.PdfDocument(file_path)
+        try:
+            if page_no < 1 or page_no > len(_pdf3):
+                return ""
+            _pg3 = _pdf3.get_page(page_no - 1)
+            try:
+                _full = _pg3.render(scale=3.0).to_pil().convert("RGB")
+            finally:
+                _pg3.close()
+        finally:
+            _pdf3.close()
+        _W, _H = _full.size
+        _box = (int(x * _W), int(y * _H), int((x + w) * _W), int((y + h) * _H))
+        if _box[2] - _box[0] < 4 or _box[3] - _box[1] < 4:
+            logger.debug("_read_region_text: tier3 region too small — giving up")
             return ""
-        crop = full.crop(box)
-        buf = io.BytesIO()
-        crop.save(buf, format="JPEG", quality=80)
-        img_bytes = buf.getvalue()
-    except Exception:
+        _crop = _full.crop(_box)
+        _buf = io.BytesIO()
+        _crop.save(_buf, format="JPEG", quality=85)
+        _img_bytes = _buf.getvalue()
+        logger.debug(
+            "_read_region_text: tier3 crop %dx%d px (%d bytes)",
+            _box[2] - _box[0], _box[3] - _box[1], len(_img_bytes),
+        )
+    except Exception as _e3a:
+        logger.debug("_read_region_text: tier3 render failed: %s", _e3a)
+        return ""
+
+    if not _img_bytes:
         return ""
 
     try:
         from app.config import settings
         import requests
         if not getattr(settings, "ocr_space_api_key", None):
+            logger.debug("_read_region_text: tier3 skipped — OCR.space not configured")
             return ""
-        resp = requests.post(
+        _resp = requests.post(
             settings.ocr_space_endpoint,
-            files={"file": ("region.jpg", img_bytes, "image/jpeg")},
+            files={"file": ("region.jpg", _img_bytes, "image/jpeg")},
             data={
-                "apikey": settings.ocr_space_api_key,
-                "language": settings.ocr_space_language,
+                "apikey":            settings.ocr_space_api_key,
+                "language":          settings.ocr_space_language,
                 "isOverlayRequired": "false",
-                "scale": "true",
-                "OCREngine": str(settings.ocr_space_ocr_engine),
+                "scale":             "true",
+                "OCREngine":         str(settings.ocr_space_ocr_engine),
             },
             timeout=settings.ocr_space_timeout_seconds,
         )
-        resp.raise_for_status()
-        payload = resp.json()
-        if payload.get("IsErroredOnProcessing"):
+        _resp.raise_for_status()
+        _ocr = _resp.json()
+        if _ocr.get("IsErroredOnProcessing"):
+            logger.debug("_read_region_text: tier3 OCR.space errored")
             return ""
-        out = []
-        for item in payload.get("ParsedResults") or []:
-            t = (item or {}).get("ParsedText") or ""
-            if t:
-                out.append(t)
-        return " ".join(" ".join(out).split())
-    except Exception:
+        _out: list[str] = []
+        for _item in _ocr.get("ParsedResults") or []:
+            _t = (_item or {}).get("ParsedText") or ""
+            if _t:
+                _out.append(_t)
+        t3 = " ".join(" ".join(_out).split())
+        logger.debug(
+            "_read_region_text: tier3 (OCR.space) %r meaningful=%d",
+            t3[:60], _count_meaningful(t3),
+        )
+        return t3
+    except Exception as _e3b:
+        logger.debug("_read_region_text: tier3 OCR.space failed: %s", _e3b)
         return ""
-
 
 # ── Remap hints + value persistence + rule creation ─────────────────────────
 @router.post("/batches/{batch_id}/rows/{row_id}/remap")

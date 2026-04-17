@@ -1526,6 +1526,44 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         batch.notes = f"Queued {len(files)} file(s), {total_target_pages} page(s)"
         db.commit()
 
+        # ── Preflight: decide extraction backend once, before any page is processed ──
+        # Runs a real authenticated GET against Azure DI /documentModels.
+        # Only selects azure_di if the readiness check passes — "configured"
+        # is not the same as "ready".
+        from app.services.preflight import run_preflight_checks, ExtractionBackend
+        from app.services.extractor import _reset_azure_di_error
+
+        preflight = run_preflight_checks()   # skip_readiness_check=False by default
+        logger.info(
+            "_process_batch_job: preflight complete — backend=%s state=%s duration=%dms",
+            preflight.selected_backend,
+            preflight.readiness_state,
+            preflight.duration_ms,
+        )
+
+        # Write preflight outcome to batch notes so operators can see which
+        # extraction path was selected without inspecting logs.
+        from sqlalchemy import update as _upd_pre
+        db.execute(
+            _upd_pre(InvoiceBatch)
+            .where(InvoiceBatch.id == batch_id)
+            .values(notes=preflight.notes)
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+
+        if preflight.selected_backend != ExtractionBackend.AZURE_DI:
+            # Azure DI is disabled or failed readiness check — clear the
+            # circuit-breaker so azure_di_available() returns False for every
+            # page without any per-page retry attempt wasting time.
+            _reset_azure_di_error()
+            logger.info(
+                "_process_batch_job: Azure DI not in use for this batch "
+                "(state=%s reason=%s)",
+                preflight.readiness_state,
+                preflight.failure_reason or "disabled",
+            )
+
         # Look up the company name so the extractor can hard-block it as the
         # customer name and never return it as a supplier.
         company = db.get(Company, batch.company_id) if batch.company_id else None
