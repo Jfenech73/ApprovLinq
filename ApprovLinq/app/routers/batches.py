@@ -1526,6 +1526,40 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         batch.notes = f"Queued {len(files)} file(s), {total_target_pages} page(s)"
         db.commit()
 
+        # ── Preflight: decide extraction backend once, before any page is processed ──
+        # This prevents Azure DI misconfiguration from being discovered mid-scan
+        # (e.g. page 3 of 19) and avoids a looping/retrying failure path.
+        from app.services.preflight import run_preflight_checks, ExtractionBackend
+        from app.services.extractor import _reset_azure_di_error
+
+        preflight = run_preflight_checks()
+        logger.info(
+            "_process_batch_job: preflight complete — backend=%s duration=%dms",
+            preflight.selected_backend, preflight.duration_ms,
+        )
+        logger.debug("preflight notes: %s", preflight.notes)
+
+        # Write preflight outcome to batch notes so operators can see which
+        # extraction path was selected without inspecting logs.
+        from sqlalchemy import update as _upd_pre
+        db.execute(
+            _upd_pre(InvoiceBatch)
+            .where(InvoiceBatch.id == batch_id)
+            .values(notes=preflight.notes)
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+
+        if preflight.selected_backend != ExtractionBackend.AZURE_DI:
+            # Azure DI is disabled or failed preflight — clear the circuit-breaker
+            # so azure_di_available() returns False for every page without any
+            # per-page retry attempt wasting time or causing mid-scan failures.
+            _reset_azure_di_error()
+            logger.debug(
+                "_process_batch_job: Azure DI not in use for this batch (%s)",
+                preflight.failure_reason or "disabled",
+            )
+
         # Look up the company name so the extractor can hard-block it as the
         # customer name and never return it as a supplier.
         company = db.get(Company, batch.company_id) if batch.company_id else None

@@ -1664,6 +1664,18 @@ def openai_extract_invoice_vision(
 _azure_di_error: str | None = None
 
 
+def _reset_azure_di_error() -> None:
+    """Clear the Azure DI circuit-breaker flag.
+
+    Called by the batch job when the preflight check has already determined
+    that Azure DI should not be used for this batch — ensures that any
+    leftover error state from a previous batch doesn't persist across runs.
+    Also useful in tests to reset module-level state between cases.
+    """
+    global _azure_di_error
+    _azure_di_error = None
+
+
 def azure_di_available() -> tuple[bool, str | None]:
     """Return (True, None) if Azure DI is configured and has not hit a permanent error.
     Return (False, reason) otherwise.
