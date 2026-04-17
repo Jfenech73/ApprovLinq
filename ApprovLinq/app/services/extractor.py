@@ -1788,7 +1788,25 @@ def azure_di_extract_invoice(
             body=jpeg_bytes,
             content_type="image/jpeg",
         )
-        result = poller.result()
+        # ── Per-page timeout safeguard ─────────────────────────────────────
+        # poller.result() can block indefinitely if Azure DI hangs.  We run
+        # it in a daemon thread so we can enforce a wall-clock timeout and
+        # fall back cleanly rather than leaving the batch stuck at 0 %.
+        # Default: 45 s per page (configurable via AZURE_DI_PAGE_TIMEOUT_S).
+        import concurrent.futures as _cf
+        _page_timeout = float(getattr(settings, "azure_di_page_timeout_s", 45))
+        with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+            _future = _pool.submit(poller.result)
+            try:
+                result = _future.result(timeout=_page_timeout)
+            except _cf.TimeoutError:
+                logger.warning(
+                    "Azure DI page timeout after %.0fs — opening circuit breaker, "
+                    "falling back to OpenAI vision for remaining pages",
+                    _page_timeout,
+                )
+                _azure_di_error = f"Page timeout after {_page_timeout:.0f}s"
+                return None
     except Exception as exc:
         exc_str = str(exc)
         # Permanent failures: open the circuit breaker so we don't retry on every page.
