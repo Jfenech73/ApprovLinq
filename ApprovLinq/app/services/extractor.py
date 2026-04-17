@@ -1183,101 +1183,6 @@ def _extract_structured_summary_totals(text: str) -> dict | None:
     return result
 
 
-def _invoice_number_fallback(text: str) -> str | None:
-    """Fallback invoice-number extractor for Nectar-style layouts.
-
-    Called only when the standard first_match patterns in simple_extract
-    return nothing.  Searches the top header region (first ~40 lines) for
-    a label / value pair using a broader set of label keywords and more
-    lenient value patterns.
-
-    Priority (highest first):
-      1. Same line as label  — e.g. "Invoice No: 45005"
-      2. Right of label in same visual block
-      3. Nearby line above/below in the same header box
-
-    Hard rejections — candidates that match these are never returned:
-      • pure VAT/tax numbers  (MT12345678 style, or "VAT No:" prefix)
-      • dates  (nn/nn/nnnn)
-      • phone / fax numbers
-      • customer / route / sales rep codes
-      • purely alphabetic strings
-    """
-    if not text:
-        return None
-
-    # Only examine the top 40 lines — invoice number is always in the header
-    lines = text.splitlines()[:40]
-
-    # Labels that indicate an invoice number is nearby
-    _LABEL_RE = re.compile(
-        r"\b(invoice\s*(?:no\.?|number|#|nr\.?)|doc(?:ument)?\s*(?:no\.?|number|nr\.?)"
-        r"|ref(?:erence)?\s*(?:no\.?|number)?|number)\s*[.:\-]?",
-        re.I,
-    )
-
-    # Hard-reject patterns: these look like invoice numbers but are not
-    _REJECT_RE = re.compile(
-        r"(?:"
-        r"\b(?:vat|tax)\s*(?:no\.?|number|reg\.?|registration)[\s:.]*"       # VAT No
-        r"|\b(?:MT|GB|EU)\d{8,}"                                              # VAT reg numbers
-        r"|\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b"                         # dates
-        r"|\b(?:tel|fax|phone|mob)\b"                                         # contact
-        r"|\b(?:customer|client|route|sales\s*rep|rep)\b"                     # relationship fields
-        r")",
-        re.I,
-    )
-
-    # Acceptable invoice-number token: has at least one digit, not purely alpha,
-    # not a bare year, and not too long to be a real invoice ref
-    def _is_valid_candidate(val: str) -> bool:
-        v = val.strip()
-        if not v or len(v) < 2 or len(v) > 30:
-            return False
-        if not re.search(r"\d", v):          # must contain at least one digit
-            return False
-        if re.match(r"^(19|20)\d{2}$", v):  # bare year
-            return False
-        if re.match(r"^\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}$", v):  # date
-            return False
-        if _REJECT_RE.search(v):
-            return False
-        return True
-
-    # Pattern for a plausible invoice-number token (alphanumeric, slashes, dashes)
-    _TOKEN_RE = re.compile(r"([A-Z0-9][A-Z0-9\/\-_\.]*[0-9][A-Z0-9\/\-_\.]*|[0-9]{2,})", re.I)
-
-    for idx, line in enumerate(lines):
-        lm = _LABEL_RE.search(line)
-        if lm is None:
-            continue
-        # Skip if the line itself carries a hard-reject pattern (e.g. "VAT No:")
-        if _REJECT_RE.search(line[:lm.start()]):
-            continue
-
-        # Priority 1 & 2: same line, after the label
-        after = line[lm.end():].strip()
-        for tok in _TOKEN_RE.findall(after):
-            if _is_valid_candidate(tok):
-                logger.debug("invoice_number_fallback: same-line hit %r on %r", tok, line)
-                return tok
-
-        # Priority 3: next 1-2 lines (value on the following line)
-        for nidx in range(idx + 1, min(idx + 3, len(lines))):
-            nline = lines[nidx].strip()
-            if not nline:
-                continue
-            # Stop if we hit another label line (different header field)
-            if re.search(r"\b(date|vat|tax|customer|name|address|total|amount)\b", nline, re.I):
-                break
-            for tok in _TOKEN_RE.findall(nline):
-                if _is_valid_candidate(tok):
-                    logger.debug("invoice_number_fallback: next-line hit %r on %r", tok, nline)
-                    return tok
-
-    return None
-
-
 def simple_extract(
     text: str,
     openai_api_key: str | None = None,
@@ -1299,14 +1204,6 @@ def simple_extract(
     # Reject anything that looks like a word rather than a number
     if suspicious_invoice_number(invoice_number):
         invoice_number = None
-
-    # Fallback: broader header-region search for Nectar-style layouts where the
-    # standard patterns miss the number (e.g. purely numeric ref on the same line
-    # as the label but with unusual spacing / OCR noise).
-    if not invoice_number:
-        invoice_number = _invoice_number_fallback(text)
-        if invoice_number:
-            logger.debug("invoice_number extracted via fallback: %r", invoice_number)
 
     invoice_date_raw = first_match([
         r"invoice\s*date\s*[:\-]?\s*([0-9]{1,2}[\/\-.][0-9]{1,2}[\/\-.][0-9]{2,4})",
