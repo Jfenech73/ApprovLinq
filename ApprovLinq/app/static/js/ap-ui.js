@@ -58,6 +58,8 @@
     renderThemeToggle();
   }
 
+  const ICON_CHEVRON_LEFT = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
+  const ICON_CHEVRON_RIGHT = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
   const ICON_SUN = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>';
   const ICON_MOON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
 
@@ -68,6 +70,43 @@
     btn.innerHTML = isDark ? ICON_SUN : ICON_MOON;
     btn.setAttribute("aria-label", isDark ? "Switch to light theme" : "Switch to dark theme");
     btn.title = btn.getAttribute("aria-label");
+  }
+
+  // ── Sidebar collapse ─────────────────────────────────────────────────────
+  const SIDEBAR_KEY = "ap_sidebar_collapsed";
+
+  function isSidebarCollapsed() {
+    try { return localStorage.getItem(SIDEBAR_KEY) === "1"; } catch { return false; }
+  }
+
+  function applySidebarState(collapsed) {
+    const shell = document.querySelector(".ap-shell");
+    const side  = document.querySelector(".ap-side");
+    const btn   = document.querySelector("[data-ap-sidebar-toggle]");
+    if (!shell) return;
+    if (collapsed) {
+      shell.classList.add("sidebar-collapsed");
+      side && side.classList.add("collapsed");
+    } else {
+      shell.classList.remove("sidebar-collapsed");
+      side && side.classList.remove("collapsed");
+    }
+    if (btn) {
+      btn.innerHTML = collapsed ? ICON_CHEVRON_RIGHT : ICON_CHEVRON_LEFT;
+      btn.setAttribute("aria-label", collapsed ? "Expand sidebar" : "Collapse sidebar");
+      btn.title = btn.getAttribute("aria-label");
+    }
+  }
+
+  function wireSidebarToggle() {
+    const btn = document.querySelector("[data-ap-sidebar-toggle]");
+    if (!btn) return;
+    applySidebarState(isSidebarCollapsed());
+    btn.addEventListener("click", () => {
+      const nowCollapsed = !document.querySelector(".ap-shell")?.classList.contains("sidebar-collapsed");
+      try { localStorage.setItem(SIDEBAR_KEY, nowCollapsed ? "1" : "0"); } catch {}
+      applySidebarState(nowCollapsed);
+    });
   }
 
   function wireThemeToggle() {
@@ -134,7 +173,7 @@
       if (n.section) return `<div class="ap-nav-section">${n.section}</div>`;
       const cls = "ap-nav-item" + (n.id === active ? " active" : "") + (n.adminOnly ? " hidden" : "");
       const attr = n.adminOnly ? ' data-admin-only="true"' : '';
-      return `<a class="${cls}"${attr} id="nav-${n.id}" href="${n.href}">${n.icon}${n.label}</a>`;
+      return `<a class="${cls}"${attr} id="nav-${n.id}" href="${n.href}" title="${n.label}">${n.icon}<span class="ap-nav-label">${n.label}</span></a>`;
     }).join("");
 
     const crumbHtml = crumb.map((c, i) => {
@@ -148,6 +187,7 @@
     root.outerHTML = `
       <div class="ap-shell">
         <aside class="ap-side">
+          <button class="ap-sidebar-toggle" data-ap-sidebar-toggle type="button" aria-label="Collapse sidebar" title="Collapse sidebar"></button>
           <a class="ap-brand" href="/static/scanner.html" aria-label="Approvlinq">
             <span data-ap-logo="wordmark"></span>
           </a>
@@ -182,6 +222,7 @@
     // Re-render logos & rewire theme toggle since we replaced the DOM
     renderLogos();
     wireThemeToggle();
+    wireSidebarToggle();
     // Populate user block from /auth/me if available
     populateUserBlock();
     // Wire logout — use logoutAndGo from common.js
@@ -231,7 +272,7 @@
   // ── Public API ────────────────────────────────────────────────────────────
   window.ApprovlinqUI = {
     applyTheme, toggleTheme, currentTheme, applySavedThemeEarly,
-    renderThemeToggle, renderLogos, wireThemeToggle, renderShell,
+    renderThemeToggle, renderLogos, wireThemeToggle, renderShell, wireSidebarToggle,
     LOGO_WORDMARK,
   };
 
@@ -242,6 +283,7 @@
     renderShell();
     renderLogos();
     wireThemeToggle();
+    wireSidebarToggle();
     // Opt-in UI sanity check when URL has ?ui-check=1
     if (/[?&]ui-check=1(&|$)/.test(location.search)) {
       const s = document.createElement("script");

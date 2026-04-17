@@ -64,31 +64,330 @@ def _clear_active(batch_id: UUID) -> None:
 
 
 def _normalize_rule_value(value: str | None) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+    """Normalise a rule source_pattern or supplier name for comparison.
+
+    Must produce the SAME output as the normalisation used in save_remap
+    (review.py) when storing source_pattern, so that rule matching is
+    consistent at both creation and replay time.
+
+    Steps:
+    1. Strip known company-type suffixes (ltd, limited, plc, …)
+    2. Replace non-alphanumeric with spaces
+    3. Collapse whitespace and lowercase
+    """
+    import re as _re
+    n = _re.sub(
+        r"\b(ltd|limited|plc|llc|inc|corp|co|group|trading|holdings|services|solutions)\b",
+        "", str(value or "").lower(),
+    )
+    n = _re.sub(r"[^a-z0-9 ]", " ", n)
+    return _re.sub(r"\s+", " ", n).strip()
 
 
 def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
-    rules = db.query(CorrectionRule).filter(
+    """Apply active CorrectionRules to this row.
+
+    Rule types handled:
+      supplier_alias     — rename supplier_name when it matches source_pattern
+      nominal_remap      — remap nominal_account_code
+      remap_field_value  — field-specific value saved via the remap workflow
+
+    For remap_field_value rules the following invariants are ALWAYS enforced:
+      • Rules are matched by (supplier, target_field) — never supplier alone.
+      • A rule for field X can ONLY write to field X.
+      • Invoice-number-like tokens are NEVER written to supplier_name unless
+        the rule's field_name is explicitly "supplier_name".
+      • Text-correction rules (remap_field_value with target_value) are applied
+        before any hint-based (region position) rules.
+      • A field is only eligible for overwrite when it is blank, low-confidence,
+        or flagged for review.
+    """
+    rules_q = db.query(CorrectionRule).filter(
         CorrectionRule.tenant_id == batch.tenant_id,
         CorrectionRule.active.is_(True),
     )
     if batch.company_id:
-        rules = rules.filter((CorrectionRule.company_id == batch.company_id) | (CorrectionRule.company_id.is_(None)))
+        rules_q = rules_q.filter(
+            (CorrectionRule.company_id == batch.company_id)
+            | (CorrectionRule.company_id.is_(None))
+        )
     else:
-        rules = rules.filter(CorrectionRule.company_id.is_(None))
-    for rule in rules.order_by(CorrectionRule.id.asc()).all():
+        rules_q = rules_q.filter(CorrectionRule.company_id.is_(None))
+    all_rules = rules_q.order_by(CorrectionRule.id.asc()).all()
+
+    # ── 1. supplier_alias and nominal_remap ───────────────────────────────
+    for rule in all_rules:
         src = _normalize_rule_value(rule.source_pattern)
         if not src:
             continue
         if rule.rule_type == "supplier_alias":
             current = _normalize_rule_value(row.supplier_name)
             if current and current == src and rule.target_value:
+                logger.debug(
+                    "_apply_saved_rules: supplier_alias %r→%r row=%d",
+                    row.supplier_name, rule.target_value, row.id,
+                )
                 row.supplier_name = rule.target_value
         elif rule.rule_type == "nominal_remap":
             current = _normalize_rule_value(row.nominal_account_code)
             if current and current == src and rule.target_value:
+                logger.debug(
+                    "_apply_saved_rules: nominal_remap %r→%r row=%d",
+                    row.nominal_account_code, rule.target_value, row.id,
+                )
                 row.nominal_account_code = rule.target_value
 
+    # ── 2. remap_field_value / text_correction rules ────────────────────
+    # IMPORTANT: Rule semantics are type-dependent:
+    #
+    #   "remap_field_value"  → coordinate/region rule.
+    #     The rule stores WHERE to read the field on this supplier's invoices.
+    #     target_value is stored only as a debug/example reference from creation.
+    #     Replay MUST re-read the corresponding RemapHint coordinates against
+    #     the CURRENT invoice's PDF every time.  It must NEVER assign target_value
+    #     directly — that would give every future invoice the same number.
+    #
+    #   "text_correction"    → scanned-text correction rule.
+    #     source_pattern = raw/scanned text that needs correcting.
+    #     target_value   = the correct value to use when that text is seen.
+    #     Only applies when the current field value matches source_pattern.
+    #     This type may reuse target_value because it's tied to the scanned text.
+    from app.services.extractor import suspicious_invoice_number as _sus_inv
+
+    # Determine which fields are currently eligible for remap overwrite
+    _review_fields_set: set[str] = set()
+    if row.review_fields:
+        sep = "|" if "|" in (row.review_fields or "") else ","
+        _review_fields_set = {f.strip() for f in row.review_fields.split(sep) if f.strip()}
+
+    def _field_is_eligible(field: str) -> bool:
+        """Return True if this field may be overwritten by a remap rule."""
+        current_val = getattr(row, field, None)
+        if not current_val or str(current_val).strip() == "":
+            return True
+        if field in _review_fields_set:
+            return True
+        if row.review_required and (
+            row.confidence_score is None or float(row.confidence_score) < 0.55
+        ):
+            return True
+        v = str(current_val).strip()
+        if field == "invoice_number" and _sus_inv(v):
+            return True
+        if field == "supplier_name" and len(v) < 3:
+            return True
+        return False
+
+    def _value_is_appropriate_for_field(field: str, value: str) -> bool:
+        """Return True if value is appropriate to write into field."""
+        if not value:
+            return False
+        v = value.strip()
+        if field == "supplier_name":
+            digits = sum(1 for c in v if c.isdigit())
+            if len(v) <= 15 and digits > 0 and (digits / max(len(v), 1)) > 0.4:
+                if " " not in v:
+                    logger.debug(
+                        "_apply_saved_rules: rejected invoice-like value %r for supplier_name",
+                        v,
+                    )
+                    return False
+            if re.match(r"^[A-Z0-9\-\/]{2,15}$", v, re.I) and " " not in v:
+                logger.debug(
+                    "_apply_saved_rules: rejected invoice-ref-pattern value %r for supplier_name",
+                    v,
+                )
+                return False
+        return True
+
+    supplier_norm = _normalize_rule_value(row.supplier_name)
+    if not supplier_norm:
+        return
+
+    # Resolve the PDF path once for coordinate-based re-reading
+    _pdf_path: str | None = None
+    from app.db.models import InvoiceFile as _IF2
+    from app.utils.storage import resolve_upload_path as _rup2
+    _file_obj = db.get(_IF2, row.source_file_id) if row.source_file_id else None
+    if _file_obj:
+        try:
+            _pdf_path = str(_rup2(_file_obj.file_path))
+        except Exception:
+            _pdf_path = None
+
+    # Collect matching rules keyed by field_name
+    remap_rules_by_field: dict[str, list[CorrectionRule]] = {}
+    for rule in all_rules:
+        if rule.rule_type not in ("remap_field_value", "text_correction"):
+            continue
+        field = rule.field_name
+        if not field:
+            continue
+        src = _normalize_rule_value(rule.source_pattern)
+        if not src or src != supplier_norm:
+            # CRITICAL: supplier identity must match
+            continue
+        remap_rules_by_field.setdefault(field, []).append(rule)
+
+    # Apply per-field — completely isolated
+    for field, field_rules in remap_rules_by_field.items():
+        if not _field_is_eligible(field):
+            logger.debug(
+                "_apply_saved_rules: field=%r has trusted value %r — skipping remap",
+                field, getattr(row, field, None),
+            )
+            continue
+
+        # Most-recently-created rule wins for same field+supplier
+        field_rules.sort(key=lambda r: r.id, reverse=True)
+
+        assigned = False
+        for chosen_rule in field_rules:
+            logger.debug(
+                "_apply_saved_rules: evaluating rule_id=%d type=%r field=%r "
+                "supplier=%r current=%r",
+                chosen_rule.id, chosen_rule.rule_type, field,
+                row.supplier_name, getattr(row, field, None),
+            )
+
+            # ── text_correction: reuse target_value when scanned text matches ──
+            if chosen_rule.rule_type == "text_correction":
+                current_raw = str(getattr(row, field, "") or "").strip()
+                current_norm = _normalize_rule_value(current_raw)
+                rule_pattern = _normalize_rule_value(chosen_rule.source_pattern)
+                if current_norm and rule_pattern and current_norm == rule_pattern:
+                    val = (chosen_rule.target_value or "").strip()
+                    if val and _value_is_appropriate_for_field(field, val):
+                        old_val = getattr(row, field, None)
+                        setattr(row, field, val)
+                        logger.debug(
+                            "_apply_saved_rules: text_correction applied "
+                            "field=%r %r→%r supplier=%r rule_id=%d",
+                            field, old_val, val, row.supplier_name, chosen_rule.id,
+                        )
+                        assigned = True
+                        break
+                else:
+                    logger.debug(
+                        "_apply_saved_rules: text_correction skipped — "
+                        "current text %r does not match pattern %r",
+                        current_raw[:40], chosen_rule.source_pattern[:40],
+                    )
+                continue
+
+            # ── remap_field_value: ALWAYS re-read current invoice PDF ──────────
+            # NEVER assign target_value directly — it is the value from the
+            # first invoice and must not carry over to subsequent invoices.
+            if chosen_rule.rule_type != "remap_field_value":
+                continue
+
+            if not _pdf_path:
+                logger.debug(
+                    "_apply_saved_rules: remap_field_value rule_id=%d skipped — "
+                    "no PDF path for row %d",
+                    chosen_rule.id, row.id,
+                )
+                continue
+
+            # Look up the RemapHint that stores the bounding-box coordinates
+            from sqlalchemy import select as _sel2
+            hint = db.execute(
+                _sel2(RemapHint).where(
+                    RemapHint.tenant_id == batch.tenant_id,
+                    RemapHint.field_name == field,
+                    RemapHint.active.is_(True),
+                    RemapHint.x.isnot(None),
+                    RemapHint.page_no == row.page_no,
+                ).order_by(RemapHint.id.desc()).limit(1)
+            ).scalar_one_or_none()
+            if hint is None:
+                # Try without page constraint (some suppliers have variable page layouts)
+                hint = db.execute(
+                    _sel2(RemapHint).where(
+                        RemapHint.tenant_id == batch.tenant_id,
+                        RemapHint.field_name == field,
+                        RemapHint.active.is_(True),
+                        RemapHint.x.isnot(None),
+                    ).order_by(RemapHint.id.desc()).limit(1)
+                ).scalar_one_or_none()
+
+            # Narrow to same supplier
+            if hint is not None:
+                hint_norm = _normalize_rule_value(hint.supplier_name_snapshot or "")
+                if hint_norm and hint_norm != supplier_norm:
+                    logger.debug(
+                        "_apply_saved_rules: RemapHint id=%d supplier %r != row supplier %r",
+                        hint.id, hint.supplier_name_snapshot, row.supplier_name,
+                    )
+                    hint = None
+
+            if hint is None:
+                logger.warning(
+                    "_apply_saved_rules: remap_field_value rule_id=%d — "
+                    "no matching RemapHint for supplier=%r field=%r page=%d. "
+                    "Stored example value %r NOT assigned (coordinate rule, not text correction).",
+                    chosen_rule.id, row.supplier_name, field, row.page_no,
+                    (chosen_rule.target_value or "")[:40],
+                )
+                continue
+
+            # Re-read the CURRENT invoice at the saved region coordinates
+            page_no = hint.page_no or row.page_no
+            try:
+                from app.routers.review import _read_region_text
+                fresh_text = _read_region_text(
+                    _pdf_path, page_no,
+                    float(hint.x), float(hint.y),
+                    float(hint.w), float(hint.h),
+                )
+                fresh_text = (fresh_text or "").strip()
+            except Exception as exc:
+                logger.warning(
+                    "_apply_saved_rules: _read_region_text failed rule_id=%d field=%r: %s",
+                    chosen_rule.id, field, exc,
+                )
+                continue
+
+            logger.debug(
+                "_apply_saved_rules: coordinate-replay rule_id=%d field=%r "
+                "page=%d coords=(%.3f,%.3f,%.3f,%.3f) → fresh_text=%r "
+                "(stored example was %r — NOT used)",
+                chosen_rule.id, field, page_no,
+                float(hint.x), float(hint.y), float(hint.w), float(hint.h),
+                fresh_text[:60], (chosen_rule.target_value or "")[:40],
+            )
+
+            if not fresh_text:
+                logger.debug(
+                    "_apply_saved_rules: remap_field_value rule_id=%d — "
+                    "empty region on current invoice; field left unchanged.",
+                    chosen_rule.id,
+                )
+                continue
+
+            if not _value_is_appropriate_for_field(field, fresh_text):
+                logger.debug(
+                    "_apply_saved_rules: fresh text %r inappropriate for field=%r",
+                    fresh_text[:40], field,
+                )
+                continue
+
+            old_val = getattr(row, field, None)
+            setattr(row, field, fresh_text)
+            logger.debug(
+                "_apply_saved_rules: remap_field_value coordinate-replay "
+                "field=%r fresh=%r (was %r) supplier=%r rule_id=%d hint_id=%d",
+                field, fresh_text, old_val, row.supplier_name,
+                chosen_rule.id, hint.id,
+            )
+            assigned = True
+            break
+
+        if not assigned:
+            logger.debug(
+                "_apply_saved_rules: no rule produced a value for field=%r supplier=%r",
+                field, row.supplier_name,
+            )
 
 
 def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
@@ -195,6 +494,23 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 float(hint.x), float(hint.y), float(hint.w), float(hint.h),
             )
             if text:
+                # Guard: invoice-like tokens must never be written to supplier_name
+                # (e.g. user drew a remap region over an invoice number area while
+                # supplier_name was the active field — reject silently).
+                if hint.field_name == "supplier_name":
+                    _v = text.strip()
+                    _digits = sum(1 for c in _v if c.isdigit())
+                    _is_inv_like = (
+                        (len(_v) <= 15 and _digits > 0 and (_digits / max(len(_v), 1)) > 0.4 and " " not in _v)
+                        or (re.match(r"^[A-Z0-9\-\/]{2,15}$", _v, re.I) and " " not in _v)
+                    )
+                    if _is_inv_like:
+                        logger.debug(
+                            "RemapHint: rejected invoice-like value %r for supplier_name "
+                            "supplier=%r",
+                            text[:40], row.supplier_name,
+                        )
+                        continue
                 setattr(row, hint.field_name, text)
                 target_fields.discard(hint.field_name)
                 logger.debug("RemapHint applied: supplier=%r field=%s → %r",
