@@ -1809,19 +1809,36 @@ def azure_di_extract_invoice(
                 return None
     except Exception as exc:
         exc_str = str(exc)
-        # Permanent failures: open the circuit breaker so we don't retry on every page.
-        is_permanent = any(code in exc_str for code in ("403", "401", "VirtualNetwork", "Unauthorized", "Forbidden"))
+        # Classify the real failure and open the circuit-breaker for permanent errors.
+        # Map HTTP status codes / exception text to human-readable causes.
+        if any(token in exc_str for token in ("401", "Unauthorized")):
+            cause = "authentication failed (HTTP 401) — check AZURE_DI_KEY"
+            is_permanent = True
+        elif any(token in exc_str for token in ("403", "Forbidden", "VirtualNetwork", "AuthorizationFailed")):
+            cause = "authorisation denied (HTTP 403) — check AZURE_DI_KEY, VNet rules, or quota"
+            is_permanent = True
+        elif "404" in exc_str:
+            cause = "endpoint or model not found (HTTP 404) — check AZURE_DI_ENDPOINT"
+            is_permanent = True
+        elif "429" in exc_str:
+            cause = "throttled / rate-limited (HTTP 429) — retry later or reduce concurrency"
+            is_permanent = False
+        elif any(token in exc_str for token in ("500", "502", "503", "504")):
+            cause = f"Azure service-side error — {exc_str[:120]}"
+            is_permanent = False
+        else:
+            cause = exc_str[:200]
+            is_permanent = False
+
         if is_permanent:
-            _azure_di_error = exc_str[:200]
+            _azure_di_error = cause
             logger.error(
-                "Azure DI PERMANENTLY unavailable — circuit breaker opened. "
-                "Cause: %s. "
-                "All pages will fall back to OpenAI vision. "
-                "Fix: remove the VNet restriction on the Azure resource or allow this server's IP.",
-                exc_str[:300],
+                "Azure DI extraction FAILED (permanent) — circuit breaker opened. "
+                "Cause: %s. All remaining pages will fall back to OpenAI vision.",
+                cause,
             )
         else:
-            logger.warning("Azure DI API call failed (transient): %s", exc)
+            logger.warning("Azure DI extraction failed (transient): %s", cause)
         return None
 
     if not result.documents:

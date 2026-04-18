@@ -1,32 +1,42 @@
 """
-Regression tests for the Azure DI real readiness check and per-page timeout.
+Regression tests for the Azure DI preflight and per-page timeout.
 
-Key fixes tested:
-  1. Readiness check uses GET not HEAD
-  2. "available" / "ready" note only when GET returned HTTP 200
-  3. Auth failure → NOT_READY → fallback
-  4. Timeout → NOT_READY → fallback
-  5. DNS/network error → NOT_READY → fallback
-  6. Disabled → DISABLED → fallback
-  7. skip_readiness_check=True → CONFIGURED (honest, not READY)
-  8. Per-page timeout wraps poller.result() with ThreadPoolExecutor
-  9. AzureDiReadinessState has all required states
- 10. Batch job logs readiness_state not just selected_backend
- 11. Notes never say "available" unless truly ready
- 12. Stable logic untouched
+This version reflects the updated preflight design:
+  - No standalone network readiness ping.
+  - The actual Azure DI extraction call is the source of truth.
+  - Preflight only validates configuration (flag + endpoint format + key present).
+  - READY state has been removed; CONFIGURED is the "proceed" state.
+  - skip_readiness_check parameter is retained for API compat but is a no-op.
+
+Key behaviours tested:
+  1. Disabled → DISABLED → fallback
+  2. Missing endpoint → NOT_READY → fallback
+  3. Missing key → NOT_READY → fallback
+  4. Bad endpoint format → NOT_READY → fallback
+  5. Valid config (skip=True or skip=False) → CONFIGURED → azure_di
+  6. readiness_ok always None (no network call)
+  7. Notes never say "available"; say "configured" or "disabled" / "fallback"
+  8. Per-page timeout still wraps poller.result() with ThreadPoolExecutor
+  9. Batch integration: preflight runs before file loop, notes written
+ 10. Secrets never appear in notes or logged format strings
+ 11. Stable logic (BCRS, remap, fallback chain) untouched
 
 Run: pytest tests/test_preflight.py -v
 """
 from __future__ import annotations
 import ast, os, types, unittest.mock as mock
 
+
 def _src(f):
     return open(os.path.join(os.path.dirname(__file__), "..", f)).read()
 
+
 def _make_settings(**kw):
     d = dict(use_azure_di=False, azure_di_endpoint=None, azure_di_key=None,
-             azure_di_preflight_timeout=5.0, azure_di_page_timeout_s=45)
-    d.update(kw); return types.SimpleNamespace(**d)
+             azure_di_page_timeout_s=45)
+    d.update(kw)
+    return types.SimpleNamespace(**d)
+
 
 def _run(s, skip=True):
     import app.services.preflight as pf
@@ -34,12 +44,12 @@ def _run(s, skip=True):
         return pf.run_preflight_checks(skip_readiness_check=skip)
 
 
+# ---------------------------------------------------------------------------
 class TestReadinessStateEnum:
     def test_states_exist(self):
         from app.services.preflight import AzureDiReadinessState
         assert AzureDiReadinessState.DISABLED   == "disabled"
         assert AzureDiReadinessState.CONFIGURED == "configured"
-        assert AzureDiReadinessState.READY      == "ready"
         assert AzureDiReadinessState.NOT_READY  == "not_ready"
 
     def test_result_has_readiness_state_field(self):
@@ -53,6 +63,7 @@ class TestReadinessStateEnum:
         assert r.readiness_state == AzureDiReadinessState.DISABLED
 
 
+# ---------------------------------------------------------------------------
 class TestDisabledPath:
     def test_fallback_state_disabled(self):
         from app.services.preflight import ExtractionBackend, AzureDiReadinessState
@@ -65,11 +76,13 @@ class TestDisabledPath:
         assert "available" not in r.notes.lower()
         assert "disabled" in r.notes.lower()
 
-    def test_no_check_attempted_when_disabled(self):
+    def test_no_network_check_when_disabled(self):
+        # readiness_ok is always None — no network call is made
         r = _run(_make_settings(use_azure_di=False), skip=False)
         assert r.readiness_ok is None
 
 
+# ---------------------------------------------------------------------------
 class TestConfigProblems:
     def _assert_not_ready(self, s):
         from app.services.preflight import AzureDiReadinessState, ExtractionBackend
@@ -98,148 +111,101 @@ class TestConfigProblems:
         ))
 
 
+# ---------------------------------------------------------------------------
 class TestConfiguredState:
-    def test_configured_not_ready_when_skipped(self):
-        from app.services.preflight import AzureDiReadinessState, ExtractionBackend
-        r = _run(_make_settings(
+    """With valid config, preflight selects AZURE_DI regardless of skip flag."""
+
+    def _valid_settings(self):
+        return _make_settings(
             use_azure_di=True,
             azure_di_endpoint="https://x.cognitiveservices.azure.com",
             azure_di_key="k",
-        ), skip=True)
+        )
+
+    def test_configured_state_skip_true(self):
+        from app.services.preflight import AzureDiReadinessState, ExtractionBackend
+        r = _run(self._valid_settings(), skip=True)
         assert r.readiness_state  == AzureDiReadinessState.CONFIGURED
         assert r.selected_backend == ExtractionBackend.AZURE_DI
 
-    def test_configured_note_does_not_say_available(self):
-        r = _run(_make_settings(
-            use_azure_di=True,
-            azure_di_endpoint="https://x.cognitiveservices.azure.com",
-            azure_di_key="k",
-        ), skip=True)
-        assert "available" not in r.notes.lower()
-        assert "configured" in r.notes.lower() or "unverified" in r.notes.lower()
-
-    def test_readiness_ok_is_none_when_skipped(self):
-        r = _run(_make_settings(
-            use_azure_di=True,
-            azure_di_endpoint="https://x.cognitiveservices.azure.com",
-            azure_di_key="k",
-        ), skip=True)
-        assert r.readiness_ok is None
-
-
-class TestReadyState:
-    def _mock_ready(self):
-        import app.services.preflight as pf
-        s = _make_settings(use_azure_di=True,
-                           azure_di_endpoint="https://x.cognitiveservices.azure.com",
-                           azure_di_key="k")
-        with mock.patch.object(pf, "_readiness_check", return_value=(True, "")):
-            with mock.patch.object(pf, "settings", s):
-                return pf.run_preflight_checks(skip_readiness_check=False)
-
-    def test_ready_state_on_200(self):
+    def test_configured_state_skip_false(self):
+        """skip_readiness_check=False is a no-op; still CONFIGURED, no network call."""
         from app.services.preflight import AzureDiReadinessState, ExtractionBackend
-        r = self._mock_ready()
-        assert r.readiness_state  == AzureDiReadinessState.READY
+        r = _run(self._valid_settings(), skip=False)
+        assert r.readiness_state  == AzureDiReadinessState.CONFIGURED
         assert r.selected_backend == ExtractionBackend.AZURE_DI
-        assert r.readiness_ok     is True
 
-    def test_ready_note_says_ready(self):
-        r = self._mock_ready()
-        assert "ready" in r.notes.lower()
+    def test_readiness_ok_always_none(self):
+        """No network call is made — readiness_ok is always None."""
+        r = _run(self._valid_settings(), skip=True)
+        assert r.readiness_ok is None
+        r2 = _run(self._valid_settings(), skip=False)
+        assert r2.readiness_ok is None
 
-
-class TestReadinessFailures:
-    def _fail(self, reason):
-        import app.services.preflight as pf
-        s = _make_settings(use_azure_di=True,
-                           azure_di_endpoint="https://x.cognitiveservices.azure.com",
-                           azure_di_key="k")
-        with mock.patch.object(pf, "_readiness_check", return_value=(False, reason)):
-            with mock.patch.object(pf, "settings", s):
-                return pf.run_preflight_checks(skip_readiness_check=False)
-
-    def test_401_fallback(self):
-        from app.services.preflight import ExtractionBackend, AzureDiReadinessState
-        r = self._fail("auth failed (HTTP 401)")
-        assert r.selected_backend == ExtractionBackend.FALLBACK_NON_AZURE
-        assert r.readiness_state  == AzureDiReadinessState.NOT_READY
-        assert r.readiness_ok     is False
-
-    def test_403_fallback(self):
-        from app.services.preflight import ExtractionBackend
-        r = self._fail("auth failed (HTTP 403)")
-        assert r.selected_backend == ExtractionBackend.FALLBACK_NON_AZURE
-
-    def test_timeout_fallback(self):
-        from app.services.preflight import ExtractionBackend
-        r = self._fail("timed out after 5s")
-        assert r.selected_backend == ExtractionBackend.FALLBACK_NON_AZURE
-
-    def test_dns_fallback(self):
-        from app.services.preflight import ExtractionBackend
-        r = self._fail("network error: Name resolution failed")
-        assert r.selected_backend == ExtractionBackend.FALLBACK_NON_AZURE
-
-    def test_not_ready_note_no_available(self):
-        r = self._fail("timeout")
+    def test_note_does_not_say_available(self):
+        r = _run(self._valid_settings())
         assert "available" not in r.notes.lower()
-        assert "not ready" in r.notes.lower() or "fallback" in r.notes.lower()
+
+    def test_note_says_configured_or_attempting(self):
+        r = _run(self._valid_settings())
+        assert "configured" in r.notes.lower() or "attempting" in r.notes.lower()
 
 
-class TestGetNotHead:
-    def test_uses_get_not_head(self):
+# ---------------------------------------------------------------------------
+class TestNoNetworkPreflight:
+    """Verify the network ping function has been fully removed."""
+
+    def test_no_readiness_check_function(self):
+        """_readiness_check must not exist in the new preflight module."""
+        import app.services.preflight as pf
+        assert not hasattr(pf, "_readiness_check"), (
+            "_readiness_check still exists — the network ping was not removed"
+        )
+
+    def test_no_urllib_import(self):
         pf_src = _src("app/services/preflight.py")
-        fn = pf_src[pf_src.find("def _readiness_check"):
-                    pf_src.find("\ndef run_preflight_checks")]
-        assert 'method="GET"' in fn,   "_readiness_check must use GET"
-        assert 'method="HEAD"' not in fn, "_readiness_check must NOT use HEAD"
+        assert "urllib.request" not in pf_src, (
+            "urllib.request found in preflight — network code was not removed"
+        )
 
-    def test_401_returns_false_in_code(self):
+    def test_no_ready_state_in_enum(self):
+        """READY enum value should no longer exist."""
+        from app.services.preflight import AzureDiReadinessState
+        assert not hasattr(AzureDiReadinessState, "READY"), (
+            "READY state still exists — remove it; CONFIGURED is the proceed state"
+        )
+
+    def test_no_false_404_message(self):
+        """The misleading 'endpoint not found (HTTP 404)' string must not appear."""
         pf_src = _src("app/services/preflight.py")
-        fn = pf_src[pf_src.find("def _readiness_check"):
-                    pf_src.find("\ndef run_preflight_checks")]
-        idx = fn.find("401")
-        assert idx > 0
-        assert "False" in fn[idx:idx+120]
-
-    def test_403_returns_false_in_code(self):
-        pf_src = _src("app/services/preflight.py")
-        fn = pf_src[pf_src.find("def _readiness_check"):
-                    pf_src.find("\ndef run_preflight_checks")]
-        idx = fn.find("403")
-        assert idx > 0
-        assert "False" in fn[idx:idx+120]
-
-    def test_reads_minimal_body(self):
-        pf_src = _src("app/services/preflight.py")
-        fn = pf_src[pf_src.find("def _readiness_check"):
-                    pf_src.find("\ndef run_preflight_checks")]
-        assert "resp.read(" in fn, "Must read response body to close socket cleanly"
+        assert "readiness check FAILED" not in pf_src
+        assert "endpoint not found (HTTP 404)" not in pf_src
 
 
+# ---------------------------------------------------------------------------
 class TestSecretSafety:
     def test_key_not_in_notes(self):
         import app.services.preflight as pf
         secret = "super-secret-key-xyz789"
-        s = _make_settings(use_azure_di=True,
-                           azure_di_endpoint="https://x.cognitiveservices.azure.com",
-                           azure_di_key=secret)
-        with mock.patch.object(pf, "_readiness_check", return_value=(False, "timeout")):
-            with mock.patch.object(pf, "settings", s):
-                r = pf.run_preflight_checks(skip_readiness_check=False)
+        s = _make_settings(
+            use_azure_di=True,
+            azure_di_endpoint="https://x.cognitiveservices.azure.com",
+            azure_di_key=secret,
+        )
+        with mock.patch.object(pf, "settings", s):
+            r = pf.run_preflight_checks()
         assert secret not in r.notes
         assert secret not in (r.failure_reason or "")
 
     def test_key_not_formatted_in_log_strings(self):
         pf_src = _src("app/services/preflight.py")
         fn = pf_src[pf_src.find("def run_preflight_checks"):]
-        before_check = fn[:fn.find("_readiness_check(")]
         import re
-        matches = re.findall(r'\{key\b|%[sr].*\bkey\b', before_check)
+        matches = re.findall(r'\{key\b|%[sr].*\bkey\b', fn)
         assert not matches, "key value must not appear in log format strings"
 
 
+# ---------------------------------------------------------------------------
 class TestPerPageTimeout:
     def test_poller_wrapped_with_timeout(self):
         ext_src = _src("app/services/extractor.py")
@@ -263,6 +229,44 @@ class TestPerPageTimeout:
         assert "azure_di_page_timeout_s" in _src("app/services/extractor.py")
 
 
+# ---------------------------------------------------------------------------
+class TestExtractorErrorMessages:
+    """Verify extractor.py classifies real DI failures accurately."""
+
+    def _fn(self):
+        src = _src("app/services/extractor.py")
+        fn_s = src.find("def azure_di_extract_invoice(")
+        fn_e = src.find("\n\ndef openai_extract_invoice_fields", fn_s)
+        return src[fn_s:fn_e]
+
+    def test_401_classified(self):
+        fn = self._fn()
+        assert "401" in fn
+        assert "authentication" in fn.lower() or "Unauthorized" in fn
+
+    def test_403_classified(self):
+        fn = self._fn()
+        assert "403" in fn
+        assert "authoris" in fn.lower() or "Forbidden" in fn or "VNet" in fn
+
+    def test_404_classified(self):
+        fn = self._fn()
+        assert "404" in fn
+
+    def test_429_classified(self):
+        fn = self._fn()
+        assert "429" in fn
+
+    def test_permanent_errors_open_circuit_breaker(self):
+        fn = self._fn()
+        # Permanent path must assign _azure_di_error
+        perm_idx = fn.find("is_permanent = True")
+        assert perm_idx > 0
+        after = fn[perm_idx:]
+        assert "_azure_di_error = " in after
+
+
+# ---------------------------------------------------------------------------
 class TestBatchIntegration:
     def _fn(self):
         src = _src("app/routers/batches.py")
@@ -285,15 +289,16 @@ class TestBatchIntegration:
         assert "_reset_azure_di_error" in self._fn()
 
 
+# ---------------------------------------------------------------------------
 class TestNoteTextContract:
     def test_disabled_says_disabled(self):
         r = _run(_make_settings(use_azure_di=False))
         assert "disabled" in r.notes.lower()
         assert "available" not in r.notes.lower()
 
-    def test_not_ready_says_not_ready_or_fallback(self):
+    def test_not_ready_says_fallback(self):
         r = _run(_make_settings(use_azure_di=True, azure_di_key="k"))
-        assert "fallback" in r.notes.lower() or "not ready" in r.notes.lower()
+        assert "fallback" in r.notes.lower() or "not configured" in r.notes.lower()
         assert "available" not in r.notes.lower()
 
     def test_configured_says_configured_not_available(self):
@@ -303,19 +308,10 @@ class TestNoteTextContract:
             azure_di_key="k",
         ), skip=True)
         assert "available" not in r.notes.lower()
-        assert "configured" in r.notes.lower() or "unverified" in r.notes.lower()
-
-    def test_ready_says_ready(self):
-        import app.services.preflight as pf
-        s = _make_settings(use_azure_di=True,
-                           azure_di_endpoint="https://x.cognitiveservices.azure.com",
-                           azure_di_key="k")
-        with mock.patch.object(pf, "_readiness_check", return_value=(True, "")):
-            with mock.patch.object(pf, "settings", s):
-                r = pf.run_preflight_checks(skip_readiness_check=False)
-        assert "ready" in r.notes.lower()
+        assert "configured" in r.notes.lower() or "attempting" in r.notes.lower()
 
 
+# ---------------------------------------------------------------------------
 class TestStableLogic:
     def test_bcrs_unchanged(self):
         src = _src("app/routers/batches.py")

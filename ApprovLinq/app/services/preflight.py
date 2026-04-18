@@ -1,58 +1,52 @@
 """
 app/services/preflight.py
 ─────────────────────────
-Real Azure DI readiness check before batch processing starts.
+Azure DI configuration check before batch processing starts.
 
-Problem with the previous implementation
-──────────────────────────────────────────
-The previous preflight only verified that USE_AZURE_DI=true, an endpoint was
-present, and a key was present.  It skipped the connectivity ping by default,
-so it always reported "Azure DI available" even when Azure DI was unreachable
-or the key was invalid.  The note was therefore misleading.
+Change from previous version
+─────────────────────────────
+The previous implementation performed a standalone network readiness ping
+(HTTP GET /documentModels) before any real extraction.  When that ping
+returned HTTP 404 — which can happen legitimately with certain Azure DI
+endpoint configurations while real extraction still works — the batch was
+incorrectly forced onto the fallback path and a misleading
+a misleading readiness-check-failed error
+message was emitted.
 
-This version
-────────────
-Introduces four explicit states:
+This version removes the network preflight entirely.  The actual Azure DI
+extraction call in extractor.py is the authoritative source of truth for
+availability.  The per-page circuit-breaker already handles real failures
+precisely and logs accurate HTTP status codes from the real extraction
+response.
 
-  AZURE_DI_DISABLED     — USE_AZURE_DI flag is off.  Fallback used.
-  AZURE_DI_CONFIGURED   — Flag on and credentials present but readiness
-                          check was deliberately skipped (test / offline mode).
-                          Azure DI path is used with the existing per-page
-                          circuit-breaker as the safety net.
-  AZURE_DI_READY        — Readiness check passed: a real authenticated GET
-                          against /documentModels returned HTTP 2xx.
-                          Azure DI path is used.
-  AZURE_DI_NOT_READY    — Readiness check ran but failed (auth error, timeout,
-                          DNS failure, unexpected HTTP status).
-                          Fallback path is used immediately.
+States
+──────
+  AZURE_DI_DISABLED    — USE_AZURE_DI flag is off.
+  AZURE_DI_CONFIGURED  — Flag on and credentials/endpoint present.
+                         Azure DI will be attempted; the per-page
+                         circuit-breaker in extractor.py catches real
+                         failures and falls back accordingly.
+  AZURE_DI_NOT_READY   — Config-level problem only (missing/invalid
+                         endpoint or key) — Azure DI cannot be attempted
+                         without valid credentials.
 
 Decision rule
 ─────────────
-  AZURE_DI_READY      → ExtractionBackend.AZURE_DI
-  AZURE_DI_CONFIGURED → ExtractionBackend.AZURE_DI   (circuit-breaker catches failures)
+  AZURE_DI_CONFIGURED → ExtractionBackend.AZURE_DI
   AZURE_DI_NOT_READY  → ExtractionBackend.FALLBACK_NON_AZURE
   AZURE_DI_DISABLED   → ExtractionBackend.FALLBACK_NON_AZURE
 
-Readiness check details
-───────────────────────
-• HTTP GET  /documentModels?api-version=2024-11-30
-  (not HEAD — Azure DI returns 405 on HEAD, which would be a false positive)
-• Ocp-Apim-Subscription-Key: <key>  header
-• Timeout: 5 s (configurable via AZURE_DI_PREFLIGHT_TIMEOUT env var)
-• Reads only the status code; response body is discarded immediately
-• 200 → ready
-• 401 / 403 → auth failure → NOT_READY
-• Other 4xx/5xx → NOT_READY
-• Network / timeout → NOT_READY
+Error handling (real extraction, in extractor.py)
+──────────────────────────────────────────────────
+When the real Azure DI extraction call fails the extractor logs a precise
+reason based on the actual response status:
+  401/403 → authentication / authorisation / VNet denial
+  404     → endpoint or model route not found
+  429     → throttling / rate-limiting
+  5xx     → Azure service-side failure
+  timeout → connectivity / poller timeout
 
-Per-page timeout safeguard (in extractor.py)
-────────────────────────────────────────────
-azure_di_extract_invoice() wraps poller.result() with a thread-based timeout
-(AZURE_DI_PAGE_TIMEOUT_S, default 45 s).  If the poller does not complete
-within that window the call raises TimeoutError, which triggers the existing
-fallback chain (OpenAI vision → OpenAI text → rule-based).
-
-Never logs secrets.
+No network ping is performed here.  Never logs secrets.
 """
 from __future__ import annotations
 
@@ -72,11 +66,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class AzureDiReadinessState(str, Enum):
-    """Fine-grained Azure DI preflight outcome."""
+    """Configuration-level Azure DI check outcome (no network ping)."""
     DISABLED    = "disabled"       # USE_AZURE_DI=false
-    CONFIGURED  = "configured"     # credentials present; ping skipped
-    READY       = "ready"          # authenticated GET returned 200
-    NOT_READY   = "not_ready"      # check ran but failed
+    CONFIGURED  = "configured"     # credentials present; DI will be attempted
+    NOT_READY   = "not_ready"      # config-level problem (missing/invalid creds)
 
 
 class ExtractionBackend(str, Enum):
@@ -94,8 +87,8 @@ class PreflightResult:
     endpoint_present:   bool
     key_present:        bool
     endpoint_valid:     bool
-    readiness_ok:       Optional[bool]   # None = check was skipped
-    failure_reason:     Optional[str]    # human-readable on failure
+    readiness_ok:       Optional[bool]   # Always None — no network check
+    failure_reason:     Optional[str]    # human-readable on config failure
     notes:              str  = field(default="")
     duration_ms:        int  = field(default=0)
 
@@ -110,9 +103,6 @@ _ENDPOINT_RE = re.compile(
     r"(?:/[^\s]*)?$"
 )
 
-# Default per-call timeout for the readiness GET request (seconds).
-_READINESS_TIMEOUT_DEFAULT = 5.0
-
 
 def _check_endpoint_format(endpoint: str | None) -> bool:
     """Return True if the endpoint looks like a valid HTTPS URL."""
@@ -124,72 +114,25 @@ def _check_endpoint_format(endpoint: str | None) -> bool:
     return bool(_ENDPOINT_RE.match(ep))
 
 
-def _readiness_check(
-    endpoint: str,
-    key: str,
-    timeout: float = _READINESS_TIMEOUT_DEFAULT,
-) -> tuple[bool, str]:
-    """Perform a real authenticated GET against Azure DI /documentModels.
-
-    Uses GET (not HEAD) because Azure DI returns 405 on HEAD requests,
-    which would be a false-positive success on a misconfigured endpoint.
-
-    Returns (True, "") on success, (False, reason) on any failure.
-    Never raises.  Never logs the key value.
-    """
-    try:
-        import urllib.request
-        import urllib.error
-
-        url = endpoint.rstrip("/") + "/documentModels?api-version=2024-11-30"
-        logger.debug("preflight: readiness GET %s (timeout=%.1fs)", url, timeout)
-
-        req = urllib.request.Request(url, method="GET")
-        req.add_header("Ocp-Apim-Subscription-Key", key)
-        # Read and discard the body immediately; we only need the status code.
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                _ = resp.read(64)   # consume minimal bytes so the socket closes cleanly
-                status = resp.status
-        except urllib.error.HTTPError as exc:
-            status = exc.code
-
-        logger.debug("preflight: readiness check HTTP status=%d", status)
-
-        if status == 200:
-            return True, ""
-        if status in (401, 403):
-            return False, f"Azure DI authentication failed (HTTP {status}) — check AZURE_DI_KEY and VNet rules"
-        if status == 404:
-            return False, f"Azure DI endpoint not found (HTTP 404) — check AZURE_DI_ENDPOINT value"
-        return False, f"Azure DI readiness check returned unexpected HTTP {status}"
-
-    except TimeoutError:
-        return False, f"Azure DI readiness check timed out after {timeout:.0f}s"
-    except OSError as exc:
-        # socket.gaierror (DNS), ConnectionRefusedError, etc.
-        return False, f"Azure DI readiness check network error: {exc!s:.120}"
-    except Exception as exc:
-        return False, f"Azure DI readiness check failed: {exc!s:.120}"
-
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def run_preflight_checks(
     *,
-    skip_readiness_check: bool = False,
+    skip_readiness_check: bool = False,   # kept for API compatibility; ignored
 ) -> PreflightResult:
-    """Run the Azure DI preflight and return an ExtractionBackend decision.
+    """Check Azure DI configuration and return an ExtractionBackend decision.
+
+    No network request is made.  The actual extraction call in extractor.py
+    is the authoritative source of truth for Azure DI availability; its
+    per-page circuit-breaker handles real failures with accurate error messages.
 
     Parameters
     ──────────
     skip_readiness_check : bool
-        When True the network readiness check is skipped and the state becomes
-        AZURE_DI_CONFIGURED rather than AZURE_DI_READY/NOT_READY.
-        Use in unit tests or when operating in a network-restricted environment
-        where the per-page circuit-breaker is the fallback safety net.
+        Retained for backwards-compatibility with callers.  Ignored — the
+        network readiness check has been removed entirely.
 
     Returns
     ───────
@@ -204,7 +147,7 @@ def run_preflight_checks(
     endpoint_present = bool(endpoint)
     key_present      = bool(key)
     endpoint_valid   = _check_endpoint_format(endpoint) if endpoint_present else False
-    readiness_ok: Optional[bool] = None
+    readiness_ok: Optional[bool] = None   # no network check; always None
     failure_reason: Optional[str] = None
     readiness_state: AzureDiReadinessState
 
@@ -214,7 +157,7 @@ def run_preflight_checks(
         azure_di_enabled, endpoint_present, key_present, endpoint_valid,
     )
 
-    # ── Config-level checks (no network) ────────────────────────────────────
+    # ── Config-level checks only (no network) ───────────────────────────────
     if not azure_di_enabled:
         readiness_state = AzureDiReadinessState.DISABLED
         failure_reason  = "USE_AZURE_DI is disabled in configuration"
@@ -238,51 +181,29 @@ def run_preflight_checks(
         )
         logger.warning("preflight: %s → fallback", failure_reason)
 
-    elif skip_readiness_check:
-        # Credentials present and format valid but network check deliberately skipped.
-        # Report CONFIGURED — not READY — so the note is honest.
+    else:
+        # Credentials present and format valid.  Attempt Azure DI extraction.
+        # Real availability is determined by the first extraction call; any
+        # failure there will open the circuit-breaker with a precise reason.
         readiness_state = AzureDiReadinessState.CONFIGURED
         logger.info(
-            "preflight: Azure DI configured (readiness check skipped) — "
-            "using Azure DI with per-page circuit-breaker as safety net"
+            "preflight: Azure DI configured — will attempt extraction directly "
+            "(no network preflight; per-page circuit-breaker handles real failures)"
         )
 
-    else:
-        # ── Real network readiness check ─────────────────────────────────────
-        # Get timeout from environment/config if set (default 5 s).
-        _timeout = float(getattr(settings, "azure_di_preflight_timeout", _READINESS_TIMEOUT_DEFAULT))
-        logger.info("preflight: running Azure DI readiness check (timeout=%.1fs)", _timeout)
-
-        ok, reason = _readiness_check(endpoint, key, timeout=_timeout)
-        readiness_ok = ok
-
-        if ok:
-            readiness_state = AzureDiReadinessState.READY
-            logger.info("preflight: Azure DI readiness check PASSED → azure_di backend selected")
-        else:
-            readiness_state = AzureDiReadinessState.NOT_READY
-            failure_reason  = reason
-            logger.warning(
-                "preflight: Azure DI readiness check FAILED — %s → fallback", reason
-            )
-
     # ── Backend selection ────────────────────────────────────────────────────
-    if readiness_state in (AzureDiReadinessState.READY, AzureDiReadinessState.CONFIGURED):
+    if readiness_state == AzureDiReadinessState.CONFIGURED:
         selected = ExtractionBackend.AZURE_DI
-        if readiness_state == AzureDiReadinessState.READY:
-            notes = "Preflight: Azure DI ready — using Azure Document Intelligence extraction"
-        else:
-            notes = (
-                "Preflight: Azure DI configured (readiness unverified) — "
-                "using Azure DI extraction with circuit-breaker fallback"
-            )
-        logger.info("preflight: selected backend=azure_di (state=%s)", readiness_state.value)
+        notes = (
+            "Preflight: Azure DI configured — attempting Azure Document Intelligence extraction"
+        )
+        logger.info("preflight: selected backend=azure_di (state=configured)")
     else:
         selected = ExtractionBackend.FALLBACK_NON_AZURE
         if readiness_state == AzureDiReadinessState.DISABLED:
             notes = "Preflight: Azure DI disabled — using fallback extraction"
         else:
-            notes = f"Preflight: Azure DI not ready — using fallback extraction ({failure_reason})"
+            notes = f"Preflight: Azure DI not configured — using fallback extraction ({failure_reason})"
         logger.info(
             "preflight: selected backend=fallback_non_azure (state=%s reason=%r)",
             readiness_state.value, failure_reason,

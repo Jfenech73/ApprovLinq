@@ -829,7 +829,10 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
 /* Override the inline style on .review-grid */
 .review-3col {
   display: grid;
-  grid-template-columns: 300px 1fr 380px;
+  /* Col 1 (Rows): 280px fixed — enough for row list without being cramped.
+     Col 2 (Edit): 300px fixed — narrower than before; fields are short.
+     Col 3 (Preview): 1fr — takes all remaining space so invoice is readable. */
+  grid-template-columns: 280px 300px 1fr;
   gap: 0;
   /* Use min-height so columns can grow beyond viewport, but don't trap scroll.
      On larger screens the sticky sidebar + topbar give a natural viewport feel.
@@ -875,6 +878,26 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
 
 /* Col 1 — rows list */
 .review-col-rows .review-col-body { padding: var(--ap-s-2); }
+
+/* Col 2 — edit panel: ensure long field values wrap cleanly */
+.review-col-edit .review-col-body {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+.review-col-edit .review-col-body input[type="text"],
+.review-col-edit .review-col-body input[type="number"],
+.review-col-edit .review-col-body select,
+.review-col-edit .review-col-body textarea {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+/* Labels in the edit panel wrap on narrow column */
+.review-col-edit label {
+  overflow-wrap: break-word;
+  word-break: break-word;
+  max-width: 100%;
+}
 
 /* Col 3 — remap + viewer */
 .review-col-remap .review-col-body {
@@ -928,7 +951,7 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
 /* Responsive: stack columns on narrow screens */
 @media (max-width: 1100px) {
   .review-3col {
-    grid-template-columns: 260px 1fr 340px;
+    grid-template-columns: 240px 260px 1fr;
   }
 }
 @media (max-width: 900px) {
