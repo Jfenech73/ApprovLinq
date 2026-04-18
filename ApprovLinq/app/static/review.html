@@ -62,10 +62,31 @@
       <div class="review-col review-col-edit">
         <div class="review-col-head">
           <h2>Edit selected row</h2>
-          <button id="duplicateRowBtn" class="btn btn-sm" type="button"
-                  title="Create a duplicate of this row for manual BCRS/deposit entry">
-            Duplicate Row
-          </button>
+          <div class="row gap-sm" style="flex-wrap:wrap">
+            <button id="duplicateRowBtn" class="btn btn-sm" type="button"
+                    title="Create a blank duplicate of this row for manual BCRS/deposit entry">
+              Duplicate Row
+            </button>
+            <button id="bcrsSplitBtn" class="btn btn-sm" type="button"
+                    title="Split a BCRS/deposit amount off this row into a separate BCRS row">
+              BCRS Split
+            </button>
+          </div>
+        </div>
+        <!-- BCRS split inline panel — hidden until button pressed -->
+        <div id="bcrsSplitPanel" class="bcrs-split-panel" hidden>
+          <p class="bcrs-split-desc">
+            Enter the BCRS/deposit amount to split off this row.<br>
+            A new BCRS row will be created and this row's total will be adjusted.
+          </p>
+          <div class="row gap-sm" style="align-items:center;flex-wrap:wrap">
+            <label for="bcrsSplitAmount" style="font-size:13px;white-space:nowrap">BCRS amount</label>
+            <input id="bcrsSplitAmount" type="number" min="0.01" step="0.01"
+                   placeholder="e.g. 2.40" style="width:110px" />
+            <button id="bcrsSplitConfirmBtn" class="btn btn-sm btn-primary" type="button">Apply split</button>
+            <button id="bcrsSplitCancelBtn" class="btn btn-sm" type="button">Cancel</button>
+          </div>
+          <div id="bcrsSplitMsg" style="font-size:12px;margin-top:6px"></div>
         </div>
         <div class="review-col-body">
           <div id="rowEditor" class="stack"></div>

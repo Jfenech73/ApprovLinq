@@ -590,11 +590,21 @@ def _is_vat_line(line: str) -> bool:
 
     These lines must never be selected as a BCRS candidate — they carry the
     VAT value, not the deposit/BCRS value.
+
+    Covers formats such as:
+      "VAT 18%  525.18"
+      "VAT Amount: 525.18"
+      "Tax Total 525.18"
+      "V.A.T. 525.18"
+    Uses re.search so a VAT label anywhere on the line triggers rejection.
     """
     low = (line or '').strip().lower()
-    return bool(re.match(
-        r"(?:v\.?a\.?t\.?|vat(?:\s+amount|\s+total)?|tax(?:\s+amount|\s+total)?|value\s+added\s+tax)"
-        r"\s*[:\-]?\s*(?:€\s*)?[\d.,]",
+    # Hard-reject any line that starts with or prominently contains a VAT/tax label
+    return bool(re.search(
+        r"(?:^|\s)"
+        r"(?:v\.?a\.?t\.?|vat(?:\s+\d+\s*%)?(?:\s+amount|\s+total|\s+amt)?|"
+        r"tax(?:\s+amount|\s+total|\s+amt)?|value\s+added\s+tax)"
+        r"(?:\s*[%:\-]|\s+\d|\s*$)",
         low,
     ))
 
@@ -643,14 +653,27 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     # A split requires confirmed label+region evidence (see below).
 
     total_amount = _parse_first_money(payload.get('total_amount'))
-    net_amount = _parse_first_money(payload.get('net_amount'))
-    vat_amount = _parse_first_money(payload.get('vat_amount'))
+    net_amount   = _parse_first_money(payload.get('net_amount'))
+    vat_amount   = _parse_first_money(payload.get('vat_amount'))
 
     lines = _collect_summary_region_lines(payload)
     if not lines:
         return None
 
-    label_re = re.compile(r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit|deposit|surcharge)\b", re.I)
+    # Accepted BCRS/deposit labels only.  "surcharge" alone is intentionally
+    # excluded — it is too generic and fires on delivery/fuel surcharges.
+    label_re = re.compile(
+        r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit|deposit)\b",
+        re.I,
+    )
+    # Rejected contexts: any line whose primary identity is a VAT/tax field.
+    # Used as an extra guard in the context-window check of Pass 1.
+    _VAT_CTX_RE = re.compile(
+        r"\b(vat(?:\s+\d+\s*%)?(?:\s+amount|\s+total|\s+amt)?|"
+        r"tax(?:\s+amount|\s+total|\s+amt)?|v\.?a\.?t\.?|value\s+added\s+tax)\b",
+        re.I,
+    )
+
     summary_text = "\n".join(lines)
     ranked: list[tuple[int, float]] = []
 
@@ -662,6 +685,11 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
         except Exception:
             return
         if f <= 0:
+            return
+        # Hard guard: never accept a value that equals the known VAT amount.
+        # This prevents a VAT figure from being promoted as a BCRS candidate
+        # even when it appears near a deposit label in the summary region.
+        if vat_amount is not None and abs(f - vat_amount) < 0.02:
             return
         ranked.append((score, f))
 
@@ -694,16 +722,21 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
 
             label_span = summary_text[max(0, match.start()-40):min(len(summary_text), match.end()+40)].lower()
             if pidx == 2:
-                # Plain "deposit" pattern: accept when the surrounding context contains
-                # known summary/totals keywords OR when the matched line itself is in a
-                # summary context (catches "Deposit Summary" laid out as separate lines).
+                # Plain "deposit" pattern: accept only when the surrounding context
+                # explicitly confirms BCRS/deposit context.  Reject if the context
+                # window is dominated by VAT/tax keywords (e.g. "VAT 18% 525.18"
+                # appearing between deposit column headers and the total line).
                 has_context_window = (
                     'bcrs' in label_span
                     or 'summary' in label_span
-                    or 'total' in label_span
                     or 'refundable' in label_span
                 )
-                has_summary_line = _is_summary_context(match_line)
+                # "total" alone is no longer sufficient — a VAT summary line also
+                # appears near "Total" and that caused false picks.  Only allow
+                # "total" in the context window when there is no VAT keyword nearby.
+                if not has_context_window and 'total' in label_span:
+                    has_context_window = not bool(_VAT_CTX_RE.search(label_span))
+                has_summary_line = _is_summary_context(match_line) and not _is_vat_line(match_line)
                 if not has_context_window and not has_summary_line:
                     continue
             raw = match.group(1)
@@ -738,19 +771,28 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
         if _is_vat_line(line):
             continue
 
-        plain_deposit_only = ('deposit' in low and 'bcrs' not in low and 'refundable' not in low and 'surcharge' not in low)
+        plain_deposit_only = ('deposit' in low and 'bcrs' not in low and 'refundable' not in low)
         neighborhood = ' '.join(lines[max(0, idx - 1): min(len(lines), idx + 2)]).lower()
         if plain_deposit_only:
             # Build a list of neighbouring lines that are themselves summary context
-            # (not body/item lines). This prevents the "Total" column header in an
-            # item table from acting as a false summary signal.
+            # (not body/item lines, and not VAT/tax lines). This prevents the "Total"
+            # column header in an item table acting as a false summary signal, and
+            # prevents a VAT line from acting as a confirming summary neighbour.
             summary_neighbours = [
                 lines[nidx] for nidx in range(max(0, idx - 1), min(len(lines), idx + 2))
-                if nidx != idx and _is_summary_context(lines[nidx]) and not _is_body_or_item_context(lines[nidx])
+                if nidx != idx
+                and _is_summary_context(lines[nidx])
+                and not _is_body_or_item_context(lines[nidx])
+                and not _is_vat_line(lines[nidx])
             ]
             has_summary_neighbour = bool(summary_neighbours)
             has_bcrs_nearby = 'bcrs' in neighborhood
             has_summary_keyword = 'summary' in neighborhood
+            # Reject if the only nearby keyword is a VAT/tax term — that means the
+            # deposit label is in a line-items column header, not a summary block.
+            only_vat_nearby = bool(_VAT_CTX_RE.search(neighborhood)) and not has_bcrs_nearby and not has_summary_keyword
+            if only_vat_nearby:
+                continue
             if not (_is_summary_context(line) or has_bcrs_nearby or has_summary_keyword or has_summary_neighbour):
                 continue
 
@@ -832,20 +874,23 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     )
     _DEPOSIT_LABEL_RE = re.compile(
         r'\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit'
-        r'|deposit\s+summary|deposit\s+surcharge|returnable(?:\s+deposit)?'
-        r'|surcharge|deposit)\b',
+        r'|deposit\s+summary|returnable(?:\s+deposit)?|deposit)\b',
         re.I,
     )
     has_label_line = False
     for ln in lines:
         if _DEPOSIT_LABEL_RE.search(ln.lower()):
+            # A VAT/tax line is never a confirming deposit label — even if the word
+            # "deposit" appears in it (e.g. OCR artefact merging two lines).
+            if _is_vat_line(ln):
+                continue
             if not _TOTALS_ONLY_RE.match(ln):
                 if _parse_money_candidates(ln):
                     has_label_line = True
                     break
                 idx = lines.index(ln)
                 for nidx in range(max(0, idx - 1), min(len(lines), idx + 2)):
-                    if nidx != idx and _parse_money_candidates(lines[nidx]):
+                    if nidx != idx and _parse_money_candidates(lines[nidx]) and not _is_vat_line(lines[nidx]):
                         has_label_line = True
                         break
         if has_label_line:

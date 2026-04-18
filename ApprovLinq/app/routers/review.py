@@ -252,6 +252,130 @@ def duplicate_row(batch_id: UUID, row_id: int,
     }
 
 
+class BcrsSplitIn(BaseModel):
+    bcrs_amount: float
+
+
+@router.post("/batches/{batch_id}/rows/{row_id}/bcrs_split")
+def bcrs_split(batch_id: UUID, row_id: int, payload: BcrsSplitIn,
+               db: Session = Depends(get_db), user=Depends(current_user)):
+    """Create a BCRS split from the reviewer-supplied amount.
+
+    This is the manual-correction path for cases where auto-detection missed or
+    incorrectly picked the BCRS amount.
+
+    What happens:
+    - Validates bcrs_amount is positive and less than the row total.
+    - Creates a new BCRS row:  net=bcrs_amount, vat=0, total=bcrs_amount.
+    - Adjusts the source row total down by bcrs_amount (net+vat remains, total
+      is corrected to net+vat so it reconciles without the BCRS component).
+    - Marks both rows is_corrected=True and review_required=False.
+    - Writes audit entries on both rows.
+    """
+    batch = _get_batch(db, batch_id)
+    row = db.get(M.InvoiceRow, row_id)
+    if not row or row.batch_id != batch.id:
+        raise HTTPException(404, "Row not found in batch")
+
+    amount = round(float(payload.bcrs_amount), 2)
+    if amount <= 0:
+        raise HTTPException(400, "bcrs_amount must be positive")
+    row_total = round(float(row.total_amount or 0), 2)
+    if row_total > 0 and amount >= row_total:
+        raise HTTPException(400, "bcrs_amount must be less than the row total")
+
+    from app.db.review_models import InvoiceRowFieldAudit, InvoiceRowCorrection
+
+    # ── Build the BCRS row ───────────────────────────────────────────────────
+    desc = (row.description or "").strip()
+    bcrs_desc = f"{desc} - BCRS" if desc and "bcrs" not in desc.lower() else (desc or "BCRS")
+    bcrs_row = M.InvoiceRow(
+        batch_id=row.batch_id,
+        tenant_id=row.tenant_id,
+        company_id=row.company_id,
+        source_file_id=row.source_file_id,
+        source_filename=row.source_filename,
+        page_no=row.page_no,
+        supplier_name=row.supplier_name,
+        supplier_posting_account=row.supplier_posting_account,
+        nominal_account_code=row.nominal_account_code,
+        invoice_number=row.invoice_number,
+        invoice_date=row.invoice_date,
+        description=bcrs_desc,
+        line_items_raw="BCRS surcharge",
+        net_amount=amount,
+        vat_amount=0.0,
+        total_amount=amount,
+        currency=row.currency,
+        tax_code=row.tax_code,
+        method_used=(row.method_used or "") + "+bcrs_manual",
+        confidence_score=row.confidence_score,
+        validation_status="manual",
+        review_required=False,
+        review_priority=None,
+        review_reasons="manual_bcrs_split",
+        review_fields=None,
+        auto_approved=False,
+        page_quality_score=row.page_quality_score,
+        totals_raw=row.totals_raw,
+        page_text_raw=row.page_text_raw,
+        header_raw=row.header_raw,
+    )
+    db.add(bcrs_row)
+    db.flush()  # get bcrs_row.id
+
+    # ── Adjust the source row total ──────────────────────────────────────────
+    net = round(float(row.net_amount or 0), 2)
+    vat = round(float(row.vat_amount or 0), 2)
+    corrected_total = round(net + vat, 2)
+    old_total = row_total
+    row.total_amount = corrected_total
+    row.review_required = False
+    row.review_priority = None
+
+    # Record a correction entry for the source row total adjustment
+    db.add(InvoiceRowCorrection(
+        batch_id=batch.id,
+        row_id=row.id,
+        field_name="total_amount",
+        original_value=str(old_total),
+        corrected_value=str(corrected_total),
+        correction_source="manual_bcrs_split",
+        user_id=user.id,
+        username=getattr(user, "email", None) or str(user.id),
+    ))
+
+    # ── Audit entries ────────────────────────────────────────────────────────
+    uname = getattr(user, "email", None) or str(user.id)
+    db.add(InvoiceRowFieldAudit(
+        batch_id=batch.id, row_id=row.id,
+        field_name="_action",
+        old_value=str(old_total),
+        new_value=f"bcrs_split → row {bcrs_row.id} (amount={amount:.2f})",
+        action="bcrs_split_source",
+        note=f"Manual BCRS split: {amount:.2f} moved to new row {bcrs_row.id}",
+        user_id=user.id, username=uname,
+    ))
+    db.add(InvoiceRowFieldAudit(
+        batch_id=batch.id, row_id=bcrs_row.id,
+        field_name="_action",
+        old_value=None,
+        new_value=f"bcrs_split ← row {row.id} (amount={amount:.2f})",
+        action="bcrs_split_created",
+        note=f"BCRS row created by manual split from row {row.id}",
+        user_id=user.id, username=uname,
+    ))
+    db.commit()
+
+    return {
+        "bcrs_row_id":   bcrs_row.id,
+        "original_id":   row.id,
+        "bcrs_amount":   amount,
+        "adjusted_total": corrected_total,
+        "message": f"BCRS split applied: BCRS row {bcrs_row.id} created for {amount:.2f}; source row total adjusted to {corrected_total:.2f}.",
+    }
+
+
 @router.post("/batches/{batch_id}/rows/{row_id}/revert/{field}")
 def revert(batch_id: UUID, row_id: int, field: str,
            db: Session = Depends(get_db), user=Depends(current_user)):

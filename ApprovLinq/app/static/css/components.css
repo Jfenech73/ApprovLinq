@@ -923,6 +923,35 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
   display: block;
 }
 
+/* BCRS split inline panel (col 2, below header) */
+.bcrs-split-panel {
+  flex-shrink: 0;
+  padding: var(--ap-s-3) var(--ap-s-4);
+  background: #fffbeb;
+  border-bottom: 1px solid #fde68a;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ap-s-2);
+}
+html[data-theme="dark"] .bcrs-split-panel {
+  background: #292318;
+  border-bottom-color: #78350f;
+}
+.bcrs-split-desc {
+  margin: 0;
+  font-size: var(--ap-fs-12);
+  color: var(--ap-text-muted);
+  line-height: 1.4;
+}
+.bcrs-split-panel input[type="number"] {
+  padding: 4px 8px;
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-sm);
+  font-size: var(--ap-fs-13);
+  background: var(--ap-bg-surface);
+  color: var(--ap-text);
+}
+
 /* Remap controls group */
 .remap-controls {
   display: flex;

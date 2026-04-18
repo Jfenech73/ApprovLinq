@@ -416,6 +416,69 @@ $("duplicateRowBtn").onclick = async () => {
   } catch (e) { msg(String(e), "error"); }
 };
 
+// ── BCRS split ────────────────────────────────────────────────────────────────
+// Shows an inline panel where the reviewer types the BCRS amount, then
+// POSTs to /bcrs_split which creates the BCRS row and adjusts the source total.
+const bcrsSplitPanel  = $("bcrsSplitPanel");
+const bcrsSplitAmount = $("bcrsSplitAmount");
+const bcrsSplitMsg    = $("bcrsSplitMsg");
+
+function _hideBcrsSplitPanel() {
+  bcrsSplitPanel.hidden = true;
+  bcrsSplitAmount.value = "";
+  bcrsSplitMsg.textContent = "";
+}
+
+$("bcrsSplitBtn").onclick = () => {
+  if (state.selected == null) { msg("Select a row first.", "error"); return; }
+  bcrsSplitPanel.hidden = !bcrsSplitPanel.hidden;
+  if (!bcrsSplitPanel.hidden) {
+    bcrsSplitMsg.textContent = "";
+    bcrsSplitAmount.focus();
+  }
+};
+
+$("bcrsSplitCancelBtn").onclick = _hideBcrsSplitPanel;
+
+$("bcrsSplitConfirmBtn").onclick = async () => {
+  const raw = parseFloat(bcrsSplitAmount.value);
+  if (!raw || raw <= 0) {
+    bcrsSplitMsg.textContent = "Enter a positive amount.";
+    bcrsSplitMsg.style.color = "var(--ap-danger, #dc2626)";
+    return;
+  }
+  bcrsSplitMsg.textContent = "Applying…";
+  bcrsSplitMsg.style.color = "var(--ap-text-muted)";
+  try {
+    const r = await fetch(`/review/batches/${batchId}/rows/${state.selected}/bcrs_split`, {
+      method: "POST",
+      headers: { ...hdrs(), "Content-Type": "application/json" },
+      body: JSON.stringify({ bcrs_amount: raw }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      bcrsSplitMsg.textContent = data.detail || "Error applying split.";
+      bcrsSplitMsg.style.color = "var(--ap-danger, #dc2626)";
+      return;
+    }
+    _hideBcrsSplitPanel();
+    msg(`BCRS split applied: BCRS row ${data.bcrs_row_id} created for ${raw.toFixed(2)}. Source row total adjusted to ${data.adjusted_total.toFixed(2)}.`, "success");
+    await load();
+    // Select the new BCRS row so reviewer can inspect it immediately
+    const bcrsRow = state.rows.find(x => x.id === data.bcrs_row_id);
+    if (bcrsRow) {
+      state.selected = bcrsRow.id;
+      state.fileId   = bcrsRow.source_file_id;
+      state.page     = bcrsRow.page_no || 1;
+      render();
+      loadAudit(bcrsRow.id);
+    }
+  } catch (e) {
+    bcrsSplitMsg.textContent = String(e);
+    bcrsSplitMsg.style.color = "var(--ap-danger, #dc2626)";
+  }
+};
+
 $("reopenBtn").onclick = async () => {
   const r = await fetch(`/review/batches/${batchId}/reopen`, { method: "POST", headers: hdrs() });
   if (!r.ok) msg(await r.text(), "error"); else load();
