@@ -832,7 +832,7 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
   /* Col 1 (Rows): 280px fixed — enough for row list without being cramped.
      Col 2 (Edit): 300px fixed — narrower than before; fields are short.
      Col 3 (Preview): 1fr — takes all remaining space so invoice is readable. */
-  grid-template-columns: 280px 300px 1fr;
+  grid-template-columns: 420px 450px 1fr;
   gap: 0;
   /* Use min-height so columns can grow beyond viewport, but don't trap scroll.
      On larger screens the sticky sidebar + topbar give a natural viewport feel.
@@ -951,7 +951,7 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
 /* Responsive: stack columns on narrow screens */
 @media (max-width: 1100px) {
   .review-3col {
-    grid-template-columns: 240px 260px 1fr;
+    grid-template-columns: 360px 390px 1fr;
   }
 }
 @media (max-width: 900px) {
