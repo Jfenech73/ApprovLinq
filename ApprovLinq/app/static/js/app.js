@@ -134,6 +134,9 @@ async function selectBatch(batchId, options = {}) {
   state.selectedBatchId = batchId;
   const batch = await api(`/batches/${batchId}`);
 
+  // Clear any stale action messages when the user selects a different batch
+  if (!options.preservePolling) setInlineMessage($("actionMessage"), "");
+
   $("selectedBatchEmpty").classList.add("hidden");
   $("selectedBatchPanel").classList.remove("hidden");
   $("selectedBatchId").textContent = batch.id;
@@ -251,6 +254,8 @@ function startProgressPolling() {
     applyReviewStates(progress.files || []);
     if (progress.status !== "processing") {
       stopProgressPolling();
+      // Clear the stale "Batch processing started." banner now that processing is done
+      setInlineMessage($("actionMessage"), "");
       await selectBatch(state.selectedBatchId, { preservePolling: true });
       await loadBatches();
       // After processing ends, re-fetch once more so the UI reflects final
@@ -428,7 +433,13 @@ $("processBtn").addEventListener("click", async () => {
   setInlineMessage(message, "Starting processing...");
   try {
     await api(`/batches/${state.selectedBatchId}/process`, { method: "POST" });
-    setInlineMessage(message, "Batch processing started.", "success");
+    // Show briefly, then clear — the progress poller updates status/notes directly
+    setInlineMessage(message, "Processing started — monitoring progress…", "success");
+    setTimeout(() => {
+      if (message.textContent === "Processing started — monitoring progress…") {
+        setInlineMessage(message, "");
+      }
+    }, 3500);
     await selectBatch(state.selectedBatchId);
     await loadBatches();
     startProgressPolling();
@@ -446,16 +457,28 @@ $("exportBtn").addEventListener("click", async () => {
 
   setInlineMessage(message, "Preparing export...");
   try {
-    const response = await api(`/batches/${state.selectedBatchId}/export`);
+    // Use fetch directly (not api()) so we can read response headers for the
+    // Content-Disposition filename — matches the Review page export behavior.
+    const token = typeof getToken === "function" ? getToken() : null;
+    const headers = token ? { "Authorization": `Bearer ${token}` } : {};
+    const response = await fetch(`/batches/${state.selectedBatchId}/export`, { headers });
+    if (!response.ok) {
+      const text = await response.text();
+      setInlineMessage(message, normalizeUiErrorMessage(text), "server-error");
+      return;
+    }
     const blob = await response.blob();
+    const cd = response.headers.get("Content-Disposition") || "";
+    const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+    const filename = m ? decodeURIComponent(m[1]) : `batch_${state.selectedBatchId}.xlsx`;
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `batch_${state.selectedBatchId}.xlsx`;
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     link.remove();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
     setInlineMessage(message, "Export downloaded.", "success");
   } catch (error) {
     setInlineMessage(message, normalizeUiErrorMessage(error.message), "server-error");
