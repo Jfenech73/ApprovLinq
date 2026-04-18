@@ -455,9 +455,12 @@ $("bcrsSplitConfirmBtn").onclick = async () => {
       headers: { ...hdrs(), "Content-Type": "application/json" },
       body: JSON.stringify({ bcrs_amount: raw }),
     });
-    const data = await r.json();
+    // Parse body safely — server always returns JSON, but guard against edge cases
+    let data;
+    try { data = await r.json(); } catch { data = {}; }
     if (!r.ok) {
-      bcrsSplitMsg.textContent = data.detail || "Error applying split.";
+      const errMsg = (data && (data.detail || data.message)) || `Server error (${r.status})`;
+      bcrsSplitMsg.textContent = errMsg;
       bcrsSplitMsg.style.color = "var(--ap-danger, #dc2626)";
       return;
     }
@@ -474,8 +477,9 @@ $("bcrsSplitConfirmBtn").onclick = async () => {
       loadAudit(bcrsRow.id);
     }
   } catch (e) {
-    bcrsSplitMsg.textContent = String(e);
+    bcrsSplitMsg.textContent = "Unexpected error — check the browser console.";
     bcrsSplitMsg.style.color = "var(--ap-danger, #dc2626)";
+    console.error("BCRS split error:", e);
   }
 };
 
