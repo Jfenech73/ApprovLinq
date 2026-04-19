@@ -134,7 +134,7 @@ async function selectBatch(batchId, options = {}) {
   state.selectedBatchId = batchId;
   const batch = await api(`/batches/${batchId}`);
 
-  // Clear any stale action message when selecting a different batch
+  // Clear any stale action messages when the user selects a different batch
   if (!options.preservePolling) setInlineMessage($("actionMessage"), "");
 
   $("selectedBatchEmpty").classList.add("hidden");
@@ -254,7 +254,7 @@ function startProgressPolling() {
     applyReviewStates(progress.files || []);
     if (progress.status !== "processing") {
       stopProgressPolling();
-      // Clear stale "processing started" banner now that processing is done
+      // Clear the stale "Batch processing started." banner now that processing is done
       setInlineMessage($("actionMessage"), "");
       await selectBatch(state.selectedBatchId, { preservePolling: true });
       await loadBatches();
@@ -433,7 +433,7 @@ $("processBtn").addEventListener("click", async () => {
   setInlineMessage(message, "Starting processing...");
   try {
     await api(`/batches/${state.selectedBatchId}/process`, { method: "POST" });
-    // Show briefly then clear — the poller updates status/notes directly
+    // Show briefly, then clear — the progress poller updates status/notes directly
     setInlineMessage(message, "Processing started — monitoring progress…", "success");
     setTimeout(() => {
       if (message.textContent === "Processing started — monitoring progress…") {
@@ -469,9 +469,8 @@ $("exportBtn").addEventListener("click", async () => {
     }
     const blob = await response.blob();
     const cd = response.headers.get("Content-Disposition") || "";
-    const m = /filename\*?=(?:UTF-8'')?"?([^";
-]+)"?/i.exec(cd);
-    const filename = m ? decodeURIComponent(m[1].trim()) : `batch_${state.selectedBatchId}.xlsx`;
+    const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+    const filename = m ? decodeURIComponent(m[1]) : `batch_${state.selectedBatchId}.xlsx`;
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
