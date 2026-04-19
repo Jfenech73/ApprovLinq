@@ -998,6 +998,8 @@ def _rule_to_dict(r: CorrectionRule) -> dict:
         "id": r.id,
         "tenant_id": str(r.tenant_id),
         "company_id": str(r.company_id) if r.company_id else None,
+        # applies_to: human-readable scope label for UI display
+        "applies_to": "this_company" if r.company_id else "all_companies",
         "rule_type": r.rule_type,
         "field_name": r.field_name,
         "source_pattern": r.source_pattern,
@@ -1028,6 +1030,11 @@ class RuleUpdatePayload(BaseModel):
     source_pattern: str | None = None
     target_value: str | None = None
     active: bool | None = None
+    # Scope reassignment fields
+    # applies_to: "this_company" | "all_companies"
+    # company_id: required when applies_to="this_company"
+    applies_to: str | None = None
+    company_id: str | None = None
 
 
 @router.get("/rules")
@@ -1110,6 +1117,41 @@ def update_rule(
         else:
             r.disabled_by = None
             r.disabled_at = None
+
+    # ── Scope reassignment ──────────────────────────────────────────────────
+    if payload.applies_to is not None:
+        from uuid import UUID as _UUID
+        is_admin = getattr(user, "role", None) == "admin"
+
+        if payload.applies_to == "all_companies":
+            # Widen to all companies in tenant: clear company_id
+            r.company_id = None
+
+        elif payload.applies_to == "this_company":
+            # Narrow to a specific company
+            if not payload.company_id:
+                raise HTTPException(422, "company_id is required when applies_to is 'this_company'")
+            try:
+                target_cid = _UUID(payload.company_id)
+            except ValueError:
+                raise HTTPException(422, "company_id is not a valid UUID")
+
+            # Tenant users: verify the target company belongs to their tenant
+            if not is_admin:
+                from app.db.models import Company as _Co
+                co = db.execute(
+                    select(_Co).where(
+                        _Co.id == target_cid,
+                        _Co.tenant_id == r.tenant_id,
+                    ).limit(1)
+                ).scalar_one_or_none()
+                if not co:
+                    raise HTTPException(403, "Company not found in your tenant")
+            r.company_id = target_cid
+
+        else:
+            raise HTTPException(422, f"applies_to must be 'this_company' or 'all_companies', got: {payload.applies_to!r}")
+
     db.commit()
     return _rule_to_dict(r)
 

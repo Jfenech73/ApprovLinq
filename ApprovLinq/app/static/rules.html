@@ -82,6 +82,19 @@
           <label class="ap-label" for="editTarget">Target value <span class="muted">(what it should become)</span></label>
           <input id="editTarget" type="text" class="ap-input" style="width:100%" autocomplete="off" />
         </div>
+        <div>
+          <label class="ap-label" for="editAppliesTo">Applies to</label>
+          <select id="editAppliesTo" class="ap-select" style="width:100%">
+            <option value="all_companies">All companies in my tenant</option>
+            <option value="this_company">One specific company</option>
+          </select>
+        </div>
+        <div id="editCompanyRow" style="display:none">
+          <label class="ap-label" for="editCompany">Company</label>
+          <select id="editCompany" class="ap-select" style="width:100%">
+            <option value="">— select company —</option>
+          </select>
+        </div>
         <div id="editMessage" class="message"></div>
       </div>
       <div class="row gap-sm" style="margin-top:var(--ap-s-5);justify-content:flex-end">

@@ -53,6 +53,11 @@ async function loadCompanies() {
     _companies.forEach(c => {
       const o = document.createElement("option");
       o.value = c.id; o.textContent = c.name; sel.appendChild(o);
+
+      // Also populate the edit modal company picker
+      const o2 = document.createElement("option");
+      o2.value = c.id; o2.textContent = c.name;
+      document.getElementById("editCompany").appendChild(o2);
     });
   } catch (_) {}
 }
@@ -170,6 +175,16 @@ function openEditModal(id) {
   document.getElementById("editTarget").value = rule.target_value   || "";
   document.getElementById("editField").textContent =
     fieldLabel(rule.field_name) + (rule.rule_type ? " · " + typeLabel(rule.rule_type) : "");
+
+  // Populate scope controls
+  const appliesTo = rule.applies_to || (rule.company_id ? "this_company" : "all_companies");
+  document.getElementById("editAppliesTo").value = appliesTo;
+  const showCo = appliesTo === "this_company";
+  document.getElementById("editCompanyRow").style.display = showCo ? "" : "none";
+  if (rule.company_id) {
+    document.getElementById("editCompany").value = rule.company_id;
+  }
+
   setMsg(document.getElementById("editMessage"), "");
   document.getElementById("editModal").style.display = "flex";
   document.getElementById("editSource").focus();
@@ -179,6 +194,12 @@ function closeEditModal() {
   document.getElementById("editModal").style.display = "none";
   _editingId = null;
 }
+
+// Show/hide the company picker based on "Applies to" selection
+document.getElementById("editAppliesTo").addEventListener("change", () => {
+  const show = document.getElementById("editAppliesTo").value === "this_company";
+  document.getElementById("editCompanyRow").style.display = show ? "" : "none";
+});
 
 document.getElementById("editCancelBtn").addEventListener("click", closeEditModal);
 document.getElementById("editModal").addEventListener("click", e => {
@@ -199,10 +220,19 @@ document.getElementById("editSaveBtn").addEventListener("click", async () => {
   const btn = document.getElementById("editSaveBtn");
   btn.disabled = true;
   try {
+    const appliesTo = document.getElementById("editAppliesTo").value;
+    const companyId  = appliesTo === "this_company"
+      ? document.getElementById("editCompany").value || null
+      : null;
+    if (appliesTo === "this_company" && !companyId) {
+      setMsg(document.getElementById("editMessage"), "Please select a company.", "error");
+      btn.disabled = false;
+      return;
+    }
     const updated = await api(`/review/rules/${_editingId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source_pattern: src, target_value: tgt }),
+      body: JSON.stringify({ source_pattern: src, target_value: tgt, applies_to: appliesTo, company_id: companyId }),
     });
     const idx = _allRules.findIndex(r => r.id === _editingId);
     if (idx >= 0) _allRules[idx] = updated;
