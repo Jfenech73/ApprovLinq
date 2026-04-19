@@ -325,10 +325,16 @@ def bcrs_split(batch_id: UUID, row_id: int, payload: BcrsSplitIn,
         db.flush()  # get bcrs_row.id
 
         # ── Adjust the source row total ──────────────────────────────────────
+        # Subtract the BCRS deposit directly from the original total.
+        # Using net+vat alone is wrong when the AI included BCRS inside net —
+        # that formula loses money.  Subtracting from total is always correct.
         net = round(float(row.net_amount or 0), 2)
         vat = round(float(row.vat_amount or 0), 2)
-        corrected_total = round(net + vat, 2)
         old_total = row_total
+        corrected_total = round(old_total - amount, 2)
+        # Safety clamp: corrected total must be >= net+vat (commercial component)
+        if corrected_total < round(net + vat, 2):
+            corrected_total = round(net + vat, 2)
         row.total_amount = corrected_total
         row.review_required = False
         row.review_priority = None

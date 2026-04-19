@@ -101,6 +101,14 @@
   function wireSidebarToggle() {
     const btn = document.querySelector("[data-ap-sidebar-toggle]");
     if (!btn) return;
+    // Guard: only wire once per button instance. wireSidebarToggle() is called
+    // from both renderShell() and init(), so without this guard each click fires
+    // two handlers that toggle opposite directions — net result: no change.
+    if (btn.dataset.apSidebarWired) {
+      applySidebarState(isSidebarCollapsed());
+      return;
+    }
+    btn.dataset.apSidebarWired = "1";
     applySidebarState(isSidebarCollapsed());
     btn.addEventListener("click", () => {
       const nowCollapsed = !document.querySelector(".ap-shell")?.classList.contains("sidebar-collapsed");

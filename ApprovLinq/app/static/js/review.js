@@ -18,15 +18,29 @@ const hdrs = () => authHeaders({ "Content-Type": "application/json" });
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+let _msgClearTimer = null;
 function msg(text, kind) {
   const m = $("pageMessage");
   if (!m) return;
+  if (_msgClearTimer) { clearTimeout(_msgClearTimer); _msgClearTimer = null; }
   m.textContent = text || "";
   m.className = "message" + (kind ? " " + kind : "");
+  // Auto-clear success and plain info messages; keep errors/warnings visible
+  if (text && (kind === "success" || kind === "" || !kind)) {
+    _msgClearTimer = setTimeout(() => {
+      if (m.textContent === text) { m.textContent = ""; m.className = "message"; }
+      _msgClearTimer = null;
+    }, 4000);
+  }
 }
 
 async function load() {
   if (!batchId) { msg("Missing batch_id in URL", "error"); return; }
+  // Clear any stale non-error banner when refreshing data
+  const _pm = $("pageMessage");
+  if (_pm && _pm.className && !_pm.className.includes("error") && !_pm.className.includes("warning")) {
+    _pm.textContent = ""; _pm.className = "message";
+  }
   try {
     const r = await fetch(`/review/batches/${batchId}`, { headers: hdrs() });
     if (!r.ok) throw new Error(await r.text());
