@@ -2838,25 +2838,37 @@ def split_line_item_rows(page_result: dict[str, Any], tolerance: float = 0.05) -
     if not lines:
         return [page_result]
 
+    invoice_net = page_result.get("net_amount")
+    invoice_vat = page_result.get("vat_amount")
+    invoice_total = page_result.get("total_amount")
+
     rows: list[dict[str, Any]] = []
     summed_total = 0.0
     counted = 0
     for idx, line in enumerate(lines, start=1):
         line_total = _line_amount_from_text(line)
         if line_total is not None:
-            summed_total += line_total
             counted += 1
         row = dict(page_result)
+        row["source_invoice_net_amount"] = invoice_net
+        row["source_invoice_vat_amount"] = invoice_vat
+        row["source_invoice_total_amount"] = invoice_total
         row["description"] = limit_to_20_words(line) or page_result.get("description")
         row["line_items_raw"] = line
         row["line_no"] = idx
         if line_total is not None:
-            row["total_amount"] = line_total
+            line_vat = 0.0
+            if len(lines) == 1 and invoice_vat not in (None, ""):
+                try:
+                    line_vat = float(invoice_vat)
+                except (TypeError, ValueError):
+                    line_vat = 0.0
             row["net_amount"] = line_total
-            row["vat_amount"] = 0.0
+            row["vat_amount"] = line_vat
+            row["total_amount"] = round(line_total + line_vat, 2)
+            summed_total += row["total_amount"]
         rows.append(row)
 
-    invoice_total = page_result.get("total_amount")
     mismatch = False
     if invoice_total is not None and counted > 0:
         mismatch = abs(float(invoice_total) - float(summed_total)) > tolerance
@@ -2923,9 +2935,21 @@ def _build_rows_from_ai_items(
     """
     rows: list[dict[str, Any]] = []
     summed = 0.0
+    invoice_net = page_result.get("net_amount")
+    invoice_vat = page_result.get("vat_amount")
+    invoice_total = page_result.get("total_amount")
+    single_line_vat_fallback = 0.0
+    if len(ai_items) == 1 and invoice_vat not in (None, ""):
+        try:
+            single_line_vat_fallback = float(invoice_vat)
+        except (TypeError, ValueError):
+            single_line_vat_fallback = 0.0
 
     for idx, item in enumerate(ai_items, start=1):
         row = dict(page_result)
+        row["source_invoice_net_amount"] = invoice_net
+        row["source_invoice_vat_amount"] = invoice_vat
+        row["source_invoice_total_amount"] = invoice_total
 
         desc = (item.get("description") or "").strip()
         row["description"] = limit_to_20_words(desc) or page_result.get("description") or "Invoice line"
@@ -2951,8 +2975,8 @@ def _build_rows_from_ai_items(
                 amount = parse_amount(str(raw_amt))
 
         if amount is not None:
-            summed += amount
-            # Use Azure DI's per-line tax if present; default to 0.0
+            # Use Azure DI's per-line tax if present; otherwise, for a single-line
+            # invoice reuse the invoice-level VAT so export rows reconcile cleanly.
             line_vat = item.get("tax_amount")
             if line_vat is not None:
                 try:
@@ -2960,10 +2984,11 @@ def _build_rows_from_ai_items(
                 except (TypeError, ValueError):
                     line_vat = 0.0
             else:
-                line_vat = 0.0
+                line_vat = single_line_vat_fallback
             row["net_amount"] = amount
             row["vat_amount"] = line_vat
             row["total_amount"] = round(amount + line_vat, 2)
+            summed += row["total_amount"]
 
         row["line_no"] = idx
         rows.append(row)
@@ -2971,8 +2996,7 @@ def _build_rows_from_ai_items(
     if not rows:
         return [page_result]
 
-    # Cross-check against the invoice-level total
-    invoice_total = page_result.get("total_amount")
+    # Cross-check against the invoice-level gross total, not just net line sums.
     if invoice_total is not None and abs(float(invoice_total) - summed) > 0.10:
         for row in rows:
             row["review_required"] = True

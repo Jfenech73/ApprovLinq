@@ -702,9 +702,9 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     # BCRS/deposit label exists in the document — causing false splits.
     # A split requires confirmed label+region evidence (see below).
 
-    total_amount = _parse_first_money(payload.get('total_amount'))
-    net_amount   = _parse_first_money(payload.get('net_amount'))
-    vat_amount   = _parse_first_money(payload.get('vat_amount'))
+    total_amount = _parse_first_money(payload.get('source_invoice_total_amount')) or _parse_first_money(payload.get('total_amount'))
+    net_amount   = _parse_first_money(payload.get('source_invoice_net_amount')) or _parse_first_money(payload.get('net_amount'))
+    vat_amount   = _parse_first_money(payload.get('source_invoice_vat_amount')) or _parse_first_money(payload.get('vat_amount'))
 
     lines = _collect_summary_region_lines(payload)
     if not lines:
@@ -713,7 +713,7 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     # Accepted BCRS/deposit labels only.  "surcharge" alone is intentionally
     # excluded — it is too generic and fires on delivery/fuel surcharges.
     label_re = re.compile(
-        r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit|deposit)\b",
+        r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit|deposit\s+summary|deposits?|returnables?|surcharge)\b",
         re.I,
     )
     # Rejected contexts: any line whose primary identity is a VAT/tax field.
@@ -747,7 +747,10 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     patterns = [
         re.compile(r"(?is)\bbcrs(?:\s+refundable)?(?:\s+deposit)?\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
         re.compile(r"(?is)\brefundable\s+deposit\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
-        re.compile(r"(?is)\bdeposit\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
+        re.compile(r"(?is)\bdeposit\s+summary\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
+        re.compile(r"(?is)\bdeposits?\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
+        re.compile(r"(?is)\breturnables?\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
+        re.compile(r"(?is)\bsurcharge\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
     ]
     for pidx, pattern in enumerate(patterns):
         for match in pattern.finditer(summary_text):
@@ -771,24 +774,18 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
                 continue
 
             label_span = summary_text[max(0, match.start()-40):min(len(summary_text), match.end()+40)].lower()
-            if pidx == 2:
-                # Plain "deposit" pattern: accept only when the surrounding context
-                # explicitly confirms BCRS/deposit context.  Reject if the context
-                # window is dominated by VAT/tax keywords (e.g. "VAT 18% 525.18"
-                # appearing between deposit column headers and the total line).
+            if pidx >= 2:
+                # Plain deposit/deposits/returnables/surcharge patterns: accept only
+                # when the surrounding context explicitly confirms BCRS/deposit context.
                 has_context_window = (
                     'bcrs' in label_span
                     or 'summary' in label_span
                     or 'refundable' in label_span
+                    or 'returnable' in label_span
                 )
-                # "total" alone is no longer sufficient — a VAT summary line also
-                # appears near "Total" and that caused false picks.  Only allow
-                # "total" in the context window when there is no VAT keyword nearby.
                 if not has_context_window and 'total' in label_span:
                     has_context_window = not bool(_VAT_CTX_RE.search(label_span))
                 has_summary_line = _is_summary_context(match_line) and not _is_vat_line(match_line)
-                # Arithmetic reconciliation: if net+vat+deposit == total exactly,
-                # this is strong evidence even without bcrs/summary/refundable context.
                 reconciles_exactly = False
                 if (total_amount is not None and net_amount is not None
                         and vat_amount is not None):
@@ -806,7 +803,7 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
                 val = float(raw.replace(',', '.'))
             except Exception:
                 continue
-            score = 18 if pidx == 0 else 16 if pidx == 1 else 12
+            score = 18 if pidx == 0 else 16 if pidx == 1 else 14 if pidx == 2 else 13
             if total_amount is not None and net_amount is not None and vat_amount is not None:
                 if abs((net_amount + vat_amount + val) - total_amount) <= 0.06:
                     score += 12
@@ -982,7 +979,7 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     )
     _DEPOSIT_LABEL_RE = re.compile(
         r'\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit'
-        r'|deposit\s+summary|returnable(?:\s+deposit)?|deposit)\b',
+        r'|deposit\s+summary|returnables?|deposits?|deposit|surcharge)\b',
         re.I,
     )
     has_label_line = False
@@ -1031,6 +1028,20 @@ def _build_bcrs_row(row: InvoiceRow, amount: float) -> InvoiceRow:
         totals_reconciliation_status=row.totals_reconciliation_status, header_raw=row.header_raw,
         totals_raw=row.totals_raw, page_text_raw=row.page_text_raw,
     )
+
+
+def _page_has_existing_bcrs_row(rows: list[InvoiceRow], amount: float, tolerance: float = 0.06) -> bool:
+    for row in rows:
+        text = f"{row.description or ''} {row.line_items_raw or ''}".lower()
+        if not re.search(r"\b(bcrs|deposit|returnable|returnables|refund(?:able)?|surcharge)\b", text):
+            continue
+        for candidate in (row.total_amount, row.net_amount):
+            try:
+                if candidate is not None and abs(float(candidate) - float(amount)) <= tolerance:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
 
 
 _STOP_WORDS = {"the", "and", "of", "for", "a", "an", "in", "on", "at", "to", "by"}
@@ -1811,6 +1822,8 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             db.add(row)
                             inserted_rows += 1
                             total_rows += 1
+                            if (batch.scan_mode or "summary").lower() == "lines":
+                                continue
                             bcrs_amount = _extract_bcrs_amount_from_summary(r)
                             if bcrs_amount and bcrs_amount > 0:
                                 bcrs_row = _build_bcrs_row(row, bcrs_amount)
@@ -1827,6 +1840,21 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 _corrected_total = round(_net + _vat, 2)
                                 if _corrected_total >= 0 and _corrected_total < round(float(row.total_amount or 0.0), 2):
                                     row.total_amount = _corrected_total
+                        if (batch.scan_mode or "summary").lower() == "lines" and row_payloads:
+                            anchor_payload = dict(row_payloads[0])
+                            bcrs_amount = _extract_bcrs_amount_from_summary(anchor_payload)
+                            if bcrs_amount and bcrs_amount > 0:
+                                page_rows = [
+                                    obj for obj in db.new
+                                    if isinstance(obj, InvoiceRow)
+                                    and obj.batch_id == batch_id
+                                    and obj.source_file_id == invoice_file.id
+                                    and obj.page_no == (row_payloads[0].get("page_no") or (page_index + 1))
+                                ]
+                                if page_rows and not _page_has_existing_bcrs_row(page_rows, bcrs_amount):
+                                    db.add(_build_bcrs_row(page_rows[0], bcrs_amount))
+                                    inserted_rows += 1
+                                    total_rows += 1
                         processed_pages += 1
                         # Per-page progress: direct UPDATE with stale-overwrite guard.
                         # WHERE page_count < processed_pages ensures a lower counter
