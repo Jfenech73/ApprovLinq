@@ -367,6 +367,7 @@ async def run_file_retention_cleanup() -> None:
 
 
 
+@app.get("/version")
 def get_version():
     version = _version_file.read_text().strip() if _version_file.exists() else "0.0.0"
     return JSONResponse({"version": version})

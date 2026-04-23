@@ -469,8 +469,7 @@ $("exportBtn").addEventListener("click", async () => {
     }
     const blob = await response.blob();
     const cd = response.headers.get("Content-Disposition") || "";
-    const m = /filename\*?=(?:UTF-8'')?"?([^";
-]+)"?/i.exec(cd);
+    const m = /filename\*?=(?:UTF-8'')?"?([^";\r\n]+)"?/i.exec(cd);
     const filename = m ? decodeURIComponent(m[1].trim()) : `batch_${state.selectedBatchId}.xlsx`;
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -551,16 +550,9 @@ async function initScannerPage() {
   }
 }
 
-// Defer until DOMContentLoaded so ap-ui.js renderShell() has re-attached
-// [data-ap-page-body] before any DOM elements are accessed.
-// Without this, initScannerPage() fires while the shell renderer has the page
-// body temporarily detached, causing every getElementById() to return null
-// and silently aborting the entire init chain.
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", initScannerPage);
-} else {
-  initScannerPage();
-}
+// ap-ui.js loads before app.js (see scanner.html), so renderShell() has
+// already run synchronously by the time this executes.
+initScannerPage();
 
 // ── Collapsible scanner sections ─────────────────────────────────────────────
 (function wireCollapsible() {
