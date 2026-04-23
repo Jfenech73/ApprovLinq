@@ -552,7 +552,10 @@ async function initScannerPage() {
 }
 
 // Defer until DOMContentLoaded so ap-ui.js renderShell() has re-attached
-// [data-ap-page-body] before we touch any DOM elements.
+// [data-ap-page-body] before any DOM elements are accessed.
+// Without this, initScannerPage() fires while the shell renderer has the page
+// body temporarily detached, causing every getElementById() to return null
+// and silently aborting the entire init chain.
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", initScannerPage);
 } else {
