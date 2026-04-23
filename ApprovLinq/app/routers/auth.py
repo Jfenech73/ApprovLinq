@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -90,7 +91,14 @@ def current_session(authorization: str | None = Header(default=None), db: Sessio
     if not result:
         raise HTTPException(status_code=401, detail="Invalid session")
     session_row, user = result
-    if session_row.expires_at < utcnow():
+    # expires_at may be stored as a timezone-naive datetime (SQLite) or
+    # timezone-aware (PostgreSQL).  Normalise both sides to UTC-aware so the
+    # comparison never raises TypeError: can't compare offset-naive and
+    # offset-aware datetimes.
+    expires = session_row.expires_at
+    if expires is not None and expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires is None or expires < utcnow():
         raise HTTPException(status_code=401, detail="Session expired")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="User inactive")
@@ -106,7 +114,11 @@ def current_tenant_id(user: User = Depends(current_user), x_tenant_id: str | Non
         if user.role == "admin":
             if not x_tenant_id:
                 raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
-            tenant = session.get(Tenant, x_tenant_id)
+            try:
+                tid = uuid.UUID(x_tenant_id)
+            except (ValueError, AttributeError):
+                raise HTTPException(status_code=400, detail="Invalid X-Tenant-Id header")
+            tenant = session.get(Tenant, tid)
             if not tenant:
                 raise HTTPException(status_code=404, detail="Tenant not found")
             return tenant.id
@@ -122,15 +134,20 @@ def current_tenant_id(user: User = Depends(current_user), x_tenant_id: str | Non
                 raise HTTPException(status_code=403, detail="No tenant access assigned")
             return link.tenant_id
 
+        try:
+            tid = uuid.UUID(x_tenant_id)
+        except (ValueError, AttributeError):
+            raise HTTPException(status_code=400, detail="Invalid X-Tenant-Id header")
+
         link = (
             session.query(UserTenant)
-            .filter(UserTenant.user_id == user.id, UserTenant.tenant_id == x_tenant_id)
+            .filter(UserTenant.user_id == user.id, UserTenant.tenant_id == tid)
             .first()
         )
         if not link:
             raise HTTPException(status_code=403, detail="Forbidden for selected tenant")
 
-        tenant = session.get(Tenant, x_tenant_id)
+        tenant = session.get(Tenant, tid)
         if not tenant or not tenant.is_active or tenant.status != "active":
             raise HTTPException(status_code=403, detail="Selected tenant is inactive")
         return tenant.id
