@@ -926,12 +926,12 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         # future invoices from the same supplier without re-remapping.
         # source_pattern = normalised supplier name.
         if row.supplier_name:
-            _norm = re.sub(
+            _norm_supplier = re.sub(
                 r"\b(ltd|limited|plc|llc|inc|corp|co|group|trading|holdings|services|solutions)\b",
                 "", row.supplier_name.lower(),
             )
-            _norm = re.sub(r"[^a-z0-9 ]", " ", _norm)
-            _norm = re.sub(r"\s+", " ", _norm).strip()
+            _norm_supplier = re.sub(r"[^a-z0-9 ]", " ", _norm_supplier)
+            _norm = re.sub(r"\s+", " ", _norm_supplier).strip()
 
             if _norm:
                 existing_rule = db.execute(

@@ -63,7 +63,7 @@ def _safe_float(v) -> Optional[float]:
 _DEPOSIT_DENOMINATIONS = {0.0, 0.10, 0.20, 0.25, 0.40, 0.50, 0.60, 0.75, 0.80}
 
 
-def _is_deposit_amount(diff: float) -> bool:
+def _is_deposit_amount(diff: float, net: float | None = None) -> bool:
     """True if |diff| looks like a deposit/BCRS surcharge or returnables charge.
 
     Heuristic:
@@ -72,8 +72,14 @@ def _is_deposit_amount(diff: float) -> bool:
           e.g. J. Sultana-style invoices with 70.80 for many glass-bottle units)
         - Centavos part is one of the common BCRS denomination remainders
           (0c, 10c, 20c, 25c, 40c, 50c, 60c, 75c, 80c — per-unit multiples)
+        - Must be ≤ 40% of net when net is available — a diff that is more than
+          40% of the commercial value is clearly not a deposit/BCRS surcharge
+          (e.g. net=100, total=200 → diff=77 is 77% of net → totals_mismatch)
     """
     if not (0.01 <= diff <= 200.00):
+        return False
+    # Additional proportionality guard: deposit cannot be a huge share of net
+    if net is not None and net > 0 and (diff / net) > 0.40:
         return False
     frac = round(diff % 1.0, 2)
     return frac in _DEPOSIT_DENOMINATIONS
@@ -147,7 +153,7 @@ def validate_invoice(extracted: dict) -> InvoiceValidation:
                 )
         elif diff > tolerance:
             # Total is higher than expected
-            if _is_deposit_amount(diff):
+            if _is_deposit_amount(diff, net=net):
                 result.deposit_amount = diff
                 result.totals_reconciliation_status = "ok_with_deposit"
                 result.totals_reconciliation_reason = (

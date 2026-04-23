@@ -162,8 +162,12 @@ def _check_deposit_component(
     if net is None or total is None:
         return False, 0.0
     vat_val = float(vat or 0.0)
-    diff = round(float(total) - (float(net) + vat_val), 2)
+    net_f = float(net)
+    diff = round(float(total) - (net_f + vat_val), 2)
     if 0.01 <= diff <= 25.00:
+        # Proportionality guard: deposit > 40% of net is clearly a mismatch
+        if net_f > 0 and (diff / net_f) > 0.40:
+            return False, 0.0
         # Round-number check: whole euro, 50c, 25c, or 10c multiples
         if round(diff % 1.0, 2) in (0.0, 0.10, 0.25, 0.50, 0.75):
             return True, diff
@@ -1184,7 +1188,8 @@ def _extract_structured_summary_totals(text: str) -> dict | None:
 
 
 def _invoice_number_fallback(text: str) -> str | None:
-    """Fallback invoice-number extractor for Nectar-style layouts.
+    """Fallback invoice-number extractor for invoice layouts where the number
+    appears in the top header region but is not reliably captured by standard patterns.
 
     Called only when the standard first_match patterns in simple_extract
     return nothing.  Searches the top header region (first ~40 lines) for

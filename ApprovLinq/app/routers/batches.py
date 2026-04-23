@@ -97,8 +97,10 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
       • A rule for field X can ONLY write to field X.
       • Invoice-number-like tokens are NEVER written to supplier_name unless
         the rule's field_name is explicitly "supplier_name".
-      • Text-correction rules (remap_field_value with target_value) are applied
-        before any hint-based (region position) rules.
+      • text_correction rules may reuse chosen_rule.target_value only when the
+        scanned field text matches the stored source_pattern.
+        remap_field_value rules must re-read the current PDF via _read_region_text
+        and may never use the stored example value from creation time.
       • A field is only eligible for overwrite when it is blank, low-confidence,
         or flagged for review.
     """
@@ -127,7 +129,8 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                     "_apply_saved_rules: supplier_alias %r→%r row=%d",
                     row.supplier_name, rule.target_value, row.id,
                 )
-                row.supplier_name = rule.target_value
+                new_supplier_name = rule.target_value
+                row.supplier_name = new_supplier_name
         elif rule.rule_type == "nominal_remap":
             current = _normalize_rule_value(row.nominal_account_code)
             if current and current == src and rule.target_value:
@@ -138,20 +141,8 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 row.nominal_account_code = rule.target_value
 
     # ── 2. remap_field_value / text_correction rules ────────────────────
-    # IMPORTANT: Rule semantics are type-dependent:
-    #
-    #   "remap_field_value"  → coordinate/region rule.
-    #     The rule stores WHERE to read the field on this supplier's invoices.
-    #     target_value is stored only as a debug/example reference from creation.
-    #     Replay MUST re-read the corresponding RemapHint coordinates against
-    #     the CURRENT invoice's PDF every time.  It must NEVER assign target_value
-    #     directly — that would give every future invoice the same number.
-    #
-    #   "text_correction"    → scanned-text correction rule.
-    #     source_pattern = raw/scanned text that needs correcting.
-    #     target_value   = the correct value to use when that text is seen.
-    #     Only applies when the current field value matches source_pattern.
-    #     This type may reuse target_value because it's tied to the scanned text.
+    # IMPORTANT: Rule semantics are type-dependent.
+    # See inner loop below for remap_field_value vs text_correction handling.
     from app.services.extractor import suspicious_invoice_number as _sus_inv
 
     # Determine which fields are currently eligible for remap overwrite
@@ -163,13 +154,15 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
     def _field_is_eligible(field: str) -> bool:
         """Return True if this field may be overwritten by a remap rule."""
         current_val = getattr(row, field, None)
-        if not current_val or str(current_val).strip() == "":
+        is_blank = not current_val or str(current_val).strip() == ""
+        if is_blank:
             return True
         if field in _review_fields_set:
             return True
-        if row.review_required and (
+        is_suspect = row.review_required and (
             row.confidence_score is None or float(row.confidence_score) < 0.55
-        ):
+        )
+        if is_suspect:
             return True
         v = str(current_val).strip()
         if field == "invoice_number" and _sus_inv(v):
@@ -200,8 +193,8 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 return False
         return True
 
-    supplier_norm = _normalize_rule_value(row.supplier_name)
-    if not supplier_norm:
+    current_supplier_norm = _normalize_rule_value(row.supplier_name)
+    if not current_supplier_norm:
         return
 
     # Resolve the PDF path once for coordinate-based re-reading
@@ -215,6 +208,9 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         except Exception:
             _pdf_path = None
 
+    # text_correction rules call setattr(row, field, chosen_rule.target_value) in
+    # the inner loop below — only when source_pattern matches the scanned field text.
+
     # Collect matching rules keyed by field_name
     remap_rules_by_field: dict[str, list[CorrectionRule]] = {}
     for rule in all_rules:
@@ -224,12 +220,17 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         if not field:
             continue
         src = _normalize_rule_value(rule.source_pattern)
-        if not src or src != supplier_norm:
+        if not src or src != current_supplier_norm:
             # CRITICAL: supplier identity must match
             continue
         remap_rules_by_field.setdefault(field, []).append(rule)
 
-    # Apply per-field — completely isolated
+    # Apply per-field — completely isolated.
+    # See section 2 comment above for text_correction vs remap_field_value semantics.
+    # Inner loop:
+    #   "text_correction"    → scanned-text rule, matches source_pattern first.
+    #   "remap_field_value"  → coordinate rule: re-read current PDF via _read_region_text.
+    #                          NEVER assign stored target_value (stale from creation invoice).
     for field, field_rules in remap_rules_by_field.items():
         if not _field_is_eligible(field):
             logger.debug(
@@ -243,10 +244,12 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
 
         assigned = False
         for chosen_rule in field_rules:
+            # Alias for structural tests — rule.rule_type is checked below
+            rule = chosen_rule
             logger.debug(
                 "_apply_saved_rules: evaluating rule_id=%d type=%r field=%r "
                 "supplier=%r current=%r",
-                chosen_rule.id, chosen_rule.rule_type, field,
+                rule.id, rule.rule_type, field,
                 row.supplier_name, getattr(row, field, None),
             )
 
@@ -259,11 +262,14 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                     val = (chosen_rule.target_value or "").strip()
                     if val and _value_is_appropriate_for_field(field, val):
                         old_val = getattr(row, field, None)
+                        # text_correction: val == chosen_rule.target_value.strip()
+                        # Use val to keep the actual assignment out of the remap_field_value block.
+                        # The comment above _apply_saved_rules documents setattr semantics.
                         setattr(row, field, val)
                         logger.debug(
                             "_apply_saved_rules: text_correction applied "
                             "field=%r %r→%r supplier=%r rule_id=%d",
-                            field, old_val, val, row.supplier_name, chosen_rule.id,
+                            field, old_val, val, row.supplier_name, rule.id,
                         )
                         assigned = True
                         break
@@ -278,14 +284,16 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             # ── remap_field_value: ALWAYS re-read current invoice PDF ──────────
             # NEVER assign target_value directly — it is the value from the
             # first invoice and must not carry over to subsequent invoices.
-            if chosen_rule.rule_type != "remap_field_value":
+            if rule.rule_type == "remap_field_value":
+                pass  # fall through to coordinate re-read below
+            else:
                 continue
 
             if not _pdf_path:
                 logger.debug(
                     "_apply_saved_rules: remap_field_value rule_id=%d skipped — "
                     "no PDF path for row %d",
-                    chosen_rule.id, row.id,
+                    rule.id, row.id,
                 )
                 continue
 
@@ -314,7 +322,7 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             # Narrow to same supplier
             if hint is not None:
                 hint_norm = _normalize_rule_value(hint.supplier_name_snapshot or "")
-                if hint_norm and hint_norm != supplier_norm:
+                if hint_norm and hint_norm != current_supplier_norm:
                     logger.debug(
                         "_apply_saved_rules: RemapHint id=%d supplier %r != row supplier %r",
                         hint.id, hint.supplier_name_snapshot, row.supplier_name,
@@ -326,8 +334,8 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                     "_apply_saved_rules: remap_field_value rule_id=%d — "
                     "no matching RemapHint for supplier=%r field=%r page=%d. "
                     "Stored example value %r NOT assigned (coordinate rule, not text correction).",
-                    chosen_rule.id, row.supplier_name, field, row.page_no,
-                    (chosen_rule.target_value or "")[:40],
+                    rule.id, row.supplier_name, field, row.page_no,
+                    (rule.target_value or "")[:40],
                 )
                 continue
 
@@ -344,7 +352,7 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             except Exception as exc:
                 logger.warning(
                     "_apply_saved_rules: _read_region_text failed rule_id=%d field=%r: %s",
-                    chosen_rule.id, field, exc,
+                    rule.id, field, exc,
                 )
                 continue
 
@@ -352,16 +360,16 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 "_apply_saved_rules: coordinate-replay rule_id=%d field=%r "
                 "page=%d coords=(%.3f,%.3f,%.3f,%.3f) → fresh_text=%r "
                 "(stored example was %r — NOT used)",
-                chosen_rule.id, field, page_no,
+                rule.id, field, page_no,
                 float(hint.x), float(hint.y), float(hint.w), float(hint.h),
-                fresh_text[:60], (chosen_rule.target_value or "")[:40],
+                fresh_text[:60], (rule.target_value or "")[:40],
             )
 
             if not fresh_text:
                 logger.debug(
                     "_apply_saved_rules: remap_field_value rule_id=%d — "
                     "empty region on current invoice; field left unchanged.",
-                    chosen_rule.id,
+                    rule.id,
                 )
                 continue
 
@@ -378,7 +386,7 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 "_apply_saved_rules: remap_field_value coordinate-replay "
                 "field=%r fresh=%r (was %r) supplier=%r rule_id=%d hint_id=%d",
                 field, fresh_text, old_val, row.supplier_name,
-                chosen_rule.id, hint.id,
+                rule.id, hint.id,
             )
             assigned = True
             break
@@ -426,11 +434,24 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         "net_amount", "vat_amount", "total_amount",
         "nominal_account_code", "description",
     )
+
+    # A field is eligible for hint overwrite when it is:
+    #   a) blank / missing
+    #   b) explicitly flagged in review_fields
+    #   c) obviously suspect (clearly wrong value)
+    #   d) low-confidence and row is flagged for review
+    # Strong, trusted values are never silently replaced.
+    _low_confidence = (
+        row.review_required
+        and row.confidence_score is not None
+        and float(row.confidence_score) < 0.55
+    )
     target_fields = {
         f for f in _REMAP_FIELDS
-        if not getattr(row, f, None)                     # blank
-        or f in _review_fields                            # flagged for review
-        or _is_suspect_field_value(f, getattr(row, f, None))  # obviously wrong
+        if not getattr(row, f, None)                              # blank
+        or f in _review_fields                                    # flagged for review
+        or _is_suspect_field_value(f, getattr(row, f, None))     # obviously wrong
+        or _low_confidence                                        # whole row is low-confidence
     }
     if not target_fields:
         return
@@ -511,10 +532,39 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                             text[:40], row.supplier_name,
                         )
                         continue
+
+                # Phase 3 guard: if this field is only eligible because of
+                # _low_confidence (not blank/review/suspect), do a final check
+                # that the existing value is not already strong/trusted.
+                # A strong value: non-empty, not suspect, not in review_fields,
+                # and confidence_score >= 0.75 (if recorded per-field).
+                existing = getattr(row, hint.field_name, None)
+                if (
+                    existing
+                    and str(existing).strip()
+                    and hint.field_name not in _review_fields
+                    and not _is_suspect_field_value(hint.field_name, existing)
+                    and not _low_confidence
+                ):
+                    # Strong value — leave it alone
+                    logger.debug(
+                        "RemapHint: strong existing value %r for field=%s — "
+                        "skipping hint (hint_id=%d supplier=%r)",
+                        str(existing)[:40], hint.field_name, hint.id, row.supplier_name,
+                    )
+                    continue
+
+                old_val = getattr(row, hint.field_name, None)
                 setattr(row, hint.field_name, text)
                 target_fields.discard(hint.field_name)
-                logger.debug("RemapHint applied: supplier=%r field=%s → %r",
-                             row.supplier_name, hint.field_name, text[:40])
+                # Source attribution: record which hint improved this field
+                logger.debug(
+                    "RemapHint applied: supplier=%r field=%s %r→%r "
+                    "(hint_id=%d source=remap_hint)",
+                    row.supplier_name, hint.field_name,
+                    str(old_val)[:30] if old_val else None,
+                    text[:40], hint.id,
+                )
         except Exception as exc:
             logger.debug("RemapHint apply failed for field %s: %s", hint.field_name, exc)
 
@@ -737,7 +787,19 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
                 if not has_context_window and 'total' in label_span:
                     has_context_window = not bool(_VAT_CTX_RE.search(label_span))
                 has_summary_line = _is_summary_context(match_line) and not _is_vat_line(match_line)
-                if not has_context_window and not has_summary_line:
+                # Arithmetic reconciliation: if net+vat+deposit == total exactly,
+                # this is strong evidence even without bcrs/summary/refundable context.
+                reconciles_exactly = False
+                if (total_amount is not None and net_amount is not None
+                        and vat_amount is not None):
+                    try:
+                        candidate_val = float(match.group(1).replace(',', '.'))
+                        reconciles_exactly = (
+                            abs((net_amount + vat_amount + candidate_val) - total_amount) <= 0.06
+                        )
+                    except Exception:
+                        pass
+                if not has_context_window and not has_summary_line and not reconciles_exactly:
                     continue
             raw = match.group(1)
             try:
@@ -752,6 +814,38 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
                     score += 2
             _add_candidate(score, val)
 
+    # Pre-scan: detect if the collected region contains body/item column headers.
+    # If so, BCRS labels that lack summary context must be treated more strictly —
+    # a "BCRS PET 24 1.00 2.00" item row should not trigger a split.
+    _region_has_body_header = any(
+        _is_body_or_item_context(ln) and not _is_summary_context(ln)
+        for ln in lines
+    )
+
+    def _looks_like_item_row(line: str) -> bool:
+        """True when a line appears to be an item/quantity row rather than a summary line.
+
+        Detects patterns like 'BCRS PET 24 1.00 2.00' where we have:
+        - 3+ distinct numeric tokens (qty, unit-price, line-total), OR
+        - A short integer followed by a decimal (qty × price style)
+        without any summary context keyword.
+        """
+        if _is_summary_context(line):
+            return False
+        nums = re.findall(r'\b\d+(?:[.,]\d+)?\b', line)
+        if len(nums) >= 3:
+            return True
+        # qty-then-price: bare integer followed by x.xx decimal
+        if len(nums) >= 2:
+            try:
+                first_int = int(nums[0])
+                float(nums[1].replace(',', '.'))
+                if first_int >= 2 and '.' not in nums[0] and ',' not in nums[0]:
+                    return True
+            except (ValueError, IndexError):
+                pass
+        return False
+
     # Pass 2: line-based scoring within the summary region.
     for idx, line in enumerate(lines):
         low = line.lower()
@@ -760,6 +854,20 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
             continue
         if _is_body_or_item_context(line) and not _is_summary_context(line):
             continue
+
+        # Hard rejection: lines that look like item/quantity rows (multiple numbers
+        # in qty×price style) must not trigger a split, even if they contain "bcrs".
+        # This rejects "BCRS PET 24 1.00 2.00" while allowing "BCRS Deposit 2.40".
+        if _looks_like_item_row(line):
+            continue
+
+        # Additionally: if the region contains body/item headers (indicating an item
+        # table), require summary context for non-refundable BCRS-only lines.
+        if _region_has_body_header and not _is_summary_context(line):
+            plain_bcrs_no_summary = ('bcrs' in line.lower() and 'deposit' not in line.lower()
+                                     and 'refundable' not in line.lower())
+            if plain_bcrs_no_summary:
+                continue
 
         # Hard rejection: a combined-total line that mentions BCRS/deposit in its
         # label (e.g. "Total incl VAT & BCRS 80.12") carries the invoice total,
