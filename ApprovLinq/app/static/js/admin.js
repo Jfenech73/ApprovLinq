@@ -270,7 +270,13 @@ async function initAdminPage() {
   }
 }
 
-initAdminPage();
+// Defer until DOMContentLoaded so ap-ui.js renderShell() has re-attached
+// [data-ap-page-body] before any DOM elements are accessed.
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initAdminPage);
+} else {
+  initAdminPage();
+}
 
 
 initPageHelp({

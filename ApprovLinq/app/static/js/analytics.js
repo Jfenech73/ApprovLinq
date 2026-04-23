@@ -196,4 +196,10 @@ if (_tenantSel) {
 
 // logoutBtn is injected by ap-ui.js shell — wired there via logoutAndGo
 
-initAnalyticsPage();
+// Defer until DOMContentLoaded so ap-ui.js renderShell() has re-attached
+// [data-ap-page-body] before any DOM elements are accessed.
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initAnalyticsPage);
+} else {
+  initAnalyticsPage();
+}

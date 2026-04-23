@@ -546,11 +546,18 @@ async function initScannerPage() {
     await loadCompanies();
     await loadBatches();
   } catch (error) {
-    setInlineMessage($("createBatchMessage"), normalizeUiErrorMessage(error.message), "server-error");
+    const msgEl = $("createBatchMessage");
+    if (msgEl) setInlineMessage(msgEl, normalizeUiErrorMessage(error.message), "server-error");
   }
 }
 
-initScannerPage();
+// Defer until DOMContentLoaded so ap-ui.js renderShell() has re-attached
+// [data-ap-page-body] before we touch any DOM elements.
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initScannerPage);
+} else {
+  initScannerPage();
+}
 
 // ── Collapsible scanner sections ─────────────────────────────────────────────
 (function wireCollapsible() {
