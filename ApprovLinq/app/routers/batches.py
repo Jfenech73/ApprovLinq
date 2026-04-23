@@ -40,7 +40,7 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 _PDF_MAGIC = b"%PDF"
 
 router = APIRouter(prefix="/batches", tags=["batches"])
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
 _ACTIVE_BATCHES: set[str] = set()
 _ACTIVE_BATCHES_LOCK = Lock()
 
@@ -1654,6 +1654,13 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         batch = db.get(InvoiceBatch, batch_id)
         if not batch or batch.tenant_id != tenant_id:
             return
+
+        # ── Snapshot read-only IDs before any rollback can expire the object ──
+        _batch_tenant_id  = batch.tenant_id
+        _batch_company_id = batch.company_id
+
+        logger.info("_process_batch_job: batch %s started tenant=%s", batch_id, _batch_tenant_id)
+
         files = db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch_id).order_by(InvoiceFile.uploaded_at.asc(), InvoiceFile.id.asc()).all()
         if not files:
             batch.status = "failed"
@@ -1719,8 +1726,10 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
 
         # Look up the company name so the extractor can hard-block it as the
         # customer name and never return it as a supplier.
-        company = db.get(Company, batch.company_id) if batch.company_id else None
+        company = db.get(Company, _batch_company_id) if _batch_company_id else None
         account_company_name: str | None = company.company_name if company else None
+
+        from sqlalchemy import update as _upd
 
         processed_pages = processed_files = partial_files = failed_files = total_rows = 0
         for file_index, invoice_file in enumerate(files, start=1):
@@ -1749,7 +1758,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             # _apply_account_suggestions can do an exact lookup.
                             header_text = r.get("header_raw") or ""
                             pattern_supplier = _match_supplier_by_pattern(
-                                db, tenant_id, batch.company_id, header_text
+                                db, _batch_tenant_id, _batch_company_id, header_text
                             )
                             supplier_name = r.get("supplier_name")
                             supplier_vat  = r.get("supplier_vat")
@@ -1819,17 +1828,38 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 if _corrected_total >= 0 and _corrected_total < round(float(row.total_amount or 0.0), 2):
                                     row.total_amount = _corrected_total
                         processed_pages += 1
-                        batch.page_count = processed_pages
-                        batch.notes = f"Processing file {file_index}/{len(files)}: {invoice_file.original_filename} (page {page_index + 1}/{page_count})"
+                        # Per-page progress: direct UPDATE with stale-overwrite guard.
+                        # WHERE page_count < processed_pages ensures a lower counter
+                        # from a concurrent stale read can never overwrite a higher value.
+                        _pct = int(min(100, round((processed_pages / total_target_pages) * 100))) if total_target_pages > 0 else 0
+                        _note = f"Processing file {file_index}/{len(files)}: {invoice_file.original_filename} (page {page_index + 1}/{page_count}) — {_pct}%"
+                        logger.debug(
+                            "_process_batch_job: page %d of %d done — %s",
+                            processed_pages, total_target_pages, _note,
+                        )
+                        db.execute(
+                            _upd(InvoiceBatch)
+                            .where(
+                                InvoiceBatch.id == batch_id,
+                                InvoiceBatch.page_count < processed_pages,
+                            )
+                            .values(page_count=processed_pages, notes=_note)
+                            .execution_options(synchronize_session=False)
+                        )
                         db.commit()
                     except Exception as page_error:
                         db.rollback()
                         page_failures += 1
                         processed_pages += 1
+                        logger.warning(
+                            "_process_batch_job: page error batch=%s file=%s page=%d: %s",
+                            batch_id, invoice_file.original_filename, page_index + 1, page_error,
+                        )
+                        # Use snapshotted IDs — batch object is expired after rollback
                         fallback_row = InvoiceRow(
                             batch_id=batch_id,
-                            tenant_id=batch.tenant_id,
-                            company_id=batch.company_id,
+                            tenant_id=_batch_tenant_id,
+                            company_id=_batch_company_id,
                             source_file_id=invoice_file.id,
                             source_filename=invoice_file.original_filename,
                             page_no=page_index + 1,
@@ -1842,12 +1872,24 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             page_text_raw=f"PAGE_ERROR={str(page_error)}",
                         )
                         db.add(fallback_row)
+                        _pct_err = int(min(100, round((processed_pages / total_target_pages) * 100))) if total_target_pages > 0 else 0
+                        _note_err = (
+                            f"Processing file {file_index}/{len(files)}: "
+                            f"{invoice_file.original_filename} "
+                            f"(page {page_index + 1}/{page_count}, review fallback) — {_pct_err}%"
+                        )
+                        db.execute(
+                            _upd(InvoiceBatch)
+                            .where(
+                                InvoiceBatch.id == batch_id,
+                                InvoiceBatch.page_count < processed_pages,
+                            )
+                            .values(page_count=processed_pages, notes=_note_err)
+                            .execution_options(synchronize_session=False)
+                        )
                         db.commit()
                         total_rows += 1
                         inserted_rows += 1
-                        batch.page_count = processed_pages
-                        batch.notes = f"Processing file {file_index}/{len(files)}: {invoice_file.original_filename} (page {page_index + 1}/{page_count}, review fallback)"
-                        db.commit()
                 if inserted_rows == 0:
                     invoice_file.status = "failed"
                     invoice_file.error_message = "No pages could be processed."
@@ -1864,29 +1906,54 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 db.commit()
             except Exception as file_error:
                 db.rollback()
-                invoice_file.status = "failed"
-                invoice_file.error_message = str(file_error)
-                invoice_file.processed_at = datetime.utcnow()
+                # Direct UPDATE for file-error so a subsequent rollback only undoes
+                # this single statement and cannot roll back per-page progress commits.
+                db.execute(
+                    _upd(InvoiceFile)
+                    .where(InvoiceFile.id == invoice_file.id)
+                    .values(
+                        status="failed",
+                        error_message=str(file_error)[:500],
+                        processed_at=datetime.utcnow(),
+                    )
+                    .execution_options(synchronize_session=False)
+                )
                 db.commit()
                 failed_files += 1
 
-        batch.page_count = processed_pages
-        batch.processed_at = datetime.utcnow()
+        # ── Final status via direct UPDATE (atomic, no ORM stale-state risk) ──
         if processed_files and not failed_files and not partial_files:
-            batch.status = "processed"
-            batch.notes = f"Processed {processed_files} file(s), extracted {total_rows} row(s)"
+            final_status = "processed"
+            final_notes  = f"Processed {processed_files} file(s), extracted {total_rows} row(s)"
         elif processed_files or partial_files:
-            batch.status = "partial"
-            batch.notes = f"Processed {processed_files} file(s), partial {partial_files}, failed {failed_files}, rows {total_rows}"
+            final_status = "partial"
+            final_notes  = f"Processed {processed_files} file(s), partial {partial_files}, failed {failed_files}, rows {total_rows}"
         else:
-            batch.status = "failed"
-            batch.notes = "Processing failed for all files"
+            final_status = "failed"
+            final_notes  = "Processing failed for all files"
+
+        db.execute(
+            _upd(InvoiceBatch)
+            .where(InvoiceBatch.id == batch_id)
+            .values(
+                status=final_status,
+                notes=final_notes,
+                page_count=processed_pages,
+                processed_at=datetime.utcnow(),
+            )
+            .execution_options(synchronize_session=False)
+        )
         db.commit()
 
+        logger.info(
+            "_process_batch_job: batch %s completed status=%s files=%d rows=%d",
+            batch_id, final_status, processed_files, total_rows,
+        )
+
         # Learn supplier patterns from this batch's successfully matched rows
-        _learn_supplier_patterns(batch_id, tenant_id, batch.company_id, db)
+        _learn_supplier_patterns(batch_id, _batch_tenant_id, _batch_company_id, db)
         # Auto-create issue logs for rows needing review
-        _create_batch_issue_logs(batch_id, tenant_id, db)
+        _create_batch_issue_logs(batch_id, _batch_tenant_id, db)
     finally:
         db.close()
         _clear_active(batch_id)
@@ -2031,6 +2098,10 @@ def list_rows(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(c
 @router.get("/{batch_id}/progress")
 def get_batch_progress(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)
+    # Force a fresh SELECT — avoid returning a cached identity-map snapshot
+    # that was populated before the background job's last commit.
+    db.expire(batch)
+    batch = db.get(InvoiceBatch, batch_id)
     files = db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch_id).order_by(InvoiceFile.uploaded_at.asc(), InvoiceFile.id.asc()).all()
     total_files = len(files)
     processed_files = sum(1 for f in files if f.status in ("processed", "partial"))
