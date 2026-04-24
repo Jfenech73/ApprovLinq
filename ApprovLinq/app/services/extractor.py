@@ -43,27 +43,66 @@ def count_meaningful_chars(text: str) -> int:
     return len(re.findall(r"[A-Za-z0-9]", text or ""))
 
 
+def _company_strength_score(value: str | None) -> int:
+    v = " ".join(str(value or "").split()).strip()
+    if not v or suspicious_supplier_name(v) or bad_supplier_line(v):
+        return -100
+    low = v.lower()
+    score = 0
+    words = re.findall(r"[A-Za-z0-9&'.-]+", v)
+    score += min(len(words), 6) * 2
+    score += min(len(v), 40) // 8
+    if re.search(r"\b(ltd|limited|plc|company|co\.?|group|services|trading|holdings|international|bros|brothers)\b", low):
+        score += 6
+    if re.search(r"\d", v):
+        score -= 3
+    if re.search(r"\b(invoice|date|vat|customer|bill to|ship to|total|amount due)\b", low):
+        score -= 12
+    return score
+
+
+def _amount_support_score(net_amount: float | None, vat_amount: float | None, total_amount: float | None) -> int:
+    try:
+        net = float(net_amount) if net_amount is not None else None
+        vat = float(vat_amount or 0) if net is not None else None
+        total = float(total_amount) if total_amount is not None else None
+    except Exception:
+        return 0
+    if net is None or total is None:
+        return 0
+    diff = abs((net + float(vat or 0)) - total)
+    if diff <= 0.05:
+        return 12
+    if diff <= 0.15:
+        return 8
+    if diff <= 0.50:
+        return 2
+    return -6
+
+
+def _prefer_base_amount(base_value: float | None, ai_value: float | None) -> bool:
+    if base_value is None or ai_value is None:
+        return False
+    try:
+        b = round(float(base_value), 2)
+        a = round(float(ai_value), 2)
+    except Exception:
+        return False
+    if b == a:
+        return False
+    if abs((b % 1) - (a % 1)) <= 0.001 and b > a and b >= 100 and a > 0:
+        ratio = b / a
+        if 1.5 <= ratio <= 20:
+            return True
+    return False
+
+
 def preprocess_page_image(jpeg_bytes: bytes) -> tuple[bytes, float]:
-    """Stage 1 image preprocessing: adaptive 2-level darkening, bleed-through
-    suppression, and page quality scoring.
+    """Conservative image preprocessing for OCR/vision.
 
-    Darkening levels are chosen based on measured page brightness BEFORE any
-    enhancement — so the decision is made on the raw scan with no extra API
-    calls:
-
-        Level 0 (quality ≥ 0.68) — Good scan: minimal touch-up only.
-            Contrast ×1.25, Sharpness ×1.15. No brightness adjustment.
-        Level 1 (0.40 ≤ quality < 0.68) — Medium scan: standard darkening.
-            Contrast ×1.55, Sharpness ×1.30, optional gentle brightness lift.
-        Level 2 (quality < 0.40) — Faded/light scan: aggressive darkening.
-            Contrast ×1.90, Sharpness ×1.50, stronger brightness correction,
-            unsharp-mask to recover soft edges.
-
-    Quality score returned is computed on the RAW image (pre-enhancement) so
-    it reflects actual scan quality, not the artificially boosted result.
-
-    Returns:
-        (processed_jpeg_bytes, quality_score 0.0–1.0)
+    On already-good pages, preserve the original render to avoid harming faint
+    leading digits or crisp supplier names. On weaker pages, apply a light to
+    moderate enhancement only.
     """
     try:
         import io
@@ -71,180 +110,52 @@ def preprocess_page_image(jpeg_bytes: bytes) -> tuple[bytes, float]:
         from PIL import Image, ImageEnhance, ImageFilter
 
         img = Image.open(io.BytesIO(jpeg_bytes))
-
-        # Ensure RGB for consistent processing
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
 
-        # ── Quality scoring on the RAW image (before any enhancement) ──────
         gray = img.convert("L")
         pixels = list(gray.getdata())
-        mean_px   = sum(pixels) / max(len(pixels), 1)
+        mean_px = sum(pixels) / max(len(pixels), 1)
         try:
             std_px = statistics.stdev(pixels)
         except statistics.StatisticsError:
             std_px = 0.0
-
-        # High std → high contrast → good scan
-        # Brightness ideally around 128 (not too dark, not too washed out)
-        contrast_score   = min(std_px / 75.0, 1.0)
+        contrast_score = min(std_px / 75.0, 1.0)
         brightness_score = 1.0 - abs(mean_px - 128.0) / 128.0
-        quality_score    = round(contrast_score * 0.65 + brightness_score * 0.35, 2)
+        quality_score = round(contrast_score * 0.65 + brightness_score * 0.35, 2)
 
-        # ── Bleed-through suppression (always) ─────────────────────────────
-        # A small median filter knocks out fine ink-bleed noise from thin paper
-        # without affecting character edges.  Applied before enhancement so the
-        # noise is removed before we amplify contrast.
-        img = img.filter(ImageFilter.MedianFilter(size=3))
+        if quality_score >= 0.72 and 105 <= mean_px <= 205:
+            return jpeg_bytes, quality_score
 
-        # ── Adaptive enhancement — 2 levels based on raw quality ───────────
-        if quality_score >= 0.68:
-            # Level 0 — good scan: conservative touch-up
-            img = ImageEnhance.Contrast(img).enhance(1.25)
-            img = ImageEnhance.Sharpness(img).enhance(1.15)
-            level = 0
-
-        elif quality_score >= 0.40:
-            # Level 1 — medium scan: standard darkening
-            img = ImageEnhance.Contrast(img).enhance(1.55)
-            img = ImageEnhance.Sharpness(img).enhance(1.30)
-            if mean_px > 180:          # washed-out / very bright page
-                img = ImageEnhance.Brightness(img).enhance(0.88)
-            elif mean_px < 100:        # unusually dark scan
-                img = ImageEnhance.Brightness(img).enhance(1.18)
+        if quality_score >= 0.56:
+            img = ImageEnhance.Contrast(img).enhance(1.10)
+            img = ImageEnhance.Sharpness(img).enhance(1.05)
+            if mean_px > 195:
+                img = ImageEnhance.Brightness(img).enhance(0.96)
+            elif mean_px < 88:
+                img = ImageEnhance.Brightness(img).enhance(1.05)
             level = 1
-
         else:
-            # Level 2 — faded / very light scan: aggressive darkening
-            img = ImageEnhance.Contrast(img).enhance(1.90)
-            img = ImageEnhance.Sharpness(img).enhance(1.50)
-            if mean_px > 160:          # faded page
-                img = ImageEnhance.Brightness(img).enhance(0.80)
-            elif mean_px < 90:         # very dark scan (inverted / over-exposed)
-                img = ImageEnhance.Brightness(img).enhance(1.25)
-            # Unsharp mask to recover soft letter edges on very faded originals
-            img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=120, threshold=3))
+            img = img.filter(ImageFilter.MedianFilter(size=3))
+            img = ImageEnhance.Contrast(img).enhance(1.22)
+            img = ImageEnhance.Sharpness(img).enhance(1.12)
+            if mean_px > 185:
+                img = ImageEnhance.Brightness(img).enhance(0.92)
+            elif mean_px < 82:
+                img = ImageEnhance.Brightness(img).enhance(1.10)
             level = 2
 
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=88, optimize=True)
+        img.save(buf, format="JPEG", quality=95)
         processed = buf.getvalue()
-
         logger.debug(
-            "preprocess_page_image: level=%d quality=%.2f (contrast=%.2f "
-            "brightness=%.2f mean_px=%.0f) input=%d bytes output=%d bytes",
-            level, quality_score, contrast_score, brightness_score, mean_px,
-            len(jpeg_bytes), len(processed),
+            "preprocess_page_image: level=%d quality=%.2f mean_px=%.0f input=%d bytes output=%d bytes",
+            level, quality_score, mean_px, len(jpeg_bytes), len(processed),
         )
         return processed, quality_score
-
-    except Exception as exc:
-        logger.warning("preprocess_page_image failed (using original): %s", exc)
+    except Exception as e:
+        logger.warning("preprocess_page_image failed: %s", e)
         return jpeg_bytes, 0.5
-
-
-def _check_deposit_component(
-    net: float | None,
-    vat: float | None,
-    total: float | None,
-) -> tuple[bool, float]:
-    """Check whether a totals mismatch is plausibly explained by a deposit
-    or returnable-container component (e.g. BCRS in Malta).
-
-    Returns:
-        (True, deposit_amount) if a deposit is the likely cause.
-        (False, 0.0)           otherwise.
-
-    Heuristic: the unexplained difference is positive (additional charge),
-    small (≤ €25), and lands on a "round" value (whole euro or 50-cent
-    multiples) — consistent with per-unit BCRS / deposit charges.
-    """
-    if net is None or total is None:
-        return False, 0.0
-    vat_val = float(vat or 0.0)
-    net_f = float(net)
-    diff = round(float(total) - (net_f + vat_val), 2)
-    if 0.01 <= diff <= 25.00:
-        # Proportionality guard: deposit > 40% of net is clearly a mismatch
-        if net_f > 0 and (diff / net_f) > 0.40:
-            return False, 0.0
-        # Round-number check: whole euro, 50c, 25c, or 10c multiples
-        if round(diff % 1.0, 2) in (0.0, 0.10, 0.25, 0.50, 0.75):
-            return True, diff
-    return False, 0.0
-
-
-def _collect_review_reasons(
-    extracted: dict[str, Any],
-    validation_result: dict[str, Any] | None,
-) -> list[str]:
-    """Compute a list of specific reason codes explaining why this invoice
-    row may need human review.
-
-    Reason codes (pipe-joined when stored):
-        no_supplier             — supplier name could not be extracted
-        invoice_number_missing  — invoice number absent or looks like a label
-        no_amount               — total amount is missing
-        ambiguous_date_locale   — date is ambiguous (day == month, both ≤ 12)
-        vat_missing             — total > net but no VAT captured
-        vat_anomaly             — VAT rate is implausible (> 35% or < 2%)
-        totals_mismatch         — net + vat ≠ total (beyond tolerance)
-        deposit_component_detected:<amount> — mismatch explained by deposit
-        ai_validation_failed    — OpenAI validation pass returned 'failed'
-        ai_validation_warned    — OpenAI validation pass returned warnings
-        low_confidence          — overall confidence < 0.55
-    """
-    reasons: list[str] = []
-
-    if not extracted.get("supplier_name"):
-        reasons.append("no_supplier")
-
-    if suspicious_invoice_number(extracted.get("invoice_number")):
-        reasons.append("invoice_number_missing")
-
-    if extracted.get("total_amount") is None:
-        reasons.append("no_amount")
-
-    # Ambiguous date: both day AND month ≤ 12 (could be read either way)
-    d = extracted.get("invoice_date")
-    if d and hasattr(d, "day"):
-        if d.day <= 12 and d.month <= 12 and d.day != d.month:
-            reasons.append("ambiguous_date_locale")
-
-    net = extracted.get("net_amount")
-    vat = extracted.get("vat_amount")
-    total = extracted.get("total_amount")
-
-    if net is not None and total is not None and vat is None:
-        if float(total) > float(net) * 1.02:
-            reasons.append("vat_missing")
-
-    if net is not None and vat is not None and float(net) > 0:
-        vat_rate = float(vat) / float(net)
-        if vat_rate > 0.35 or (0.0 < vat_rate < 0.015):
-            reasons.append("vat_anomaly")
-
-    if net is not None and vat is not None and total is not None:
-        diff = abs((float(net) + float(vat)) - float(total))
-        if diff > 0.10:
-            is_deposit, deposit_amt = _check_deposit_component(net, vat, total)
-            if is_deposit:
-                reasons.append(f"deposit_component_detected:{deposit_amt:.2f}")
-            else:
-                reasons.append("totals_mismatch")
-
-    if validation_result:
-        vs = validation_result.get("validated_status", "passed")
-        if vs == "failed":
-            reasons.append("ai_validation_failed")
-        elif vs == "passed_with_warnings":
-            reasons.append("ai_validation_warned")
-
-    conf = extracted.get("_confidence")
-    if conf is not None and float(conf) < 0.55:
-        reasons.append("low_confidence")
-
-    return reasons
 
 
 def parse_amount(value: str | None) -> float | None:
@@ -1233,18 +1144,18 @@ def _collect_supplier_candidates(text: str, account_tokens: list[str] | None = N
     primary = find_supplier_name(text, account_tokens=account_tokens)
     if primary:
         candidates.append(primary)
-    for ln in text.splitlines()[:12]:
-        ln = " ".join(ln.split()).strip()
+    for ln in text.splitlines()[:14]:
+        ln = normalise_company_name(_clean_ocr_supplier_name(" ".join(ln.split()).strip()))
         if not ln:
             continue
         if suspicious_supplier_name(ln) or bad_supplier_line(ln):
             continue
-        if re.search(r"\b(invoice|date|vat|tax|customer|bill to|ship to|total|amount due)\b", ln, re.I):
+        if re.search(r"\b(invoice|date|vat|tax|customer|bill to|ship to|total|amount due|subtotal)\b", ln, re.I):
             continue
         if re.search(r"[A-Za-z]", ln) and len(ln) >= 4 and len(ln) <= 80:
-            if any(k in ln.lower() for k in ("ltd", "limited", "plc", "co", "company", "trading", "services", "group")):
+            if _company_strength_score(ln) >= 6:
                 candidates.append(ln)
-    return _dedupe_candidates(candidates)
+    return sorted(_dedupe_candidates(candidates), key=_company_strength_score, reverse=True)
 
 
 def _collect_invoice_number_candidates(text: str) -> list[str]:
@@ -2371,28 +2282,17 @@ def merge_ai_fields(
     )
 
     if ai_supplier and not suspicious_supplier_name(ai_supplier):
-        if is_azure_di:
-            # Azure DI uses a dedicated VendorName field from its prebuilt-invoice
-            # model — a semantically trained slot, not a free-text scan.  Its
-            # confidence score can be low for stylised logos / unusual fonts, but
-            # the extracted value is almost always more reliable than position-
-            # heuristic rule-based detection.
-            # Policy: always prefer Azure DI's VendorName over rule-based,
-            # even when rule-based found something plausible.  The account-company
-            # hard-block above is the sufficient guard against the customer-name
-            # confusion case.
+        ai_supplier = normalise_company_name(_clean_ocr_supplier_name(ai_supplier))
+        rule_supplier = normalise_company_name(_clean_ocr_supplier_name(merged.get("supplier_name")))
+        ai_score = _company_strength_score(ai_supplier) + int(ai_supplier_conf * 5)
+        rule_score = _company_strength_score(rule_supplier)
+        if not rule_supplier_ok:
             merged["supplier_name"] = ai_supplier
-            if rule_supplier_ok and merged["supplier_name"] != ai_supplier:
-                logger.info(
-                    "merge_ai_fields: Azure DI VendorName '%s' overrides rule-based '%s'",
-                    ai_supplier, merged.get("supplier_name"),
-                )
-        else:
-            # OpenAI vision / text: free-form reading — keep the stricter gate
-            # (≥ 0.85) to prevent picking up customer name printed elsewhere.
-            if not rule_supplier_ok:
+        elif is_azure_di:
+            if ai_score >= rule_score or len(ai_supplier or "") >= len(rule_supplier or "") + 4:
                 merged["supplier_name"] = ai_supplier
-            elif ai_supplier_conf >= 0.85:
+        else:
+            if ai_supplier_conf >= 0.85 and ai_score >= rule_score:
                 merged["supplier_name"] = ai_supplier
 
     # Clean OCR artefacts (embedded newlines, leading junk chars) then normalise casing.
@@ -2418,12 +2318,18 @@ def merge_ai_fields(
     # Policy: if Azure DI returned a value, it REPLACES the rule-based value
     # (not just fills gaps).  OpenAI vision/text only fills gaps.
     if is_azure_di:
-        if ai.get("net_amount") is not None:
-            merged["net_amount"] = ai["net_amount"]
-        if ai.get("vat_amount") is not None:
-            merged["vat_amount"] = ai["vat_amount"]
-        if ai.get("total_amount") is not None:
-            merged["total_amount"] = ai["total_amount"]
+        base_support = _amount_support_score(merged.get("net_amount"), merged.get("vat_amount"), merged.get("total_amount"))
+        ai_support = _amount_support_score(ai.get("net_amount"), ai.get("vat_amount"), ai.get("total_amount"))
+        for field in ("net_amount", "vat_amount", "total_amount"):
+            ai_val = ai.get(field)
+            base_val = merged.get(field)
+            if ai_val is None:
+                continue
+            if _prefer_base_amount(base_val, ai_val) and base_support >= ai_support:
+                continue
+            if base_support >= ai_support + 4 and base_val is not None:
+                continue
+            merged[field] = ai_val
     else:
         if merged.get("net_amount") is None and ai.get("net_amount") is not None:
             merged["net_amount"] = ai.get("net_amount")
@@ -2549,8 +2455,9 @@ def process_pdf_page(
 
         # Stage 1 preprocessing applied once we have the JPEG
         if raw_jpeg:
-            jpeg_bytes, page_quality_score = preprocess_page_image(raw_jpeg)
-            logger.debug("Page %d quality score: %.2f", page_index, page_quality_score)
+            processed_jpeg, page_quality_score = preprocess_page_image(raw_jpeg)
+            jpeg_bytes = raw_jpeg if page_quality_score >= 0.62 else processed_jpeg
+            logger.debug("Page %d quality score: %.2f (image_source=%s)", page_index, page_quality_score, "raw" if jpeg_bytes is raw_jpeg else "processed")
         else:
             jpeg_bytes = None
 

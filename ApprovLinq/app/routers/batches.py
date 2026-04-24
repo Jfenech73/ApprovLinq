@@ -770,9 +770,9 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
 
     # Pass 1: regex extraction over the whole summary text, useful when OCR collapses rows.
     patterns = [
-        re.compile(r"(?is)\bbcrs(?:\s+refundable)?(?:\s+deposit)?\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
-        re.compile(r"(?is)\brefundable\s+deposit\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
-        re.compile(r"(?is)\bdeposit\s+summary\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
+        re.compile(r"(?is)\bbcrs(?:\s+refundable)?(?:\s+deposit)?(?:\s*\([^\n)]{1,12}\))?\b[^\d\n€-]{0,40}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
+        re.compile(r"(?is)\brefundable\s+deposit(?:\s*\([^\n)]{1,12}\))?\b[^\d\n€-]{0,40}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
+        re.compile(r"(?is)\bdeposit\s+summary(?:\s*\([^\n)]{1,12}\))?\b[^\d\n€-]{0,40}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
         re.compile(r"(?is)\bdeposits?\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
         re.compile(r"(?is)\breturnables?\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
         re.compile(r"(?is)\bsurcharge\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
