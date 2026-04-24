@@ -398,6 +398,42 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             )
 
 
+def _normalise_text_signature(text: str | None) -> str:
+    text = (text or "").lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\b(?:invoice|tax|vat|date|page|total|subtotal|summary|amount|no|number|eur|gbp|usd)\b", " ", text)
+    tokens = [t for t in text.split() if len(t) > 2]
+    seen: list[str] = []
+    for tok in tokens:
+        if tok not in seen:
+            seen.append(tok)
+        if len(seen) >= 18:
+            break
+    return " ".join(seen)
+
+
+def _build_document_signature(payload_or_row: object) -> str:
+    parts: list[str] = []
+    for attr in ("header_raw", "totals_raw", "page_text_raw"):
+        try:
+            val = getattr(payload_or_row, attr, None)
+        except Exception:
+            val = None
+        if not val and isinstance(payload_or_row, dict):
+            val = payload_or_row.get(attr)
+        if val:
+            parts.append(str(val))
+    return _normalise_text_signature("\n".join(parts)[:4000])
+
+
+def _signature_overlap(sig_a: str, sig_b: str) -> float:
+    sa = {t for t in (sig_a or "").split() if t}
+    sb = {t for t in (sig_b or "").split() if t}
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / max(len(sa), len(sb))
+
+
 def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
     """Apply saved RemapHints as extraction guidance.
 
@@ -406,11 +442,11 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
     - the field is listed in review_fields (flagged for review), OR
     - the field value looks obviously suspect (very short / clearly wrong format)
 
-    Preference order: supplier_id match first, normalised name fallback.
-    Never overwrites a field that has a solid non-suspect value and is not flagged.
+    Preference order: supplier_id match first, normalised name fallback, then
+    lightweight document-signature fallback when supplier extraction is blank or
+    clearly suspicious. Never overwrites a field that has a solid non-suspect
+    value and is not flagged.
     """
-    if not row.supplier_name:
-        return
 
     def _norm(s: str) -> str:
         import re as _re
@@ -418,12 +454,9 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                     "", (s or "").lower())
         return _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9 ]", " ", n)).strip()
 
-    row_norm = _norm(row.supplier_name)
-    if not row_norm:
-        return
+    row_norm = _norm(getattr(row, "supplier_name", None) or "")
+    row_signature = _build_document_signature(row)
 
-    # Determine which fields are candidates for remap overwrite:
-    # blank fields + fields explicitly flagged for review
     _review_fields: set[str] = set()
     if row.review_fields:
         sep = "|" if "|" in (row.review_fields or "") else ","
@@ -435,12 +468,6 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         "nominal_account_code", "description",
     )
 
-    # A field is eligible for hint overwrite when it is:
-    #   a) blank / missing
-    #   b) explicitly flagged in review_fields
-    #   c) obviously suspect (clearly wrong value)
-    #   d) low-confidence and row is flagged for review
-    # Strong, trusted values are never silently replaced.
     _low_confidence = (
         row.review_required
         and row.confidence_score is not None
@@ -448,15 +475,14 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
     )
     target_fields = {
         f for f in _REMAP_FIELDS
-        if not getattr(row, f, None)                              # blank
-        or f in _review_fields                                    # flagged for review
-        or _is_suspect_field_value(f, getattr(row, f, None))     # obviously wrong
-        or _low_confidence                                        # whole row is low-confidence
+        if not getattr(row, f, None)
+        or f in _review_fields
+        or _is_suspect_field_value(f, getattr(row, f, None))
+        or _low_confidence
     }
     if not target_fields:
         return
 
-    # Query hints: prefer supplier_id match, fall back to name snapshot
     hints_q = db.query(RemapHint).filter(
         RemapHint.tenant_id == batch.tenant_id,
         RemapHint.active.is_(True),
@@ -467,9 +493,8 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
     if not all_hints:
         return
 
-    # Find supplier record for this row (for id-based matching)
     supplier_id: int | None = None
-    if row.supplier_name:
+    if getattr(row, "supplier_name", None):
         from app.db.models import TenantSupplier as _TS
         from sqlalchemy import select as _sel
         sq = _sel(_TS).where(
@@ -482,16 +507,33 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         if _supp:
             supplier_id = _supp.id
 
-    # Match by supplier_id first, then by normalised name
+    matched: list[RemapHint] = []
     if supplier_id:
-        matched = [h for h in all_hints if h.supplier_id == supplier_id]
-    else:
-        matched = []
-    if not matched:
-        matched = [
+        matched.extend([h for h in all_hints if h.supplier_id == supplier_id])
+    if row_norm:
+        matched.extend([
             h for h in all_hints
-            if h.supplier_name_snapshot and _norm(h.supplier_name_snapshot) == row_norm
-        ]
+            if h not in matched
+            and h.supplier_name_snapshot
+            and _norm(h.supplier_name_snapshot) == row_norm
+        ])
+    if row_signature:
+        source_rows: dict[int, object] = {}
+        for h in all_hints:
+            if h in matched or not h.source_row_id:
+                continue
+            src_row = source_rows.get(h.source_row_id)
+            if src_row is None:
+                try:
+                    src_row = db.get(InvoiceRow, h.source_row_id)
+                except Exception:
+                    src_row = None
+                source_rows[h.source_row_id] = src_row
+            if not src_row:
+                continue
+            sig = _build_document_signature(src_row)
+            if _signature_overlap(row_signature, sig) >= 0.35:
+                matched.append(h)
     if not matched:
         return
 
@@ -515,9 +557,6 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 float(hint.x), float(hint.y), float(hint.w), float(hint.h),
             )
             if text:
-                # Guard: invoice-like tokens must never be written to supplier_name
-                # (e.g. user drew a remap region over an invoice number area while
-                # supplier_name was the active field — reject silently).
                 if hint.field_name == "supplier_name":
                     _v = text.strip()
                     _digits = sum(1 for c in _v if c.isdigit())
@@ -526,44 +565,30 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                         or (re.match(r"^[A-Z0-9\-\/]{2,15}$", _v, re.I) and " " not in _v)
                     )
                     if _is_inv_like:
-                        logger.debug(
-                            "RemapHint: rejected invoice-like value %r for supplier_name "
-                            "supplier=%r",
-                            text[:40], row.supplier_name,
-                        )
+                        logger.debug("RemapHint: rejected invoice-like value %r for supplier_name supplier=%r", text[:40], row.supplier_name)
                         continue
 
-                # Phase 3 guard: if this field is only eligible because of
-                # _low_confidence (not blank/review/suspect), do a final check
-                # that the existing value is not already strong/trusted.
-                # A strong value: non-empty, not suspect, not in review_fields,
-                # and confidence_score >= 0.75 (if recorded per-field).
                 existing = getattr(row, hint.field_name, None)
                 if (
-                    existing
-                    and str(existing).strip()
+                    existing and str(existing).strip()
                     and hint.field_name not in _review_fields
                     and not _is_suspect_field_value(hint.field_name, existing)
                     and not _low_confidence
                 ):
-                    # Strong value — leave it alone
-                    logger.debug(
-                        "RemapHint: strong existing value %r for field=%s — "
-                        "skipping hint (hint_id=%d supplier=%r)",
-                        str(existing)[:40], hint.field_name, hint.id, row.supplier_name,
-                    )
+                    logger.debug("RemapHint: strong existing value %r for field=%s — skipping hint (hint_id=%d supplier=%r)", str(existing)[:40], hint.field_name, hint.id, row.supplier_name)
                     continue
 
                 old_val = getattr(row, hint.field_name, None)
                 setattr(row, hint.field_name, text)
+                current_method = (getattr(row, 'method_used', '') or '')
+                tag = f'remap_hint:{hint.field_name}'
+                if tag not in current_method:
+                    row.method_used = (current_method + '+' + tag).strip('+')
                 target_fields.discard(hint.field_name)
-                # Source attribution: record which hint improved this field
                 logger.debug(
-                    "RemapHint applied: supplier=%r field=%s %r→%r "
-                    "(hint_id=%d source=remap_hint)",
+                    "RemapHint applied: supplier=%r field=%s %r→%r (hint_id=%d source=remap_hint)",
                     row.supplier_name, hint.field_name,
-                    str(old_val)[:30] if old_val else None,
-                    text[:40], hint.id,
+                    str(old_val)[:30] if old_val else None, text[:40], hint.id,
                 )
         except Exception as exc:
             logger.debug("RemapHint apply failed for field %s: %s", hint.field_name, exc)
@@ -1005,6 +1030,71 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
         return None
 
     return best_val
+
+
+def _get_supplier_bcrs_precedent_score(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> int:
+    if not getattr(row, "supplier_name", None):
+        return 0
+    try:
+        precedent = db.query(RemapHint).filter(
+            RemapHint.tenant_id == batch.tenant_id,
+            RemapHint.active.is_(True),
+            RemapHint.field_name.in_(["net_amount", "total_amount", "description"]),
+            RemapHint.supplier_name_snapshot == row.supplier_name,
+        ).count()
+        return 4 if precedent > 0 else 0
+    except Exception:
+        return 0
+
+
+def _decide_bcrs_split(db: Session, batch: InvoiceBatch, row: InvoiceRow, payload: dict, page_rows: list[InvoiceRow] | None = None) -> tuple[str, float | None, str | None]:
+    amount = _extract_bcrs_amount_from_summary(payload)
+    existing_line = bool(amount and page_rows and _page_has_existing_bcrs_row(page_rows, amount))
+    lines_text = str(payload.get("line_items_raw") or "")
+    totals_text = "\n".join([str(payload.get("totals_raw") or ""), str(payload.get("page_text_raw") or "")])
+    score = 0
+    if amount and amount > 0:
+        score += 14
+    if payload.get("_deposit_candidate") not in (None, ""):
+        try:
+            dep = round(float(payload.get("_deposit_candidate")), 2)
+            if amount and abs(dep - amount) <= 0.06:
+                score += 10
+            elif dep > 0:
+                score += 5
+        except Exception:
+            pass
+    if re.search(r"\b(bcrs|refundable\s+deposit|deposit\s+summary|returnables?|deposits?|surcharge)\b", totals_text, re.I):
+        score += 8
+    if re.search(r"\b(bcrs|deposit|returnable|surcharge)\b", lines_text, re.I):
+        score += 3
+    try:
+        inv_net = payload.get("source_invoice_net_amount", payload.get("net_amount"))
+        inv_vat = payload.get("source_invoice_vat_amount", payload.get("vat_amount"))
+        inv_total = payload.get("source_invoice_total_amount", payload.get("total_amount"))
+        if amount is not None and inv_net is not None and inv_total is not None:
+            if abs((float(inv_net) + float(inv_vat or 0) + float(amount)) - float(inv_total)) <= 0.10:
+                score += 10
+            elif abs((float(inv_total) - (float(inv_net) + float(inv_vat or 0)))) > 0.10:
+                score += 4
+    except Exception:
+        pass
+    score += _get_supplier_bcrs_precedent_score(db, batch, row)
+    if existing_line:
+        return ("no_split", None, None)
+    if amount and score >= 22:
+        return ("auto_split", amount, None)
+    mismatch = False
+    try:
+        inv_net = payload.get("source_invoice_net_amount", payload.get("net_amount"))
+        inv_vat = payload.get("source_invoice_vat_amount", payload.get("vat_amount"))
+        inv_total = payload.get("source_invoice_total_amount", payload.get("total_amount"))
+        mismatch = inv_total is not None and inv_net is not None and abs(float(inv_total) - (float(inv_net) + float(inv_vat or 0))) > 0.10
+    except Exception:
+        mismatch = False
+    if mismatch and (amount or re.search(r"\b(bcrs|deposit|returnable|surcharge)\b", totals_text, re.I)):
+        return ("review_suggest_split", amount, "Possible deposit/BCRS adjustment not safely resolved")
+    return ("no_split", None, None)
 
 
 def _build_bcrs_row(row: InvoiceRow, amount: float) -> InvoiceRow:
@@ -1824,37 +1914,47 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             total_rows += 1
                             if (batch.scan_mode or "summary").lower() == "lines":
                                 continue
-                            bcrs_amount = _extract_bcrs_amount_from_summary(r)
-                            if bcrs_amount and bcrs_amount > 0:
+                            bcrs_outcome, bcrs_amount, bcrs_reason = _decide_bcrs_split(db, batch, row, r, [row])
+                            if bcrs_outcome == "auto_split" and bcrs_amount and bcrs_amount > 0:
                                 bcrs_row = _build_bcrs_row(row, bcrs_amount)
                                 db.add(bcrs_row)
                                 inserted_rows += 1
                                 total_rows += 1
-                                # Correct the original row total so it no longer includes
-                                # the BCRS component.  After the split:
-                                #   original.total = net + vat  (BCRS excluded)
-                                #   bcrs_row.total = bcrs_amount
-                                #   original.total + bcrs_row.total = real invoice total
                                 _net = round(float(row.net_amount or 0.0), 2)
                                 _vat = round(float(row.vat_amount or 0.0), 2)
                                 _corrected_total = round(_net + _vat, 2)
                                 if _corrected_total >= 0 and _corrected_total < round(float(row.total_amount or 0.0), 2):
                                     row.total_amount = _corrected_total
+                            elif bcrs_outcome == "review_suggest_split":
+                                row.review_required = True
+                                row.validation_status = row.validation_status or "review_bcrs_ambiguous"
+                                reasons = [x for x in re.split(r"[|]", row.review_reasons or "") if x]
+                                if bcrs_reason and bcrs_reason not in reasons:
+                                    reasons.append(bcrs_reason)
+                                row.review_reasons = "|".join(reasons)
                         if (batch.scan_mode or "summary").lower() == "lines" and row_payloads:
                             anchor_payload = dict(row_payloads[0])
-                            bcrs_amount = _extract_bcrs_amount_from_summary(anchor_payload)
-                            if bcrs_amount and bcrs_amount > 0:
-                                page_rows = [
-                                    obj for obj in db.new
-                                    if isinstance(obj, InvoiceRow)
-                                    and obj.batch_id == batch_id
-                                    and obj.source_file_id == invoice_file.id
-                                    and obj.page_no == (row_payloads[0].get("page_no") or (page_index + 1))
-                                ]
-                                if page_rows and not _page_has_existing_bcrs_row(page_rows, bcrs_amount):
+                            page_rows = [
+                                obj for obj in db.new
+                                if isinstance(obj, InvoiceRow)
+                                and obj.batch_id == batch_id
+                                and obj.source_file_id == invoice_file.id
+                                and obj.page_no == (row_payloads[0].get("page_no") or (page_index + 1))
+                            ]
+                            if page_rows:
+                                outcome, bcrs_amount, bcrs_reason = _decide_bcrs_split(db, batch, page_rows[0], anchor_payload, page_rows)
+                                if outcome == "auto_split" and bcrs_amount and bcrs_amount > 0:
                                     db.add(_build_bcrs_row(page_rows[0], bcrs_amount))
                                     inserted_rows += 1
                                     total_rows += 1
+                                elif outcome == "review_suggest_split":
+                                    for _r in page_rows:
+                                        _r.review_required = True
+                                        _r.validation_status = _r.validation_status or "review_bcrs_ambiguous"
+                                        reasons = [x for x in re.split(r"[|]", _r.review_reasons or "") if x]
+                                        if bcrs_reason and bcrs_reason not in reasons:
+                                            reasons.append(bcrs_reason)
+                                        _r.review_reasons = "|".join(reasons)
                         processed_pages += 1
                         # Per-page progress: direct UPDATE with stale-overwrite guard.
                         # WHERE page_count < processed_pages ensures a lower counter

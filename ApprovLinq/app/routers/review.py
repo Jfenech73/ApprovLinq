@@ -786,14 +786,16 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
             supplier_q = supplier_q.where(M.TenantSupplier.company_id == batch.company_id)
         supplier = db.execute(supplier_q).scalar_one_or_none()
 
-    existing_hint = db.execute(
-        select(RemapHint).where(
-            RemapHint.tenant_id == batch.tenant_id,
-            RemapHint.field_name == payload.field_name,
-            RemapHint.supplier_name_snapshot == row.supplier_name,
-            RemapHint.page_no == payload.page_no,
-        ).limit(1)
-    ).scalar_one_or_none()
+    hint_stmt = select(RemapHint).where(
+        RemapHint.tenant_id == batch.tenant_id,
+        RemapHint.field_name == payload.field_name,
+        RemapHint.page_no == payload.page_no,
+    )
+    if supplier:
+        hint_stmt = hint_stmt.where(RemapHint.supplier_id == supplier.id)
+    else:
+        hint_stmt = hint_stmt.where(RemapHint.supplier_name_snapshot == row.supplier_name)
+    existing_hint = db.execute(hint_stmt.limit(1)).scalar_one_or_none()
 
     if existing_hint:
         existing_hint.x = payload.x

@@ -1187,6 +1187,88 @@ def _extract_structured_summary_totals(text: str) -> dict | None:
     return result
 
 
+def _dedupe_candidates(values: list[str | None]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in values:
+        if not v:
+            continue
+        vv = " ".join(str(v).split()).strip()
+        key = vv.lower()
+        if not vv or key in seen:
+            continue
+        seen.add(key)
+        out.append(vv)
+    return out
+
+
+def _rank_candidates_with_llm(field_name: str, candidates: list[str], page_text: str, api_key: str | None, model: str = "gpt-4.1-mini") -> dict[str, Any] | None:
+    if not api_key or len(candidates) < 2:
+        return None
+    prompt = (
+        f"Choose the best {field_name} candidate from the list. Return JSON only with keys chosen_candidate, confidence, review_recommended, reason. "
+        f"You must choose one of the provided candidates exactly or null. Field: {field_name}.\n"
+        f"Candidates: {json.dumps(candidates)}\n"
+        f"Page text excerpt:\n{page_text[:3500]}"
+    )
+    raw = _call_openai(prompt, api_key, model, max_tokens=180, timeout=35)
+    if not raw:
+        return None
+    try:
+        m = re.search(r"\?\{.*\}", raw, re.S)
+    except Exception:
+        m = None
+    try:
+        payload = json.loads(m.group(0) if m else raw)
+        chosen = payload.get("chosen_candidate")
+        if chosen is not None and chosen not in candidates:
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+def _collect_supplier_candidates(text: str, account_tokens: list[str] | None = None) -> list[str]:
+    candidates: list[str] = []
+    primary = find_supplier_name(text, account_tokens=account_tokens)
+    if primary:
+        candidates.append(primary)
+    for ln in text.splitlines()[:12]:
+        ln = " ".join(ln.split()).strip()
+        if not ln:
+            continue
+        if suspicious_supplier_name(ln) or bad_supplier_line(ln):
+            continue
+        if re.search(r"\b(invoice|date|vat|tax|customer|bill to|ship to|total|amount due)\b", ln, re.I):
+            continue
+        if re.search(r"[A-Za-z]", ln) and len(ln) >= 4 and len(ln) <= 80:
+            if any(k in ln.lower() for k in ("ltd", "limited", "plc", "co", "company", "trading", "services", "group")):
+                candidates.append(ln)
+    return _dedupe_candidates(candidates)
+
+
+def _collect_invoice_number_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    primary = first_match([
+        r"invoice\s*(?:no\.?|number|#|nr\.?)\s*[.:\-]*\s*([A-Z0-9][A-Z0-9\/\-_]*[0-9][A-Z0-9\/\-_]*)",
+        r"invoice\s*(?:no\.?|number|#|nr\.?)\s*[.:\-]*\s*([0-9][A-Z0-9\/\-_]*)",
+        r"\bINV[.\-_]?([0-9][A-Z0-9\/\-_]*)",
+        r"\bdocument\s*(?:no\.?|number|nr\.?)\s*[.:\-]*\s*([A-Z0-9\/\-_]*[0-9][A-Z0-9\/\-_]*)",
+        r"\binv(?:oice|oiice|oice)?\s*[.:\-]+\s*([A-Z0-9\/\-_]*[0-9][A-Z0-9\/\-_]*)",
+    ], text)
+    if primary and not suspicious_invoice_number(primary):
+        candidates.append(primary)
+    fallback = _invoice_number_fallback(text)
+    if fallback and not suspicious_invoice_number(fallback):
+        candidates.append(fallback)
+    top = "\n".join(text.splitlines()[:20])
+    for m in re.finditer(r"\b([A-Z]{1,4}[\-\/]?[0-9]{3,}|[0-9]{4,}[A-Z0-9\-/]*)\b", top):
+        cand = m.group(1)
+        if not suspicious_invoice_number(cand):
+            candidates.append(cand)
+    return _dedupe_candidates(candidates)
+
+
 def _invoice_number_fallback(text: str) -> str | None:
     """Fallback invoice-number extractor for invoice layouts where the number
     appears in the top header region but is not reliably captured by standard patterns.
@@ -1290,28 +1372,10 @@ def simple_extract(
 ) -> dict[str, Any]:
     account_tokens = _build_account_tokens(account_company_name)
 
-    invoice_number = first_match([
-        # Standard label patterns — allow period before colon ("No.: 45005")
-        r"invoice\s*(?:no\.?|number|#|nr\.?)\s*[.:\-]*\s*([A-Z0-9][A-Z0-9\/\-_]*[0-9][A-Z0-9\/\-_]*)",
-        r"invoice\s*(?:no\.?|number|#|nr\.?)\s*[.:\-]*\s*([0-9][A-Z0-9\/\-_]*)",
-        # "INV" prefix followed immediately by digits
-        r"\bINV[.\-_]?([0-9][A-Z0-9\/\-_]*)",
-        # Generic document number
-        r"\bdocument\s*(?:no\.?|number|nr\.?)\s*[.:\-]*\s*([A-Z0-9\/\-_]*[0-9][A-Z0-9\/\-_]*)",
-        # Fallback: "inv" word-boundary only when followed by colon/dash then a number
-        r"\binv(?:oice|oiice|oice)?\s*[.:\-]+\s*([A-Z0-9\/\-_]*[0-9][A-Z0-9\/\-_]*)",
-    ], text)
-    # Reject anything that looks like a word rather than a number
-    if suspicious_invoice_number(invoice_number):
-        invoice_number = None
-
-    # Fallback: broader header-region search for Nectar-style layouts where the
-    # standard patterns miss the number (e.g. purely numeric ref on the same line
-    # as the label but with unusual spacing / OCR noise).
+    invoice_candidates = _collect_invoice_number_candidates(text)  # includes _invoice_number_fallback replay
+    invoice_number = invoice_candidates[0] if invoice_candidates else None
     if not invoice_number:
         invoice_number = _invoice_number_fallback(text)
-        if invoice_number:
-            logger.debug("invoice_number extracted via fallback: %r", invoice_number)
 
     invoice_date_raw = first_match([
         r"invoice\s*date\s*[:\-]?\s*([0-9]{1,2}[\/\-.][0-9]{1,2}[\/\-.][0-9]{2,4})",
@@ -1352,7 +1416,8 @@ def simple_extract(
     vat_amount = parse_amount(vat_raw)
     total_amount = parse_amount(total_raw)
 
-    supplier_name = find_supplier_name(text, account_tokens=account_tokens)
+    supplier_candidates = _collect_supplier_candidates(text, account_tokens=account_tokens)
+    supplier_name = supplier_candidates[0] if supplier_candidates else None
     line_items_raw = extract_candidate_line_items(text)
 
     description = None
@@ -1385,6 +1450,22 @@ def simple_extract(
         # _deposit_candidate is passed through the return dict for BCRS detection
         # in batches.py; it does NOT by itself trigger a split.
 
+    _field_sources: dict[str, str] = {}
+    if len(invoice_candidates) > 1:
+        ranked = _rank_candidates_with_llm("invoice_number", invoice_candidates, text, openai_api_key, model=settings.openai_model)
+        if ranked and ranked.get("chosen_candidate") and ranked.get("confidence") in ("high", "medium", "strong"):
+            invoice_number = ranked["chosen_candidate"]
+            _field_sources["invoice_number"] = "llm_ranking"
+        elif ranked and ranked.get("review_recommended"):
+            _field_sources["invoice_number"] = "llm_review"
+    if len(supplier_candidates) > 1:
+        ranked = _rank_candidates_with_llm("supplier_name", supplier_candidates, text, openai_api_key, model=settings.openai_model)
+        if ranked and ranked.get("chosen_candidate") and ranked.get("confidence") in ("high", "medium", "strong"):
+            supplier_name = ranked["chosen_candidate"]
+            _field_sources["supplier_name"] = "llm_ranking"
+        elif ranked and ranked.get("review_recommended"):
+            _field_sources["supplier_name"] = "llm_review"
+
     return {
         "supplier_name": supplier_name,
         "invoice_number": invoice_number,
@@ -1401,6 +1482,9 @@ def simple_extract(
             None
         ),
         "tax_code": None,
+        "_field_sources": _field_sources,
+        "_invoice_candidates": invoice_candidates,
+        "_supplier_candidates": supplier_candidates,
     }
 
 
@@ -2801,7 +2885,7 @@ def process_pdf_page(
 
     extracted.update({
         "page_no":                    page_index + 1,
-        "method_used":                method,
+        "method_used":                method + ("+llm_ranked" if any(v == "llm_ranking" for v in (extracted.get("_field_sources") or {}).values()) else ""),
         "confidence_score":           confidence,
         "validation_status":          final_status,
         "review_required":            review_required,
