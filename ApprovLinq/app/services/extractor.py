@@ -61,16 +61,24 @@ def _company_strength_score(value: str | None) -> int:
     return score
 
 
-def _amount_support_score(net_amount: float | None, vat_amount: float | None, total_amount: float | None) -> int:
+def _amount_support_score(
+    net_amount: float | None,
+    vat_amount: float | None,
+    total_amount: float | None,
+    deposit_amount: float | None = None,
+) -> int:
     try:
         net = float(net_amount) if net_amount is not None else None
         vat = float(vat_amount or 0) if net is not None else None
         total = float(total_amount) if total_amount is not None else None
+        deposit = float(deposit_amount or 0) if deposit_amount is not None else 0.0
     except Exception:
         return 0
     if net is None or total is None:
         return 0
-    diff = abs((net + float(vat or 0)) - total)
+    diff_plain = abs((net + float(vat or 0)) - total)
+    diff_with_deposit = abs((net + float(vat or 0) + float(deposit or 0)) - total)
+    diff = min(diff_plain, diff_with_deposit if deposit_amount is not None else diff_plain)
     if diff <= 0.05:
         return 12
     if diff <= 0.15:
@@ -2318,8 +2326,18 @@ def merge_ai_fields(
     # Policy: if Azure DI returned a value, it REPLACES the rule-based value
     # (not just fills gaps).  OpenAI vision/text only fills gaps.
     if is_azure_di:
-        base_support = _amount_support_score(merged.get("net_amount"), merged.get("vat_amount"), merged.get("total_amount"))
-        ai_support = _amount_support_score(ai.get("net_amount"), ai.get("vat_amount"), ai.get("total_amount"))
+        base_support = _amount_support_score(
+            merged.get("net_amount"),
+            merged.get("vat_amount"),
+            merged.get("total_amount"),
+            merged.get("_deposit_candidate"),
+        )
+        ai_support = _amount_support_score(
+            ai.get("net_amount"),
+            ai.get("vat_amount"),
+            ai.get("total_amount"),
+            ai.get("_deposit_candidate") if isinstance(ai, dict) else None,
+        )
         for field in ("net_amount", "vat_amount", "total_amount"):
             ai_val = ai.get(field)
             base_val = merged.get(field)
@@ -2328,6 +2346,16 @@ def merge_ai_fields(
             if _prefer_base_amount(base_val, ai_val) and base_support >= ai_support:
                 continue
             if base_support >= ai_support + 4 and base_val is not None:
+                continue
+            # Preserve structured values that only reconcile when a known deposit/BCRS
+            # candidate is included. This prevents Azure DI from zeroing VAT on invoices
+            # where total = net + VAT + deposit.
+            if (
+                field == "vat_amount"
+                and base_val is not None
+                and merged.get("_deposit_candidate") not in (None, "")
+                and base_support >= ai_support
+            ):
                 continue
             merged[field] = ai_val
     else:

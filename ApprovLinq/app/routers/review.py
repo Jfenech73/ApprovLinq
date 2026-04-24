@@ -707,34 +707,26 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
         return ""
 
     try:
-        from app.config import settings
-        import requests
-        if not getattr(settings, "ocr_space_api_key", None):
-            logger.debug("_read_region_text: tier3 skipped — OCR.space not configured")
-            return ""
-        _resp = requests.post(
-            settings.ocr_space_endpoint,
-            files={"file": ("region.jpg", _img_bytes, "image/jpeg")},
-            data={
-                "apikey":            settings.ocr_space_api_key,
-                "language":          settings.ocr_space_language,
-                "isOverlayRequired": "false",
-                "scale":             "true",
-                "OCREngine":         str(settings.ocr_space_ocr_engine),
-            },
-            timeout=settings.ocr_space_timeout_seconds,
-        )
-        _resp.raise_for_status()
-        _ocr = _resp.json()
-        if _ocr.get("IsErroredOnProcessing"):
-            logger.debug("_read_region_text: tier3 OCR.space errored")
-            return ""
-        _out: list[str] = []
-        for _item in _ocr.get("ParsedResults") or []:
-            _t = (_item or {}).get("ParsedText") or ""
-            if _t:
-                _out.append(_t)
-        t3 = " ".join(" ".join(_out).split())
+        # Try the exact crop first, then a slightly expanded crop to tolerate
+        # narrow user selections around header text / supplier titles.
+        t3 = _ocr_region_bytes(_img_bytes)
+        if _count_meaningful(t3) < 3:
+            try:
+                _pad_x = max(6, int((_box[2] - _box[0]) * 0.08))
+                _pad_y = max(4, int((_box[3] - _box[1]) * 0.12))
+                _ebox = (
+                    max(0, _box[0] - _pad_x),
+                    max(0, _box[1] - _pad_y),
+                    min(_W, _box[2] + _pad_x),
+                    min(_H, _box[3] + _pad_y),
+                )
+                _ebuf = io.BytesIO()
+                _full.crop(_ebox).save(_ebuf, format="JPEG", quality=90)
+                expanded_text = _ocr_region_bytes(_ebuf.getvalue())
+                if _count_meaningful(expanded_text) > _count_meaningful(t3):
+                    t3 = expanded_text
+            except Exception:
+                pass
         logger.debug(
             "_read_region_text: tier3 (OCR.space) %r meaningful=%d",
             t3[:60], _count_meaningful(t3),
@@ -797,6 +789,8 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         hint_stmt = hint_stmt.where(RemapHint.supplier_name_snapshot == row.supplier_name)
     existing_hint = db.execute(hint_stmt.limit(1)).scalar_one_or_none()
 
+    _snapshot_supplier_name = row.supplier_name
+
     if existing_hint:
         existing_hint.x = payload.x
         existing_hint.y = payload.y
@@ -808,6 +802,8 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         existing_hint.source_row_id   = row.id
         if supplier:
             existing_hint.supplier_id = supplier.id
+        if _snapshot_supplier_name:
+            existing_hint.supplier_name_snapshot = _snapshot_supplier_name
         hint = existing_hint
         logger.debug("save_remap: updated existing RemapHint id=%d", hint.id)
     else:
@@ -815,7 +811,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
             tenant_id=batch.tenant_id,
             company_id=batch.company_id,
             supplier_id=supplier.id if supplier else None,
-            supplier_name_snapshot=row.supplier_name,
+            supplier_name_snapshot=_snapshot_supplier_name,
             field_name=payload.field_name,
             page_no=payload.page_no,
             x=payload.x, y=payload.y, w=payload.w, h=payload.h,
@@ -865,6 +861,10 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
 
     # Normalise: collapse whitespace, strip leading/trailing
     read_text = " ".join(read_text.split()).strip() if read_text else ""
+    if payload.field_name == "supplier_name" and read_text:
+        _snapshot_supplier_name = read_text
+        if not getattr(hint, "supplier_name_snapshot", None):
+            hint.supplier_name_snapshot = read_text
     logger.debug(
         "save_remap: resolved text=%r field=%r supplier=%r",
         read_text[:80], payload.field_name, row.supplier_name,

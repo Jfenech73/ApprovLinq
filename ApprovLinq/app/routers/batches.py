@@ -434,6 +434,31 @@ def _signature_overlap(sig_a: str, sig_b: str) -> float:
     return len(sa & sb) / max(len(sa), len(sb))
 
 
+
+
+def _supplier_hint_signature_match(row: object, hint: RemapHint) -> bool:
+    """Fallback matcher for supplier-name remap hints when current supplier is blank.
+
+    Uses lightweight document text/signature overlap and supplier snapshot token
+    presence. Conservative enough to avoid overwriting strong supplier values.
+    """
+    if hint.field_name != "supplier_name":
+        return False
+    snap = _normalise_text_signature(getattr(hint, "supplier_name_snapshot", None) or "")
+    if not snap:
+        return False
+    snap_tokens = {t for t in snap.split() if t}
+    row_sig = _build_document_signature(row)
+    row_tokens = {t for t in row_sig.split() if t}
+    if row_tokens and snap_tokens and (snap_tokens <= row_tokens or _signature_overlap(row_sig, snap) >= 0.34):
+        return True
+    raw_parts = []
+    for attr in ("header_raw", "totals_raw", "page_text_raw"):
+        raw_parts.append(str(getattr(row, attr, None) or ""))
+    raw = _normalise_text_signature(" ".join(raw_parts))
+    raw_tokens = {t for t in raw.split() if t}
+    return bool(raw_tokens and snap_tokens and (snap_tokens <= raw_tokens or _signature_overlap(raw, snap) >= 0.34))
+
 def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
     """Apply saved RemapHints as extraction guidance.
 
@@ -534,6 +559,11 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             sig = _build_document_signature(src_row)
             if _signature_overlap(row_signature, sig) >= 0.35:
                 matched.append(h)
+    if not matched and (not row_norm or _is_suspect_field_value("supplier_name", getattr(row, "supplier_name", None))):
+        supplier_hints = [h for h in all_hints if h.field_name == "supplier_name"]
+        supplier_hints = [h for h in supplier_hints if _supplier_hint_signature_match(row, h)]
+        if len(supplier_hints) == 1:
+            matched.extend(supplier_hints)
     if not matched:
         return
 
