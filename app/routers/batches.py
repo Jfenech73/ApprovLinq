@@ -459,6 +459,93 @@ def _supplier_hint_signature_match(row: object, hint: RemapHint) -> bool:
     raw_tokens = {t for t in raw.split() if t}
     return bool(raw_tokens and snap_tokens and (snap_tokens <= raw_tokens or _signature_overlap(raw, snap) >= 0.34))
 
+
+def _supplier_name_display_norm(value: object) -> str:
+    """Normalise supplier names for display-level comparison.
+
+    This is deliberately different from _normalize_rule_value because it keeps
+    useful legal suffixes for deciding whether a saved supplier region should
+    *confirm/upgrade* a partial extraction (for example Mafimex -> Mafimex Ltd).
+    """
+    text = str(value or "").strip()
+    text = re.sub(r"^\s*\d{1,3}\s+(?=[A-Za-z])", "", text)
+    text = re.sub(r"\b(?:years?|anniversary|operat(?:ed|ing))\b", " ", text, flags=re.I)
+    text = re.sub(r"[^A-Za-z0-9&.' -]", " ", text)
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _supplier_snapshot_matches_current(current: object, snapshot: object) -> bool:
+    """True when a saved supplier region appears to refer to the current row.
+
+    Used to let saved supplier_name regions confirm a partial/dirty supplier read
+    without depending on an already-perfect supplier match.
+    """
+    cur_display = _supplier_name_display_norm(current)
+    snap_display = _supplier_name_display_norm(snapshot)
+    if not cur_display or not snap_display:
+        return False
+    cur_core = _normalize_rule_value(cur_display)
+    snap_core = _normalize_rule_value(snap_display)
+    if cur_core and snap_core and (cur_core == snap_core or cur_core in snap_core or snap_core in cur_core):
+        return True
+    cur_tokens = {t for t in cur_display.split() if len(t) > 2 and not t.isdigit()}
+    snap_tokens = {t for t in snap_display.split() if len(t) > 2 and not t.isdigit()}
+    if not cur_tokens or not snap_tokens:
+        return False
+    return len(cur_tokens & snap_tokens) / max(len(cur_tokens), 1) >= 0.67
+
+
+def _supplier_name_needs_saved_region_confirmation(current: object, snapshot: object | None = None) -> bool:
+    """Return True when a saved supplier region may safely improve this value.
+
+    Examples covered:
+    - blank / very short / invoice-like values
+    - OCR marketing prefixes such as "35 Nectar Limited"
+    - partial legal names such as "Mafimex" where the hint snapshot is
+      "Mafimex Ltd."
+    """
+    text = str(current or "").strip()
+    if not text:
+        return True
+    if _is_suspect_field_value("supplier_name", text):
+        return True
+    if re.match(r"^\s*\d{1,3}\s+[A-Za-z]", text):
+        return True
+    if re.search(r"\b(?:tel|telephone|email|mail|invoice|vat|page|street|road|triq|mob|mobile)\b", text, re.I):
+        return True
+    if snapshot and _supplier_snapshot_matches_current(text, snapshot):
+        cur_display = _supplier_name_display_norm(text)
+        snap_display = _supplier_name_display_norm(snapshot)
+        cur_has_suffix = bool(re.search(r"\b(?:ltd|limited|plc|llc|inc|co\.?)\b", cur_display, re.I))
+        snap_has_suffix = bool(re.search(r"\b(?:ltd|limited|plc|llc|inc|co\.?)\b", snap_display, re.I))
+        if snap_has_suffix and not cur_has_suffix:
+            return True
+        if cur_display != snap_display and (cur_display in snap_display or snap_display in cur_display):
+            return True
+    return False
+
+
+def _supplier_hint_candidate_matches_row(row: object, hint: RemapHint) -> bool:
+    """Conservative supplier-name hint match that does not require current supplier to be correct."""
+    if getattr(hint, "field_name", None) != "supplier_name":
+        return False
+    snap = getattr(hint, "supplier_name_snapshot", None) or ""
+    current = getattr(row, "supplier_name", None) or ""
+    if _supplier_snapshot_matches_current(current, snap):
+        return True
+    return _supplier_hint_signature_match(row, hint)
+
+
+def _should_replace_supplier_with_region(existing: object, hint_snapshot: object, region_text: object) -> bool:
+    """Final guard before overwriting an existing supplier with a saved-region read."""
+    if _supplier_name_needs_saved_region_confirmation(existing, hint_snapshot):
+        return True
+    if not region_text:
+        return False
+    return _supplier_snapshot_matches_current(existing, region_text) and (
+        _supplier_name_display_norm(existing) != _supplier_name_display_norm(region_text)
+    )
+
 def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
     """Apply saved RemapHints as extraction guidance.
 
@@ -505,8 +592,6 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         or _is_suspect_field_value(f, getattr(row, f, None))
         or _low_confidence
     }
-    if not target_fields:
-        return
 
     hints_q = db.query(RemapHint).filter(
         RemapHint.tenant_id == batch.tenant_id,
@@ -516,6 +601,20 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
     )
     all_hints = hints_q.all()
     if not all_hints:
+        return
+
+    # Supplier-name saved regions are also used as a confirmation/upgrade layer.
+    # This matters when extraction returns a partial or dirty supplier value such
+    # as "Mafimex" instead of "Mafimex Ltd." or "35 Nectar Limited" instead of
+    # "Nectar Limited".  Do this after loading hints because the decision depends
+    # on the saved supplier snapshot, not only on the current row value.
+    supplier_hints_all = [h for h in all_hints if h.field_name == "supplier_name"]
+    if supplier_hints_all and "supplier_name" not in target_fields:
+        current_supplier = getattr(row, "supplier_name", None)
+        if any(_supplier_name_needs_saved_region_confirmation(current_supplier, h.supplier_name_snapshot) for h in supplier_hints_all):
+            target_fields.add("supplier_name")
+
+    if not target_fields:
         return
 
     supplier_id: int | None = None
@@ -540,7 +639,10 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             h for h in all_hints
             if h not in matched
             and h.supplier_name_snapshot
-            and _norm(h.supplier_name_snapshot) == row_norm
+            and (
+                _norm(h.supplier_name_snapshot) == row_norm
+                or (h.field_name == "supplier_name" and _supplier_snapshot_matches_current(row.supplier_name, h.supplier_name_snapshot))
+            )
         ])
     if row_signature:
         source_rows: dict[int, object] = {}
@@ -559,11 +661,12 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             sig = _build_document_signature(src_row)
             if _signature_overlap(row_signature, sig) >= 0.35:
                 matched.append(h)
-    if not matched and (not row_norm or _is_suspect_field_value("supplier_name", getattr(row, "supplier_name", None))):
-        supplier_hints = [h for h in all_hints if h.field_name == "supplier_name"]
-        supplier_hints = [h for h in supplier_hints if _supplier_hint_signature_match(row, h)]
-        if len(supplier_hints) == 1:
-            matched.extend(supplier_hints)
+    if not matched or "supplier_name" in target_fields:
+        supplier_hints = [h for h in all_hints if h.field_name == "supplier_name" and h not in matched]
+        supplier_hints = [h for h in supplier_hints if _supplier_hint_candidate_matches_row(row, h)]
+        # Add deterministic matches.  If multiple saved regions match, the final
+        # write guard still requires a usable region read/snapshot confirmation.
+        matched.extend(supplier_hints)
     if not matched:
         return
 
@@ -600,7 +703,14 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                         except Exception:
                             text = (text or "").strip()
                     if not text:
-                        continue
+                        # For supplier confirmation, a correctly saved snapshot is
+                        # still useful when current crop OCR is blank.  Only use it
+                        # when it can be tied back to this row by name/signature.
+                        snap = (hint.supplier_name_snapshot or "").strip()
+                        if snap and _supplier_hint_candidate_matches_row(row, hint):
+                            text = snap
+                        else:
+                            continue
                     _v = text.strip()
                     _digits = sum(1 for c in _v if c.isdigit())
                     _is_inv_like = (
@@ -618,11 +728,24 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                     and not _is_suspect_field_value(hint.field_name, existing)
                     and not _low_confidence
                 ):
-                    logger.debug("RemapHint: strong existing value %r for field=%s — skipping hint (hint_id=%d supplier=%r)", str(existing)[:40], hint.field_name, hint.id, row.supplier_name)
-                    continue
+                    if hint.field_name == "supplier_name" and _should_replace_supplier_with_region(existing, hint.supplier_name_snapshot, text):
+                        pass
+                    else:
+                        logger.debug("RemapHint: strong existing value %r for field=%s — skipping hint (hint_id=%d supplier=%r)", str(existing)[:40], hint.field_name, hint.id, row.supplier_name)
+                        continue
 
                 old_val = getattr(row, hint.field_name, None)
                 setattr(row, hint.field_name, text)
+                if hint.field_name == "supplier_name" and text:
+                    # Keep the maintenance table useful: once a saved region reads
+                    # a cleaner supplier title, store that as the snapshot used for
+                    # future confirmation/replay matching.
+                    try:
+                        snap_now = (hint.supplier_name_snapshot or "").strip()
+                        if not snap_now or _supplier_name_needs_saved_region_confirmation(snap_now, text):
+                            hint.supplier_name_snapshot = text
+                    except Exception:
+                        pass
                 current_method = (getattr(row, 'method_used', '') or '')
                 tag = f'remap_hint:{hint.field_name}'
                 if tag not in current_method:
@@ -1950,7 +2073,16 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 db, tenant_id, batch.company_id, row,
                                 supplier_vat=supplier_vat,
                             )
+                            _supplier_before_remap = row.supplier_name
                             _apply_remap_hints(db, batch, row)
+                            # Supplier-name saved regions are allowed to confirm/fix a supplier
+                            # after the first master-data suggestion pass.  Re-run suggestions
+                            # so posting account / supplier match data follow the corrected name.
+                            if row.supplier_name != _supplier_before_remap:
+                                _apply_account_suggestions(
+                                    db, tenant_id, batch.company_id, row,
+                                    supplier_vat=supplier_vat,
+                                )
                             _apply_saved_rules(db, batch, row)
                             db.add(row)
                             inserted_rows += 1
