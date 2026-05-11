@@ -586,8 +586,21 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 pdf_path, hint.page_no or row.page_no,
                 float(hint.x), float(hint.y), float(hint.w), float(hint.h),
             )
-            if text:
+            if text or hint.field_name == "supplier_name":
                 if hint.field_name == "supplier_name":
+                    try:
+                        from app.routers.review import _promote_supplier_remap_text
+                        text = _promote_supplier_remap_text(
+                            pdf_path, hint.page_no or row.page_no, text or ""
+                        )
+                    except Exception:
+                        try:
+                            from app.routers.review import _normalise_supplier_remap_text
+                            text = _normalise_supplier_remap_text(text or "")
+                        except Exception:
+                            text = (text or "").strip()
+                    if not text:
+                        continue
                     _v = text.strip()
                     _digits = sum(1 for c in _v if c.isdigit())
                     _is_inv_like = (

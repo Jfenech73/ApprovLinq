@@ -116,6 +116,15 @@
               <span>Click a field in the editor, then drag on the invoice to mark its region.</span>
               <span id="remapTargetLabel" class="remap-target"></span>
             </div>
+            <div class="row gap-sm" style="margin-top:6px;flex-wrap:wrap">
+              <button id="savedRegionsBtn" class="btn btn-sm" type="button"
+                      title="Show saved remap regions so bad/duplicate regions can be disabled">
+                Saved regions
+              </button>
+            </div>
+            <div id="savedRegionsPanel" class="remap-hint" hidden style="margin-top:6px;max-height:170px;overflow:auto">
+              <div id="savedRegionsList" class="stack" style="gap:4px;font-size:12px"></div>
+            </div>
           </div>
 
           <!-- Invoice preview -->

@@ -196,7 +196,7 @@ def _money_values_from_line(line: str) -> list[float]:
     the VAT rate as the VAT amount.
     """
     vals: list[float] = []
-    for m in re.finditer(r"(?<![\d])(?:€\s*)?(-?\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|-?\d+[.,]\d{2})(?!\d)", line or ""):
+    for m in re.finditer(r"(?<![\d])(?:€\s*)?(-?\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}|-?\d+[.,]\d{1,2})(?!\d)", line or ""):
         # Reject values that are immediately followed by a percent sign.
         tail = (line or "")[m.end():m.end()+2]
         if "%" in tail:
@@ -268,7 +268,14 @@ def _extract_labeled_financial_bundle(text: str) -> dict[str, float]:
             r"\bv\.?a\.?t\.?\b", r"\bvat\s+amount\b", r"\btotal\s+vat\b",
             r"\btax\s+amount\b", r"\btax\s+total\b", r"\bvalue\s+added\s+tax\b",
         ],
-        reject_patterns=[r"\bvat\s*(?:reg|no|number)\b", r"\bvat\s*summary\b"],
+        reject_patterns=[
+            r"\bvat\s*(?:reg|no|number)\b", r"\bvat\s*summary\b",
+            # Line-table headers such as "Total VAT Cons" are not the summary
+            # VAT amount.  The actual VAT summary is handled by labelled-line
+            # and reconciliation remediation below.
+            r"\b(total\s+)?vat\s+(?:cons|code|type|rate|%)\b",
+            r"\b(code|description|qty|quantity|unit|retail|cost|price|item)\b.*\bvat\b",
+        ],
     )
     total = _last_money_on_label_line(
         text,
@@ -295,6 +302,89 @@ def _extract_labeled_financial_bundle(text: str) -> dict[str, float]:
         out["total_amount"] = round(float(total), 2)
     if deposit is not None and deposit > 0:
         out["_deposit_candidate"] = round(float(deposit), 2)
+
+    # OCR often represents the lower summary grid as vertical labels followed
+    # by values, e.g. N Calleja: "Net Amount" / "VAT Amount" / values on
+    # following lines.  The normal same-line parser misses these.  Apply a
+    # conservative vertical-summary repair and let reconciliation decide.
+    vertical = _extract_vertical_summary_amounts(text)
+    for k, v in vertical.items():
+        if v is not None and (k not in out or out.get(k) in (None, 0.0)):
+            out[k] = v
+
+    return _repair_financial_bundle(out)
+
+
+def _extract_vertical_summary_amounts(text: str) -> dict[str, float]:
+    """Parse label/value summary blocks where OCR puts labels and values on
+    separate lines.  Kept deliberately narrow to avoid table-body leakage.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    out: dict[str, float] = {}
+
+    def _next_values(start: int, stop_labels: tuple[str, ...] = ()) -> list[float]:
+        vals: list[float] = []
+        for j in range(start + 1, min(len(lines), start + 8)):
+            low = lines[j].lower()
+            if any(re.search(p, low, re.I) for p in stop_labels):
+                break
+            # Avoid item-table rows: they usually contain several monetary values
+            # together with qty/price/code context.
+            if re.search(r"\b(code|description|qty|quantity|unit|price|item|retail|cost)\b", low):
+                continue
+            vals.extend(_money_values_from_line(lines[j]))
+            if vals and re.search(r"\b(delivered|received|payment|bank|iban|signature)\b", low, re.I):
+                break
+        return vals
+
+    for i, line in enumerate(lines):
+        low = line.lower()
+        if re.search(r"^net\s+amount\b|^net\s+total\b|^total\s+net\b", low):
+            vals = _money_values_from_line(line) or _next_values(i, (r"^total\s+amount", r"^invoice\s+total"))
+            if vals:
+                out.setdefault("net_amount", vals[0])
+        elif re.search(r"^v\.?a\.?t\.?\s+amount\b|^vat\s*[:\-]?$|^total\s+vat\b", low):
+            vals = _money_values_from_line(line) or _next_values(i, (r"^total\s+amount", r"^invoice\s+total", r"^bcrs", r"^deposit"))
+            if vals:
+                # Prefer an explicit zero/last value in VAT summary columns;
+                # this fixes Nectar-like OCR "VAT: 93.75 0.00 E@0%".
+                chosen = vals[-1]
+                if any(abs(v) <= 0.001 for v in vals):
+                    chosen = 0.0
+                out.setdefault("vat_amount", round(float(chosen), 2))
+        elif re.search(r"^total\s+amount\b|^total\s+due\b|^total\s+incl|^invoice\s+total\b|^grand\s+total\b", low):
+            vals = _money_values_from_line(line) or _next_values(i, (r"^bank\b", r"^iban\b", r"^signature\b"))
+            if vals:
+                out.setdefault("total_amount", vals[-1])
+    return out
+
+
+def _repair_financial_bundle(values: dict[str, float]) -> dict[str, float]:
+    """Apply small finance-safe repairs to labelled totals.
+
+    Repairs are limited to obvious OCR/DI errors:
+    - net and total are almost identical on a zero-VAT invoice but net lost a
+      cent digit (67.9 vs 67.98) -> use the two-decimal total;
+    - VAT equals the net/total on a zero-rated layout -> set VAT to 0.00.
+    """
+    out = dict(values or {})
+    try:
+        net = out.get("net_amount")
+        vat = out.get("vat_amount")
+        total = out.get("total_amount")
+        if net is not None and total is not None:
+            net_f = round(float(net), 2)
+            total_f = round(float(total), 2)
+            vat_f = round(float(vat or 0.0), 2)
+            # If total and net are within a few cents on a zero VAT invoice, the
+            # higher-confidence total line should repair a truncated net.
+            if abs(vat_f) <= 0.001 and 0 < abs(total_f - net_f) <= 0.11:
+                out["net_amount"] = total_f
+            # Nectar-style OCR: VAT summary line picks the net again as VAT.
+            if vat is not None and abs(net_f - total_f) <= 0.05 and abs(float(vat) - total_f) <= 0.05:
+                out["vat_amount"] = 0.0
+    except Exception:
+        pass
     return out
 
 
@@ -524,10 +614,14 @@ def bad_supplier_line(line: str) -> bool:
         r"swift",
         r"bic",
         r"email",
+        r"@",
+        r"\b[a-z]\s*:\s*\+?\d",
         r"www\.",
         r"http",
         r"tel",
         r"phone",
+        r"mobile",
+        r"fax",
         r"bcrs",
         r"deposit",
         r"gross",
@@ -602,10 +696,14 @@ def suspicious_supplier_name(value: str | None) -> bool:
         r"\bswift\b",
         r"\bbic\b",
         r"\bemail\b",
+        r"@",
+        r"\b[a-z]\s*:\s*\+?\d",
         r"\bwww\.",
         r"\bhttp",
         r"\btel\b",
         r"\bphone\b",
+        r"\bmobile\b",
+        r"\bfax\b",
         r"\bcustomer\b",
         r"\bbill to\b",
         r"\bship to\b",
@@ -847,6 +945,7 @@ def find_supplier_name(
             len(line.split()) == 1
             and line.strip().lower() in _common_single_words
         )
+        next_is_transaction_heading = bool(re.search(r"\b(cash\s+sale|invoice|tax\s+invoice|delivery\s+note|receipt)\b", next_line, re.I))
         if (
             i + 1 < len(header_lines)
             and i not in customer_section_indices
@@ -856,6 +955,7 @@ def find_supplier_name(
             and not bad_supplier_line(line)
             and not bad_supplier_line(next_line)
             and not next_is_address
+            and not next_is_transaction_heading
             and not first_is_single_qualifier
             and re.fullmatch(r"[A-Za-z0-9 &().,\-'/]+", line)
             and re.fullmatch(r"[A-Za-z0-9 &().,\-'/]+", next_line)
@@ -957,7 +1057,10 @@ def find_supplier_name(
     else:
         best = heuristic_best
 
-    return best[:200] if best else None
+    if not best:
+        return None
+    cleaned_best = normalise_company_name(_clean_ocr_supplier_name(best)) or best
+    return cleaned_best[:200]
 
 
 def extract_candidate_line_items(text: str) -> str:
@@ -1026,10 +1129,22 @@ def _clean_ocr_supplier_name(name: str | None) -> str | None:
         return name
     # Replace embedded newlines/carriage returns with a space
     name = name.replace("\n", " ").replace("\r", " ")
-    # Strip leading non-uppercase junk (digits, symbols, short lowercase OCR words)
-    # before the first uppercase letter in the string.
-    # e.g. "5 J.Sultana" → "J.Sultana",  "jbl Joseph" → "Joseph", "฿ Br" → "Br"
-    name = re.sub(r"^[^A-Z]+(?=[A-Z])", "", name)
+    # Strip leading logo/anniversary artefacts before the real supplier name.
+    # Examples seen on invoices:
+    #   "35 Nectar Limited"      -> "Nectar Limited"
+    #   "35 nectar limited"      -> "nectar limited"
+    #   "5 J.Sultana"            -> "J.Sultana"
+    #   "jbl Joseph Borg Ltd."   -> "Joseph Borg Ltd."
+    # Keep true numeric brands such as "3M" by only removing an isolated
+    # numeric/logo token when followed by a normal alphabetic word.
+    name = re.sub(r"^\s*(?:since\s*)?\d{1,3}(?:\s*(?:years?|yrs?|anniversary|since))?[\s:|\-–—]+(?=[A-Za-z]{4,}\b)", "", name, flags=re.I)
+    # Strip leading non-letter junk (symbols, short lowercase OCR words) before
+    # the first real alphabetic company token.
+    name = re.sub(r"^[^A-Za-z]+(?=[A-Za-z])", "", name)
+    # Some OCR runs prepend logo crumbs such as "nector*" or "Pw" before a
+    # legal title on the same crop.  Remove a single short lowercase/noisy token
+    # if it is followed by a stronger legal/company-looking phrase.
+    name = re.sub(r"^\s*[a-z0-9*]{1,8}\s+(?=[A-Z][A-Za-z&.' -]{2,}\b(?:ltd|limited|plc|co\.?|company)\b)", "", name)
     # If the name starts with "X Y..." where X is a single uppercase char and Y
     # begins with the same letter (OCR duplicated initial), strip the lone prefix char.
     # e.g. "N N Calleja Trading" → "N Calleja Trading"
@@ -1038,6 +1153,11 @@ def _clean_ocr_supplier_name(name: str | None) -> str | None:
         name = m.group(2)
     # Collapse multiple spaces
     name = re.sub(r"\s+", " ", name).strip()
+    # If a remap/DI crop glued the supplier to a transactional heading, keep
+    # the legal title only: "Nectar Limited Cash sale" -> "Nectar Limited".
+    m_title = re.match(r"^(.{2,80}?\b(?:ltd|limited|plc|llc|inc|company|co\.?)\.?)\b(?:\s+(?:cash\s+sale|invoice|tax\s+invoice|sales\s+invoice|page\b).*)?$", name, re.I)
+    if m_title:
+        name = m_title.group(1).strip()
     # Detect full-name OCR duplication: "Acme Ltd. Acme Ltd" or "Acme Ltd Acme Ltd"
     # Split on ". " (period-space) or double-space, check if both halves share the same
     # significant token prefix — if so, keep the longer (punctuated) version.
@@ -1440,6 +1560,9 @@ def _collect_supplier_candidates(text: str, account_tokens: list[str] | None = N
 def _collect_invoice_number_candidates(text: str) -> list[str]:
     candidates: list[str] = []
     primary = first_match([
+        # Label-only layouts: "Invoice 10512630".  Exclude "Invoice To" and
+        # date/total labels so phone/VAT numbers are not promoted.
+        r"\binvoice\s+(?!to\b|date\b|total\b|amount\b)([A-Z0-9][A-Z0-9\/\-_]*[0-9][A-Z0-9\/\-_]*)",
         r"invoice\s*(?:no\.?|number|#|nr\.?)\s*[.:\-]*\s*([A-Z0-9][A-Z0-9\/\-_]*[0-9][A-Z0-9\/\-_]*)",
         r"invoice\s*(?:no\.?|number|#|nr\.?)\s*[.:\-]*\s*([0-9][A-Z0-9\/\-_]*)",
         r"\bINV[.\-_]?([0-9][A-Z0-9\/\-_]*)",

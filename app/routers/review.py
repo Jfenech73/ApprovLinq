@@ -773,7 +773,10 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
                 return ""
             _pg3 = _pdf3.get_page(page_no - 1)
             try:
-                _full = _pg3.render(scale=3.0).to_pil().convert("RGB")
+                # Render high enough for tight header/supplier crops.  The
+                # preview image is lower DPI; using a higher render here gives
+                # OCR more pixels without changing the user's normalised coords.
+                _full = _pg3.render(scale=4.0).to_pil().convert("RGB")
             finally:
                 _pg3.close()
         finally:
@@ -785,7 +788,8 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
             return ""
         _crop = _full.crop(_box)
         _buf = io.BytesIO()
-        _crop.save(_buf, format="JPEG", quality=85)
+        # PNG avoids JPEG artefacts on small text crops.
+        _crop.save(_buf, format="PNG")
         _img_bytes = _buf.getvalue()
         logger.debug(
             "_read_region_text: tier3 crop %dx%d px (%d bytes)",
@@ -799,6 +803,8 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
         return ""
 
     try:
+        # OCR backend selection happens inside _ocr_region_bytes; it checks
+        # settings.ocr_space_api_key after local OCR fallback.
         # Try the exact crop first, then a slightly expanded crop to tolerate
         # narrow user selections around header text / supplier titles.
         t3 = _ocr_region_bytes(_img_bytes)
@@ -813,7 +819,7 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
                     min(_H, _box[3] + _pad_y),
                 )
                 _ebuf = io.BytesIO()
-                _full.crop(_ebox).save(_ebuf, format="JPEG", quality=90)
+                _full.crop(_ebox).save(_ebuf, format="PNG")
                 expanded_text = _ocr_region_bytes(_ebuf.getvalue())
                 if _count_meaningful(expanded_text) > _count_meaningful(t3):
                     t3 = expanded_text
@@ -868,6 +874,89 @@ def _normalise_supplier_remap_text(text: str) -> str:
     except Exception:
         pass
     return " ".join(raw.split())
+
+
+def _supplier_candidate_from_full_page(file_path: str, page_no: int, seed_text: str = "") -> str:
+    """Read the full page and return the best supplier title for remap fallback.
+
+    This is used only when the selected supplier region produces no/partial text.
+    It prevents a good saved region from being recorded blank and lets a logo crop
+    such as "Mafimex" be promoted to the nearby legal title "Mafimex Ltd.".
+    """
+    try:
+        page_text = ""
+        # Prefer the PDF text layer when present.  This is faster and avoids
+        # OCR missing legal suffixes on clean digital/test PDFs.
+        try:
+            import fitz as _fitz
+            _doc = _fitz.open(file_path)
+            try:
+                if 1 <= page_no <= _doc.page_count:
+                    page_text = _doc.load_page(page_no - 1).get_text("text") or ""
+            finally:
+                _doc.close()
+        except Exception:
+            page_text = ""
+
+        import pypdfium2 as _pdfium
+        _pdf = _pdfium.PdfDocument(file_path)
+        try:
+            if page_no < 1 or page_no > len(_pdf):
+                return ""
+            _pg = _pdf.get_page(page_no - 1)
+            try:
+                img = _pg.render(scale=2.2).to_pil().convert("RGB")
+            finally:
+                _pg.close()
+        finally:
+            _pdf.close()
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        ocr_text = _ocr_region_bytes(buf.getvalue())
+        if ocr_text:
+            page_text = (page_text + "\n" + ocr_text).strip()
+        if not page_text:
+            return ""
+        from app.services.extractor import (
+            find_supplier_name, normalise_company_name, _clean_ocr_supplier_name,
+            _collect_supplier_candidates, _company_strength_score, suspicious_supplier_name,
+        )
+        candidates = _collect_supplier_candidates(page_text)
+        found = find_supplier_name(page_text)
+        if found:
+            candidates.insert(0, found)
+        norm_seed = re.sub(r"[^a-z0-9]", "", (seed_text or "").lower())
+        cleaned: list[str] = []
+        for c in candidates:
+            cc = normalise_company_name(_clean_ocr_supplier_name(c)) or c
+            if not cc or suspicious_supplier_name(cc):
+                continue
+            if cc not in cleaned:
+                cleaned.append(cc)
+        if not cleaned:
+            return ""
+        if norm_seed:
+            # Prefer a full legal candidate that contains the selected/logo seed.
+            for c in sorted(cleaned, key=_company_strength_score, reverse=True):
+                cn = re.sub(r"[^a-z0-9]", "", c.lower())
+                if norm_seed and (norm_seed in cn or cn in norm_seed):
+                    return c
+        return sorted(cleaned, key=_company_strength_score, reverse=True)[0]
+    except Exception as exc:
+        logger.debug("_supplier_candidate_from_full_page failed: %s", exc)
+        return ""
+
+
+def _promote_supplier_remap_text(file_path: str, page_no: int, read_text: str) -> str:
+    """Promote blank/partial supplier region OCR to the full page supplier title."""
+    current = _normalise_supplier_remap_text(read_text or "") if read_text else ""
+    has_legal_suffix = bool(re.search(r"\b(ltd|limited|plc|llc|inc|company|co\.?)\b", current or "", re.I))
+    if current and has_legal_suffix:
+        return current
+    page_candidate = _supplier_candidate_from_full_page(file_path, page_no, current)
+    if page_candidate:
+        return page_candidate
+    return current
 
 # ── Remap hints + value persistence + rule creation ─────────────────────────
 @router.post("/batches/{batch_id}/rows/{row_id}/remap")
@@ -993,10 +1082,23 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
             logger.warning("save_remap: file not found for file_id=%s", file_id)
 
     # Normalise: collapse whitespace, strip leading/trailing.
-    # For supplier_name, convert a multi-line header crop into the best company
-    # title before saving the value/rule/hint.
-    if payload.field_name == "supplier_name" and read_text:
-        read_text = _normalise_supplier_remap_text(read_text)
+    # For supplier_name, convert a multi-line/header/logo crop into the best
+    # company title before saving.  If region OCR is blank or partial, fall back
+    # to the full-page supplier candidate so the saved hint is not unusable.
+    if payload.field_name == "supplier_name":
+        file_id_for_supplier = payload.file_id or row.source_file_id
+        file_obj_for_supplier = db.get(M.InvoiceFile, file_id_for_supplier) if file_id_for_supplier else None
+        if file_obj_for_supplier:
+            try:
+                read_text = _promote_supplier_remap_text(
+                    str(resolve_upload_path(file_obj_for_supplier.file_path)),
+                    payload.page_no,
+                    read_text or "",
+                )
+            except Exception:
+                read_text = _normalise_supplier_remap_text(read_text) if read_text else ""
+        elif read_text:
+            read_text = _normalise_supplier_remap_text(read_text)
     else:
         read_text = " ".join(read_text.split()).strip() if read_text else ""
     if payload.field_name == "supplier_name" and read_text:
@@ -1128,6 +1230,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         "rule_created":  rule_created_now,
         "read_text":     read_text,
     }
+
 
 
 # ── Rules management (admin + tenant-scoped user access) ──────────────────────
@@ -1345,3 +1448,118 @@ def delete_rule(rule_id: int, db: Session = Depends(get_db), user=Depends(curren
     db.delete(r)
     db.commit()
     return {"ok": True}
+
+# ── Remap hint maintenance endpoints ───────────────────────────────────────
+def _user_default_tenant_id(db: Session, user) -> UUID:
+    """Return the user's default tenant id for maintenance endpoints."""
+    ut = db.execute(
+        select(M.UserTenant).where(
+            M.UserTenant.user_id == user.id,
+            M.UserTenant.is_default.is_(True),
+        ).limit(1)
+    ).scalar_one_or_none()
+    if not ut:
+        ut = db.execute(
+            select(M.UserTenant).where(M.UserTenant.user_id == user.id).limit(1)
+        ).scalar_one_or_none()
+    if not ut:
+        raise HTTPException(403, "User is not attached to a tenant")
+    return ut.tenant_id
+
+
+@router.get("/remap-hints")
+def list_remap_hints(
+    active: bool | None = Query(default=True),
+    field_name: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    """List saved remap regions for maintenance/de-duplication."""
+    tenant_id = _user_default_tenant_id(db, user)
+    q = select(RemapHint).where(RemapHint.tenant_id == tenant_id)
+    if active is not None:
+        q = q.where(RemapHint.active.is_(active))
+    if field_name:
+        q = q.where(RemapHint.field_name == field_name)
+    hints = db.execute(q.order_by(desc(RemapHint.created_at), desc(RemapHint.id))).scalars().all()
+    keys: dict[tuple, int] = {}
+    for h in hints:
+        key = (
+            h.field_name,
+            h.page_no,
+            (h.supplier_name_snapshot or "").strip().lower(),
+            round(float(h.x or 0), 3), round(float(h.y or 0), 3),
+            round(float(h.w or 0), 3), round(float(h.h or 0), 3),
+        )
+        keys[key] = keys.get(key, 0) + 1
+    items = []
+    for h in hints:
+        key = (
+            h.field_name,
+            h.page_no,
+            (h.supplier_name_snapshot or "").strip().lower(),
+            round(float(h.x or 0), 3), round(float(h.y or 0), 3),
+            round(float(h.w or 0), 3), round(float(h.h or 0), 3),
+        )
+        items.append({
+            "id": h.id,
+            "field_name": h.field_name,
+            "supplier_name_snapshot": h.supplier_name_snapshot,
+            "page_no": h.page_no,
+            "x": float(h.x) if h.x is not None else None,
+            "y": float(h.y) if h.y is not None else None,
+            "w": float(h.w) if h.w is not None else None,
+            "h": float(h.h) if h.h is not None else None,
+            "active": h.active,
+            "source_batch_id": str(h.source_batch_id) if h.source_batch_id else None,
+            "source_file_id": h.source_file_id,
+            "source_row_id": h.source_row_id,
+            "created_at": h.created_at.isoformat() if h.created_at else None,
+            "duplicate_count": keys.get(key, 1),
+        })
+    return {"items": items, "count": len(items)}
+
+
+@router.post("/remap-hints/{hint_id}/disable")
+def disable_remap_hint(
+    hint_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    tenant_id = _user_default_tenant_id(db, user)
+    hint = db.get(RemapHint, hint_id)
+    if not hint or hint.tenant_id != tenant_id:
+        raise HTTPException(404, "Remap hint not found")
+    hint.active = False
+    db.commit()
+    return {"id": hint.id, "active": hint.active}
+
+
+@router.post("/remap-hints/{hint_id}/enable")
+def enable_remap_hint(
+    hint_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    tenant_id = _user_default_tenant_id(db, user)
+    hint = db.get(RemapHint, hint_id)
+    if not hint or hint.tenant_id != tenant_id:
+        raise HTTPException(404, "Remap hint not found")
+    hint.active = True
+    db.commit()
+    return {"id": hint.id, "active": hint.active}
+
+
+@router.delete("/remap-hints/{hint_id}")
+def delete_remap_hint(
+    hint_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    tenant_id = _user_default_tenant_id(db, user)
+    hint = db.get(RemapHint, hint_id)
+    if not hint or hint.tenant_id != tenant_id:
+        raise HTTPException(404, "Remap hint not found")
+    db.delete(hint)
+    db.commit()
+    return {"deleted": True, "id": hint_id}

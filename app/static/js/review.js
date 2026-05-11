@@ -749,6 +749,65 @@ window.addEventListener("mouseup", async (e) => {
   setTimeout(() => { remapSel.hidden = true; }, 1800);
 });
 
+
+// ── Saved remap region maintenance ─────────────────────────────────────────
+async function loadSavedRegions() {
+  const panel = $("savedRegionsPanel");
+  const list = $("savedRegionsList");
+  if (!panel || !list) return;
+  list.innerHTML = `<div class="muted">Loading saved regions…</div>`;
+  try {
+    const r = await fetch(`/review/remap-hints?active=true`, { headers: hdrs() });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    const items = data.items || [];
+    if (!items.length) {
+      list.innerHTML = `<div class="muted">No active saved regions.</div>`;
+      return;
+    }
+    list.innerHTML = items.slice(0, 80).map(h => `
+      <div class="row gap-sm" style="align-items:center;justify-content:space-between;border-bottom:1px solid var(--ap-border);padding:4px 0">
+        <span title="${esc(h.supplier_name_snapshot || '')}">
+          <strong>${esc(h.field_name)}</strong>
+          <span class="muted">p${esc(h.page_no || 1)}</span>
+          ${h.duplicate_count > 1 ? `<span class="pill warning">dup ${h.duplicate_count}</span>` : ""}
+          <br><span class="muted">${esc((h.supplier_name_snapshot || 'no supplier').slice(0, 42))}</span>
+        </span>
+        <span class="row gap-sm">
+          <button class="btn btn-sm" type="button" data-disable-region="${h.id}">Disable</button>
+          <button class="btn btn-sm" type="button" data-delete-region="${h.id}">Delete</button>
+        </span>
+      </div>`).join("");
+  } catch (e) {
+    list.innerHTML = `<div class="message error">Could not load saved regions: ${esc(e.message)}</div>`;
+  }
+}
+
+const savedRegionsBtn = $("savedRegionsBtn");
+if (savedRegionsBtn) {
+  savedRegionsBtn.addEventListener("click", async () => {
+    const panel = $("savedRegionsPanel");
+    if (!panel) return;
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) await loadSavedRegions();
+  });
+}
+
+document.addEventListener("click", async (e) => {
+  const disableBtn = e.target.closest("[data-disable-region]");
+  const deleteBtn = e.target.closest("[data-delete-region]");
+  if (!disableBtn && !deleteBtn) return;
+  const id = disableBtn ? disableBtn.getAttribute("data-disable-region") : deleteBtn.getAttribute("data-delete-region");
+  const action = disableBtn ? "disable" : "delete";
+  if (!confirm(`${action === "delete" ? "Delete" : "Disable"} saved remap region ${id}?`)) return;
+  const url = action === "delete" ? `/review/remap-hints/${id}` : `/review/remap-hints/${id}/disable`;
+  const method = action === "delete" ? "DELETE" : "POST";
+  const r = await fetch(url, { method, headers: hdrs() });
+  if (!r.ok) { msg(`Saved region ${action} failed: ${await r.text()}`, "error"); return; }
+  msg(`Saved region ${action}d.`, "success");
+  await loadSavedRegions();
+});
+
 if (typeof ensureAuth === "function" && !ensureAuth()) {
   // ensureAuth() will redirect to /login
 } else {
