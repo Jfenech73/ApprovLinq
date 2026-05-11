@@ -447,17 +447,31 @@ def _supplier_hint_signature_match(row: object, hint: RemapHint) -> bool:
     snap = _normalise_text_signature(getattr(hint, "supplier_name_snapshot", None) or "")
     if not snap:
         return False
-    snap_tokens = {t for t in snap.split() if t}
+    common = {
+        "ltd", "limited", "plc", "llc", "inc", "company", "co",
+        "supplier", "suppliers", "trading", "group", "services",
+        "centre", "center", "malta", "invoice", "total", "vat",
+    }
+    snap_tokens_all = {t for t in snap.split() if t}
+    snap_tokens = {t for t in snap_tokens_all if t not in common and not t.isdigit()}
+    if not snap_tokens:
+        return False
     row_sig = _build_document_signature(row)
-    row_tokens = {t for t in row_sig.split() if t}
-    if row_tokens and snap_tokens and (snap_tokens <= row_tokens or _signature_overlap(row_sig, snap) >= 0.34):
+    row_tokens_all = {t for t in row_sig.split() if t}
+    row_tokens = {t for t in row_tokens_all if t not in common and not t.isdigit()}
+    if row_tokens and snap_tokens and snap_tokens <= row_tokens:
         return True
     raw_parts = []
     for attr in ("header_raw", "totals_raw", "page_text_raw"):
         raw_parts.append(str(getattr(row, attr, None) or ""))
     raw = _normalise_text_signature(" ".join(raw_parts))
-    raw_tokens = {t for t in raw.split() if t}
-    return bool(raw_tokens and snap_tokens and (snap_tokens <= raw_tokens or _signature_overlap(raw, snap) >= 0.34))
+    raw_tokens_all = {t for t in raw.split() if t}
+    raw_tokens = {t for t in raw_tokens_all if t not in common and not t.isdigit()}
+    if raw_tokens and snap_tokens and snap_tokens <= raw_tokens:
+        return True
+    if raw_tokens and snap_tokens:
+        return len(raw_tokens & snap_tokens) / max(len(snap_tokens), 1) >= 0.67
+    return False
 
 
 def _supplier_name_display_norm(value: object) -> str:
@@ -488,8 +502,13 @@ def _supplier_snapshot_matches_current(current: object, snapshot: object) -> boo
     snap_core = _normalize_rule_value(snap_display)
     if cur_core and snap_core and (cur_core == snap_core or cur_core in snap_core or snap_core in cur_core):
         return True
-    cur_tokens = {t for t in cur_display.split() if len(t) > 2 and not t.isdigit()}
-    snap_tokens = {t for t in snap_display.split() if len(t) > 2 and not t.isdigit()}
+    common = {
+        "ltd", "limited", "plc", "llc", "inc", "company", "co",
+        "supplier", "suppliers", "trading", "group", "services",
+        "centre", "center", "malta",
+    }
+    cur_tokens = {t for t in cur_display.split() if len(t) > 2 and not t.isdigit() and t not in common}
+    snap_tokens = {t for t in snap_display.split() if len(t) > 2 and not t.isdigit() and t not in common}
     if not cur_tokens or not snap_tokens:
         return False
     return len(cur_tokens & snap_tokens) / max(len(cur_tokens), 1) >= 0.67
@@ -546,6 +565,43 @@ def _should_replace_supplier_with_region(existing: object, hint_snapshot: object
         _supplier_name_display_norm(existing) != _supplier_name_display_norm(region_text)
     )
 
+
+def _row_should_arbitrate_with_saved_regions(row: object) -> bool:
+    """True when extraction should not be accepted before checking saved regions.
+
+    Azure DI / OCR / AI can return plausible-looking but wrong values.  Saved
+    regions are reviewer-approved coordinates, so they should compete with these
+    machine values when row confidence is not high or when the row came from a
+    non-deterministic extraction path.  Hard replacement guards still prevent
+    unrelated strong values from being overwritten.
+    """
+    method = str(getattr(row, "method_used", None) or "").lower()
+    di_like = bool(re.search(r"\b(?:di|azure|document[_ -]?intelligence|ocr|ai|llm)\b", method))
+    try:
+        conf = float(getattr(row, "confidence_score", None))
+    except Exception:
+        conf = None
+    if getattr(row, "review_required", False):
+        return True
+    if conf is None:
+        return di_like
+    return conf < 0.82 or (di_like and conf < 0.92)
+
+
+def _hint_matches_value_or_signature(row: object, hint: RemapHint, row_norm: str, row_signature: str) -> bool:
+    """Safe generic saved-region matcher used for DI/region arbitration."""
+    if getattr(hint, "supplier_id", None):
+        return True
+    snap = getattr(hint, "supplier_name_snapshot", None) or ""
+    if snap and row_norm and _normalize_rule_value(snap) == row_norm:
+        return True
+    if getattr(hint, "field_name", None) == "supplier_name" and _supplier_hint_candidate_matches_row(row, hint):
+        return True
+    src_row_id = getattr(hint, "source_row_id", None)
+    # Source-row signature matching is handled in the caller where DB access is available.
+    return False
+
+
 def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
     """Apply saved RemapHints as extraction guidance.
 
@@ -580,11 +636,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         "nominal_account_code", "description",
     )
 
-    _low_confidence = (
-        row.review_required
-        and row.confidence_score is not None
-        and float(row.confidence_score) < 0.55
-    )
+    _low_confidence = _row_should_arbitrate_with_saved_regions(row)
     target_fields = {
         f for f in _REMAP_FIELDS
         if not getattr(row, f, None)
@@ -602,6 +654,15 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
     all_hints = hints_q.all()
     if not all_hints:
         return
+
+    # If the row was produced by DI/OCR/AI with less-than-high confidence, every
+    # active saved region for this tenant/page is allowed to compete with the
+    # extracted value.  This is the missing arbitration step: DI values are not
+    # accepted blindly when a reviewer-approved coordinate exists.
+    if _low_confidence:
+        for h in all_hints:
+            if h.field_name in _REMAP_FIELDS:
+                target_fields.add(h.field_name)
 
     # Supplier-name saved regions are also used as a confirmation/upgrade layer.
     # This matters when extraction returns a partial or dirty supplier value such
@@ -661,6 +722,17 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             sig = _build_document_signature(src_row)
             if _signature_overlap(row_signature, sig) >= 0.35:
                 matched.append(h)
+    if _low_confidence:
+        for h in all_hints:
+            if h in matched or h.field_name not in target_fields:
+                continue
+            # Low-confidence arbitration: if the hint belongs to the same supplier
+            # or same layout signature, allow the coordinate re-read to compete.
+            if (h.supplier_name_snapshot and row_norm and _norm(h.supplier_name_snapshot) == row_norm):
+                matched.append(h)
+            elif h.field_name == "supplier_name" and _supplier_hint_candidate_matches_row(row, h):
+                matched.append(h)
+
     if not matched or "supplier_name" in target_fields:
         supplier_hints = [h for h in all_hints if h.field_name == "supplier_name" and h not in matched]
         supplier_hints = [h for h in supplier_hints if _supplier_hint_candidate_matches_row(row, h)]

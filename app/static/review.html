@@ -118,11 +118,20 @@
             </div>
             <div class="row gap-sm" style="margin-top:6px;flex-wrap:wrap">
               <button id="savedRegionsBtn" class="btn btn-sm" type="button"
-                      title="Show saved remap regions so bad/duplicate regions can be disabled">
-                Saved regions
+                      aria-expanded="false"
+                      aria-controls="savedRegionsPanel"
+                      title="Open the saved region maintenance panel">
+                Manage saved regions
+              </button>
+              <button id="applySavedRegionsBtn" class="btn btn-sm" type="button"
+                      title="Replay active saved regions against the selected row now">
+                Apply saved regions to row
               </button>
             </div>
-            <div id="savedRegionsPanel" class="remap-hint" hidden style="margin-top:6px;max-height:170px;overflow:auto">
+            <div id="savedRegionsPanel" class="remap-hint ap-hidden" style="display:none;margin-top:6px;max-height:190px;overflow:auto;align-items:stretch;justify-content:flex-start;flex-direction:column">
+              <div class="muted" style="font-size:12px;margin-bottom:4px">
+                Saved regions are reviewer-approved coordinates. They are replayed on future scans and can be manually replayed on the selected row. Use this panel to confirm what is saved, disable duplicates, re-enable useful regions, or delete unusable regions.
+              </div>
               <div id="savedRegionsList" class="stack" style="gap:4px;font-size:12px"></div>
             </div>
           </div>

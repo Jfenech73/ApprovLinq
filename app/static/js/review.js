@@ -688,6 +688,8 @@ window.addEventListener("mouseup", async (e) => {
   msg(`Reading region for "${remapField}"…`, "");
 
   let rResp;
+  const currentInput = document.querySelector(`#rowEditor [data-field="${remapField}"]`);
+  const currentValue = currentInput ? currentInput.value : null;
   try {
     rResp = await fetch(`/review/batches/${batchId}/rows/${row.id}/remap`, {
       method: "POST", headers: hdrs(),
@@ -698,6 +700,7 @@ window.addEventListener("mouseup", async (e) => {
         file_id:       state.fileId,
         apply_as_value: true,
         selected_text: selectedText || null,
+        current_value: currentValue || null,
       }),
     });
   } catch (fetchErr) {
@@ -731,12 +734,12 @@ window.addEventListener("mouseup", async (e) => {
       inp.dispatchEvent(new Event("input", { bubbles: true }));
       inp.focus();
     }
+    await load();
     const ruleNote = data.rule_created
       ? " Future rule saved — this supplier's invoices will auto-fill this field."
       : (data.saved_as_hint ? " Region saved as future remap hint." : "");
-    msg(`Remap applied — "${data.read_text}" → ${fieldLabel}.${ruleNote}`, "success");
-    // Reload so the row list shows the persisted correction immediately
-    await load();
+    const fallbackNote = data.used_current_value_fallback ? " Used editor value as OCR fallback." : "";
+    msg(`Remap applied — "${data.read_text}" → ${fieldLabel}.${ruleNote}${fallbackNote}`, "success");
   } else {
     // Hint saved but no text resolved — give informative message
     const hintNote = data && data.saved_as_hint
@@ -751,36 +754,79 @@ window.addEventListener("mouseup", async (e) => {
 
 
 // ── Saved remap region maintenance ─────────────────────────────────────────
+function setSavedRegionsPanelOpen(open) {
+  const panel = $("savedRegionsPanel");
+  const btn = $("savedRegionsBtn");
+  if (!panel) return;
+  // Use class + explicit display, not only the HTML hidden attribute. Some
+  // component styles set display rules on panels and can make hidden toggles
+  // look like a no-op in deployed browsers.
+  panel.hidden = !open;
+  panel.classList.toggle("ap-hidden", !open);
+  panel.style.display = open ? "flex" : "none";
+  if (btn) {
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn.textContent = open ? "Hide saved regions" : "Manage saved regions";
+  }
+}
+
 async function loadSavedRegions() {
   const panel = $("savedRegionsPanel");
   const list = $("savedRegionsList");
   if (!panel || !list) return;
   list.innerHTML = `<div class="muted">Loading saved regions…</div>`;
   try {
-    const r = await fetch(`/review/remap-hints?active=true`, { headers: hdrs() });
+    const r = await fetch(`/review/remap-hints?include_inactive=true`, { headers: hdrs() });
     if (!r.ok) throw new Error(await r.text());
     const data = await r.json();
     const items = data.items || [];
     if (!items.length) {
-      list.innerHTML = `<div class="muted">No active saved regions.</div>`;
+      list.innerHTML = `<div class="muted">No saved regions found for this tenant yet.</div>`;
       return;
     }
-    list.innerHTML = items.slice(0, 80).map(h => `
-      <div class="row gap-sm" style="align-items:center;justify-content:space-between;border-bottom:1px solid var(--ap-border);padding:4px 0">
+    list.innerHTML = items.slice(0, 120).map(h => `
+      <div class="row gap-sm" style="align-items:center;justify-content:space-between;border-bottom:1px solid var(--ap-border);padding:4px 0;opacity:${h.active ? '1' : '0.55'}">
         <span title="${esc(h.supplier_name_snapshot || '')}">
           <strong>${esc(h.field_name)}</strong>
           <span class="muted">p${esc(h.page_no || 1)}</span>
+          <span class="pill ${h.active ? '' : 'warning'}">${h.active ? 'active' : 'disabled'}</span>
           ${h.duplicate_count > 1 ? `<span class="pill warning">dup ${h.duplicate_count}</span>` : ""}
-          <br><span class="muted">${esc((h.supplier_name_snapshot || 'no supplier').slice(0, 42))}</span>
+          <br><span class="muted">${esc((h.supplier_name_snapshot || 'no supplier snapshot').slice(0, 52))}</span>
         </span>
         <span class="row gap-sm">
-          <button class="btn btn-sm" type="button" data-disable-region="${h.id}">Disable</button>
+          ${h.active
+            ? `<button class="btn btn-sm" type="button" data-disable-region="${h.id}">Disable</button>`
+            : `<button class="btn btn-sm" type="button" data-enable-region="${h.id}">Enable</button>`}
           <button class="btn btn-sm" type="button" data-delete-region="${h.id}">Delete</button>
         </span>
       </div>`).join("");
   } catch (e) {
     list.innerHTML = `<div class="message error">Could not load saved regions: ${esc(e.message)}</div>`;
+    msg(`Could not load saved regions: ${e.message}`, "error");
   }
+}
+
+
+const applySavedRegionsBtn = $("applySavedRegionsBtn");
+if (applySavedRegionsBtn) {
+  applySavedRegionsBtn.addEventListener("click", async () => {
+    const row = state.rows.find(x => x.id === state.selected);
+    if (!row) { msg("Select a row first.", "error"); return; }
+    msg("Applying saved regions to selected row…", "");
+    const r = await fetch(`/review/batches/${batchId}/rows/${row.id}/apply-saved-regions`, {
+      method: "POST",
+      headers: hdrs(),
+    });
+    if (!r.ok) { msg(`Apply saved regions failed: ${await r.text()}`, "error"); return; }
+    const data = await r.json().catch(() => ({}));
+    const fields = data.changed_fields || [];
+    if (fields.length) {
+      msg(`Saved regions applied: ${fields.join(", ")}. Please verify before approval.`, "success");
+      await load();
+    } else {
+      msg("Saved regions checked — no field changed on the selected row.", "warning");
+    }
+  });
 }
 
 const savedRegionsBtn = $("savedRegionsBtn");
@@ -788,19 +834,23 @@ if (savedRegionsBtn) {
   savedRegionsBtn.addEventListener("click", async () => {
     const panel = $("savedRegionsPanel");
     if (!panel) return;
-    panel.hidden = !panel.hidden;
-    if (!panel.hidden) await loadSavedRegions();
+    const open = panel.style.display === "none" || panel.classList.contains("ap-hidden") || panel.hidden;
+    setSavedRegionsPanelOpen(open);
+    if (open) await loadSavedRegions();
   });
 }
 
 document.addEventListener("click", async (e) => {
   const disableBtn = e.target.closest("[data-disable-region]");
+  const enableBtn = e.target.closest("[data-enable-region]");
   const deleteBtn = e.target.closest("[data-delete-region]");
-  if (!disableBtn && !deleteBtn) return;
-  const id = disableBtn ? disableBtn.getAttribute("data-disable-region") : deleteBtn.getAttribute("data-delete-region");
-  const action = disableBtn ? "disable" : "delete";
-  if (!confirm(`${action === "delete" ? "Delete" : "Disable"} saved remap region ${id}?`)) return;
-  const url = action === "delete" ? `/review/remap-hints/${id}` : `/review/remap-hints/${id}/disable`;
+  if (!disableBtn && !enableBtn && !deleteBtn) return;
+  const id = disableBtn ? disableBtn.getAttribute("data-disable-region")
+           : enableBtn ? enableBtn.getAttribute("data-enable-region")
+           : deleteBtn.getAttribute("data-delete-region");
+  const action = deleteBtn ? "delete" : (enableBtn ? "enable" : "disable");
+  if (!confirm(`${action === "delete" ? "Delete" : action === "enable" ? "Enable" : "Disable"} saved remap region ${id}?`)) return;
+  const url = action === "delete" ? `/review/remap-hints/${id}` : `/review/remap-hints/${id}/${action}`;
   const method = action === "delete" ? "DELETE" : "POST";
   const r = await fetch(url, { method, headers: hdrs() });
   if (!r.ok) { msg(`Saved region ${action} failed: ${await r.text()}`, "error"); return; }

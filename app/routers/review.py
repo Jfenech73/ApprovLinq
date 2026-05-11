@@ -87,6 +87,7 @@ class RemapIn(BaseModel):
     file_id: int | None = None
     apply_as_value: bool = False   # if True, read text from region and persist it
     selected_text: str | None = None  # direct text selection from UI (preferred over OCR)
+    current_value: str | None = None  # editor value fallback; prevents saved regions being stored blank
 
 
 def _get_batch(db: Session, batch_id: UUID) -> M.InvoiceBatch:
@@ -1101,9 +1102,21 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
             read_text = _normalise_supplier_remap_text(read_text)
     else:
         read_text = " ".join(read_text.split()).strip() if read_text else ""
+    if payload.field_name == "supplier_name" and not read_text and payload.current_value:
+        # Last-resort fallback: if OCR cannot read the selected crop, do not
+        # preserve an unusable blank supplier hint.  Use the value currently in
+        # the editor as the supplier snapshot so future replay can still match
+        # this region/layout, but still mark the response as a fallback.
+        read_text = _normalise_supplier_remap_text(payload.current_value)
+
+    used_current_value_fallback = False
     if payload.field_name == "supplier_name" and read_text:
         _snapshot_supplier_name = read_text
         hint.supplier_name_snapshot = read_text
+        if payload.current_value and _normalise_supplier_remap_text(payload.current_value) == read_text:
+            # This is true both for direct OCR and fallback; the UI uses the
+            # flag only as information, not as an error.
+            used_current_value_fallback = not bool(payload.selected_text and payload.selected_text.strip())
     logger.debug(
         "save_remap: resolved text=%r field=%r supplier=%r",
         read_text[:80], payload.field_name, row.supplier_name,
@@ -1229,7 +1242,10 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         "saved_as_hint": True,
         "rule_created":  rule_created_now,
         "read_text":     read_text,
+        "used_current_value_fallback": used_current_value_fallback,
     }
+
+
 
 
 
@@ -1467,9 +1483,82 @@ def _user_default_tenant_id(db: Session, user) -> UUID:
     return ut.tenant_id
 
 
+@router.post("/batches/{batch_id}/rows/{row_id}/apply-saved-regions")
+def apply_saved_regions_to_row(
+    batch_id: UUID,
+    row_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    """Manually replay active saved regions against one review row.
+
+    The Saved regions panel is mainly maintenance.  This action gives reviewers
+    an explicit way to prove whether the current row is being improved by saved
+    coordinates, without waiting for the next batch scan.
+    """
+    batch = _get_batch(db, batch_id)
+    row = db.get(M.InvoiceRow, row_id)
+    if not row or row.batch_id != batch.id:
+        raise HTTPException(404, "Row not found")
+
+    tenant_id = _user_default_tenant_id(db, user)
+    if batch.tenant_id != tenant_id:
+        raise HTTPException(403, "Batch is not in your tenant")
+
+    tracked = (
+        "supplier_name", "invoice_number", "invoice_date",
+        "net_amount", "vat_amount", "total_amount",
+        "nominal_account_code", "description",
+    )
+    before = {f: getattr(row, f, None) for f in tracked}
+    supplier_before = row.supplier_name
+
+    try:
+        from app.routers.batches import _apply_remap_hints, _apply_account_suggestions
+        _apply_remap_hints(db, batch, row)
+        if row.supplier_name != supplier_before:
+            _apply_account_suggestions(db, batch.tenant_id, batch.company_id, row)
+    except Exception as exc:
+        logger.warning("apply_saved_regions_to_row failed row_id=%s: %s", row_id, exc)
+        raise HTTPException(500, f"Saved region replay failed: {exc}")
+
+    after = {f: getattr(row, f, None) for f in tracked}
+    changed = {
+        f: {"old": before[f], "new": after[f]}
+        for f in tracked
+        if str(before[f] or "") != str(after[f] or "")
+    }
+
+    if changed:
+        row.review_required = True
+        row.validation_status = row.validation_status or "saved_region_applied"
+        reasons = [x for x in re.split(r"[|]", row.review_reasons or "") if x]
+        reason = "Saved region replay changed field values; verify before approval"
+        if reason not in reasons:
+            reasons.append(reason)
+        row.review_reasons = "|".join(reasons)[:500]
+        db.add(InvoiceRowFieldAudit(
+            batch_id=batch.id,
+            row_id=row.id,
+            field_name="saved_regions",
+            old_value=None,
+            new_value=", ".join(changed.keys()),
+            action="saved_region_replay",
+            note="Manually replayed saved regions from review page",
+            rule_created=False,
+            user_id=user.id,
+            username=getattr(user, "email", None) or str(user.id),
+        ))
+
+    db.commit()
+    return {"changed": changed, "changed_fields": list(changed.keys()), "method_used": row.method_used}
+
+
+
 @router.get("/remap-hints")
 def list_remap_hints(
-    active: bool | None = Query(default=True),
+    active: bool | None = Query(default=None),
+    include_inactive: bool = Query(default=False),
     field_name: str | None = Query(default=None),
     db: Session = Depends(get_db),
     user=Depends(current_user),
@@ -1477,7 +1566,11 @@ def list_remap_hints(
     """List saved remap regions for maintenance/de-duplication."""
     tenant_id = _user_default_tenant_id(db, user)
     q = select(RemapHint).where(RemapHint.tenant_id == tenant_id)
-    if active is not None:
+    if not include_inactive:
+        if active is None:
+            active = True
+        q = q.where(RemapHint.active.is_(active))
+    elif active is not None:
         q = q.where(RemapHint.active.is_(active))
     if field_name:
         q = q.where(RemapHint.field_name == field_name)
