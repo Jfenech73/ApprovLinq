@@ -29,3 +29,4 @@ opencv-python-headless==4.10.0.84
 # >>> REVIEW_PACK requirements
 alembic==1.13.2
 # <<< REVIEW_PACK requirements
+pytesseract==0.3.13

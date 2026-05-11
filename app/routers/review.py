@@ -22,6 +22,7 @@ from app.routers.auth import current_user
 from app.utils.security import session_token_hash, utcnow
 from app.services import correction_service as cs
 from app.utils.storage import resolve_upload_path
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -587,6 +588,97 @@ def _count_meaningful(text: str) -> int:
     return len(_re.findall(r"[A-Za-z0-9]", text or ""))
 
 
+
+def _ocr_region_bytes(image_bytes: bytes) -> str:
+    """OCR a selected remap crop with local Tesseract first, OCR.space fallback.
+
+    This function is intentionally local/offline-first so remap readback works in
+    development and in deployments where OCR.space is not configured. It tries a
+    small set of conservative image variants/PSM modes and returns the best text.
+    """
+    if not image_bytes:
+        return ""
+    candidates: list[str] = []
+
+    def _clean(txt: str | None) -> str:
+        return " ".join((txt or "").replace("\x00", " ").split()).strip()
+
+    # Local Tesseract fallback.  This is especially important for scanned PDFs
+    # and for supplier-name remaps where the whole document has no text layer.
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter
+        import pytesseract
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        variants = [img]
+        # Upscale tight header crops. Tesseract struggles below ~40px text height.
+        w, h = img.size
+        if w < 900 or h < 180:
+            scale = 3 if max(w, h) < 350 else 2
+            variants.append(img.resize((w * scale, h * scale)))
+        gray = img.convert("L")
+        enhanced = ImageEnhance.Contrast(gray).enhance(1.35)
+        enhanced = ImageEnhance.Sharpness(enhanced).enhance(1.15)
+        variants.append(enhanced)
+        if w < 900 or h < 180:
+            variants.append(enhanced.resize((w * 2, h * 2)))
+        # A light denoise variant helps low-quality cropped invoices without
+        # over-darkening clear ones.
+        variants.append(enhanced.filter(ImageFilter.MedianFilter(size=3)))
+
+        seen = set()
+        for var in variants:
+            key = (var.size, var.mode)
+            if key in seen:
+                continue
+            seen.add(key)
+            for psm in (7, 6, 11):
+                try:
+                    txt = _clean(pytesseract.image_to_string(var, config=f"--oem 3 --psm {psm}"))
+                    if txt:
+                        candidates.append(txt)
+                except Exception:
+                    continue
+    except Exception as exc:
+        logger.debug("_ocr_region_bytes: local tesseract unavailable/failed: %s", exc)
+
+    # OCR.space fallback, only when configured.  Kept after local OCR because it
+    # is slower and may incur cost/quota.
+    if getattr(settings, "ocr_space_api_key", None):
+        try:
+            import requests as _requests
+            files = {"file": ("region.jpg", image_bytes, "image/jpeg")}
+            data = {
+                "apikey": settings.ocr_space_api_key,
+                "language": settings.ocr_space_language,
+                "isOverlayRequired": "false",
+                "scale": "true",
+                "OCREngine": str(settings.ocr_space_ocr_engine),
+            }
+            resp = _requests.post(
+                settings.ocr_space_endpoint,
+                files=files,
+                data=data,
+                timeout=min(int(settings.ocr_space_timeout_seconds or 60), 60),
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            for item in payload.get("ParsedResults") or []:
+                txt = _clean((item or {}).get("ParsedText"))
+                if txt:
+                    candidates.append(txt)
+        except Exception as exc:
+            logger.debug("_ocr_region_bytes: OCR.space fallback failed: %s", exc)
+
+    if not candidates:
+        return ""
+    # Select the candidate with most meaningful characters, but prefer shorter
+    # header-like strings over huge noisy OCR bursts when scores are similar.
+    def _score(txt: str) -> tuple[int, int]:
+        meaningful = _count_meaningful(txt)
+        noise_penalty = max(len(txt) - 120, 0)
+        return (meaningful - noise_penalty, -len(txt))
+    return max(candidates, key=_score)
+
 def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float, h: float) -> str:
     """Return the best text found inside the normalised (0-1) rectangle on the page.
 
@@ -736,6 +828,47 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
         logger.debug("_read_region_text: tier3 OCR.space failed: %s", _e3b)
         return ""
 
+
+def _normalise_supplier_remap_text(text: str) -> str:
+    """Turn a supplier-name remap crop into the best supplier title.
+
+    OCR on a selected header range may return several lines (name + tagline +
+    address + phone).  For the supplier_name field we should store the best
+    company/title value, not the whole crop.  This keeps future remap hints useful.
+    """
+    raw = "\n".join((text or "").splitlines()).strip()
+    if not raw:
+        return ""
+    # If OCR collapsed the crop into one long line, keep the leading legal
+    # company name up to its suffix (e.g. "Mafimex Ltd."), not the tagline/address.
+    m_legal = re.match(r"^\s*(.{2,80}?\b(?:ltd|limited|plc|llc|inc|company|co\.?)\.?)\b", raw, re.I)
+    if m_legal:
+        return " ".join(m_legal.group(1).split()).strip()
+    try:
+        from app.services.extractor import (
+            find_supplier_name,
+            normalise_company_name,
+            _clean_ocr_supplier_name,
+            suspicious_supplier_name,
+            bad_supplier_line,
+            _company_strength_score,
+        )
+        found = find_supplier_name(raw)
+        if found and not suspicious_supplier_name(found):
+            return normalise_company_name(_clean_ocr_supplier_name(found)) or found
+        candidates: list[str] = []
+        for ln in raw.splitlines() or [raw]:
+            clean = normalise_company_name(_clean_ocr_supplier_name(" ".join(ln.split()).strip()))
+            if not clean or suspicious_supplier_name(clean) or bad_supplier_line(clean):
+                continue
+            if len(clean) <= 90:
+                candidates.append(clean)
+        if candidates:
+            return sorted(candidates, key=_company_strength_score, reverse=True)[0]
+    except Exception:
+        pass
+    return " ".join(raw.split())
+
 # ── Remap hints + value persistence + rule creation ─────────────────────────
 @router.post("/batches/{batch_id}/rows/{row_id}/remap")
 def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
@@ -859,12 +992,16 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         else:
             logger.warning("save_remap: file not found for file_id=%s", file_id)
 
-    # Normalise: collapse whitespace, strip leading/trailing
-    read_text = " ".join(read_text.split()).strip() if read_text else ""
+    # Normalise: collapse whitespace, strip leading/trailing.
+    # For supplier_name, convert a multi-line header crop into the best company
+    # title before saving the value/rule/hint.
+    if payload.field_name == "supplier_name" and read_text:
+        read_text = _normalise_supplier_remap_text(read_text)
+    else:
+        read_text = " ".join(read_text.split()).strip() if read_text else ""
     if payload.field_name == "supplier_name" and read_text:
         _snapshot_supplier_name = read_text
-        if not getattr(hint, "supplier_name_snapshot", None):
-            hint.supplier_name_snapshot = read_text
+        hint.supplier_name_snapshot = read_text
     logger.debug(
         "save_remap: resolved text=%r field=%r supplier=%r",
         read_text[:80], payload.field_name, row.supplier_name,

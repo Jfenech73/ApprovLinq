@@ -89,6 +89,49 @@ class OCRSpaceBackend(OCRBackend):
         return "\n".join(lines).strip()
 
 
+class TesseractOCRBackend(OCRBackend):
+    name = "tesseract"
+
+    def __init__(self) -> None:
+        try:
+            import shutil
+            import pytesseract  # noqa: F401
+        except Exception as exc:
+            raise RuntimeError(f"Local Tesseract OCR unavailable: {exc}")
+        if not shutil.which("tesseract"):
+            raise RuntimeError("Local Tesseract binary not found in PATH")
+
+    def extract_text_from_pdf_page(self, pdf_path: Path, page_index: int, scale: float = 2.4) -> str:
+        from PIL import Image, ImageEnhance, ImageFilter
+        import pytesseract
+
+        image_bytes = self.render_pdf_page_to_jpeg_bytes(
+            pdf_path,
+            page_index,
+            scale=scale,
+            quality=90,
+        )
+        if not image_bytes:
+            return ""
+        img = Image.open(BytesIO(image_bytes)).convert("RGB")
+        variants = [img]
+        gray = img.convert("L")
+        enhanced = ImageEnhance.Contrast(gray).enhance(1.25)
+        enhanced = ImageEnhance.Sharpness(enhanced).enhance(1.10)
+        variants.append(enhanced)
+        variants.append(enhanced.filter(ImageFilter.MedianFilter(size=3)))
+        best = ""
+        for var in variants:
+            for psm in (6, 11):
+                try:
+                    txt = pytesseract.image_to_string(var, config=f"--oem 3 --psm {psm}") or ""
+                except Exception:
+                    txt = ""
+                if sum(ch.isalnum() for ch in txt) > sum(ch.isalnum() for ch in best):
+                    best = txt
+        return best.strip()
+
+
 class PaddleOCRBackend(OCRBackend):
     name = "paddleocr"
 

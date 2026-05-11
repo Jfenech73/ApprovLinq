@@ -12,7 +12,7 @@ from typing import Any
 import fitz  # PyMuPDF
 import requests
 
-from app.services.ocr import OCRBackend, OCRSpaceBackend, PaddleOCRBackend
+from app.services.ocr import OCRBackend, OCRSpaceBackend, PaddleOCRBackend, TesseractOCRBackend
 from app.config import settings
 
 # New pipeline modules — imported lazily inside functions to avoid circular deps
@@ -58,6 +58,8 @@ def _company_strength_score(value: str | None) -> int:
         score -= 3
     if re.search(r"\b(invoice|date|vat|customer|bill to|ship to|total|amount due)\b", low):
         score -= 12
+    if re.search(r"\b(triq|trig|street|road|qormi|attard|marsa|birkirkara|malta)\b", low):
+        score -= 10
     return score
 
 
@@ -184,6 +186,229 @@ def parse_amount(value: str | None) -> float | None:
         return None
 
 
+
+# ── Finance-document remediation helpers ─────────────────────────────────────
+def _money_values_from_line(line: str) -> list[float]:
+    """Return monetary-looking values from a line, preserving left-to-right order.
+
+    Deliberately ignores bare percentages such as the ``18`` in ``VAT 18% 525.18``.
+    This is the core guard for Dione-style pages where OCR/DI sometimes returns
+    the VAT rate as the VAT amount.
+    """
+    vals: list[float] = []
+    for m in re.finditer(r"(?<![\d])(?:€\s*)?(-?\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|-?\d+[.,]\d{2})(?!\d)", line or ""):
+        # Reject values that are immediately followed by a percent sign.
+        tail = (line or "")[m.end():m.end()+2]
+        if "%" in tail:
+            continue
+        parsed = parse_amount(m.group(1))
+        if parsed is not None:
+            vals.append(round(float(parsed), 2))
+    return vals
+
+
+def _last_money_on_label_line(text: str, label_patterns: list[str], reject_patterns: list[str] | None = None) -> float | None:
+    """Find the last monetary value on the strongest matching labelled line."""
+    reject_patterns = reject_patterns or []
+    best: tuple[int, float] | None = None
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    for idx, line in enumerate(lines):
+        low = line.lower()
+        if any(re.search(p, low, re.I) for p in reject_patterns):
+            continue
+        if not any(re.search(p, low, re.I) for p in label_patterns):
+            continue
+        vals = _money_values_from_line(line)
+        if not vals:
+            # Some OCR engines split label and value on adjacent lines. Try a
+            # conservative one-line lookahead, but never jump across another label.
+            for nidx in range(idx + 1, min(idx + 2, len(lines))):
+                nxt = lines[nidx]
+                if re.search(r"\b(net|vat|tax|total|sub\s*total|gross|amount|bcrs|deposit)\b", nxt, re.I):
+                    break
+                vals = _money_values_from_line(nxt)
+                if vals:
+                    break
+        if not vals:
+            continue
+        # Last money on a VAT line handles ``VAT 18% 525.18`` and
+        # ``VAT € 18% 14.05 2.51`` correctly.
+        score = 10
+        if idx > len(lines) * 0.45:
+            score += 2  # summary area preference
+        val = vals[-1]
+        if best is None or score >= best[0]:
+            best = (score, val)
+    return best[1] if best else None
+
+
+def _extract_labeled_financial_bundle(text: str) -> dict[str, float]:
+    """Extract a reconciled net/VAT/total/deposit bundle from labelled summary text.
+
+    This is intentionally deterministic and finance-specific. It runs over
+    native text, Azure DI ``content`` and OCR text, and is used as a remediation
+    layer when semantic DI fields are missing or inconsistent.
+    """
+    if not text or count_meaningful_chars(text) < 10:
+        return {}
+
+    net = _last_money_on_label_line(
+        text,
+        [
+            r"\bnet\s+amount\b", r"\btotal\s+net\b", r"\bnet\s+total\b",
+            r"\bsub\s*total\b", r"\bsubtotal\b", r"\btaxable\s+amount\b",
+            r"\bamount\s+excl", r"\bexcl(?:uding)?\.?\s+(?:vat|tax)",
+            r"\btotal\s+excl\.?\s*(?:vat|tax)\b",
+        ],
+        reject_patterns=[r"\bvat\b", r"\btax\s+amount\b", r"\bgross\b", r"\bincl"],
+    )
+    vat = _last_money_on_label_line(
+        text,
+        [
+            r"\bv\.?a\.?t\.?\b", r"\bvat\s+amount\b", r"\btotal\s+vat\b",
+            r"\btax\s+amount\b", r"\btax\s+total\b", r"\bvalue\s+added\s+tax\b",
+        ],
+        reject_patterns=[r"\bvat\s*(?:reg|no|number)\b", r"\bvat\s*summary\b"],
+    )
+    total = _last_money_on_label_line(
+        text,
+        [
+            r"\binvoice\s+total\b", r"\bgrand\s+total\b", r"\btotal\s+gross\b",
+            r"\btotal\s+amount\b", r"\btotal\s+amount\s+in\s+eur\b",
+            r"\btotal\s+due\b", r"\bamount\s+due\b", r"\bbalance\s+due\b",
+            r"\btotal\s+incl", r"^\s*total\s*[:\-]?$", r"^\s*total\s+[€a-z]*\s*[:\-]?",
+        ],
+        reject_patterns=[r"\bsub\s*total\b", r"\bsubtotal\b", r"\btotal\s+net\b", r"\btotal\s+vat\b", r"\bvat\b", r"\btax\b", r"\bbcrs\b", r"\bdeposit\b"],
+    )
+    deposit = _last_money_on_label_line(
+        text,
+        [r"\bbcrs\b", r"\bdeposit\b", r"\breturnable", r"\breturnables?\b"],
+        reject_patterns=[r"\bvat\b", r"\btax\b"],
+    )
+
+    out: dict[str, float] = {}
+    if net is not None:
+        out["net_amount"] = round(float(net), 2)
+    if vat is not None:
+        out["vat_amount"] = round(float(vat), 2)
+    if total is not None:
+        out["total_amount"] = round(float(total), 2)
+    if deposit is not None and deposit > 0:
+        out["_deposit_candidate"] = round(float(deposit), 2)
+    return out
+
+
+def _bundle_support_score(values: dict[str, Any]) -> int:
+    return _amount_support_score(
+        values.get("net_amount"), values.get("vat_amount"), values.get("total_amount"), values.get("_deposit_candidate")
+    )
+
+
+def _apply_financial_remediation(extracted: dict[str, Any], text: str, source_tag: str) -> dict[str, Any]:
+    """Repair missing/inconsistent financial fields from labelled text.
+
+    The remediation is conservative:
+    - fill missing values directly;
+    - replace existing values only when the labelled bundle reconciles better;
+    - protect VAT from rate-as-amount reads like 18 instead of 525.18;
+    - preserve source metadata in ``_field_sources`` and method tags.
+    """
+    labelled = _extract_labeled_financial_bundle(text or "")
+    if not labelled:
+        return extracted
+
+    current = dict(extracted)
+    before_score = _bundle_support_score(current)
+    candidate = dict(current)
+    for k, v in labelled.items():
+        if k in ("net_amount", "vat_amount", "total_amount", "_deposit_candidate"):
+            candidate[k] = v
+    after_score = _bundle_support_score(candidate)
+
+    field_sources = dict(extracted.get("_field_sources") or {})
+
+    def _set(field: str, value: float) -> None:
+        old = extracted.get(field)
+        if old != value:
+            extracted[field] = value
+            field_sources[field] = source_tag
+
+    # Fill blanks first.
+    for field in ("net_amount", "vat_amount", "total_amount"):
+        if extracted.get(field) is None and labelled.get(field) is not None:
+            _set(field, labelled[field])
+
+    if labelled.get("_deposit_candidate") is not None and extracted.get("_deposit_candidate") is None:
+        extracted["_deposit_candidate"] = labelled["_deposit_candidate"]
+
+    # Replace when labelled fields reconcile materially better than current.
+    if after_score >= before_score + 6:
+        for field in ("net_amount", "vat_amount", "total_amount"):
+            if labelled.get(field) is not None:
+                _set(field, labelled[field])
+    else:
+        # Targeted VAT protection: if current VAT looks like a percentage rate or
+        # causes a mismatch, and labelled VAT reconciles, repair VAT only.
+        cur_vat = extracted.get("vat_amount")
+        lab_vat = labelled.get("vat_amount")
+        if lab_vat is not None and cur_vat is not None:
+            try:
+                cur_v = round(float(cur_vat), 2)
+                lab_v = round(float(lab_vat), 2)
+                net = float(extracted.get("net_amount") or labelled.get("net_amount") or 0)
+                total = float(extracted.get("total_amount") or labelled.get("total_amount") or 0)
+                cur_diff = abs((net + cur_v) - total)
+                lab_diff = abs((net + lab_v) - total)
+                if lab_v != cur_v and lab_diff + 0.05 < cur_diff:
+                    _set("vat_amount", lab_v)
+            except Exception:
+                pass
+
+    if field_sources:
+        extracted["_field_sources"] = field_sources
+        method = str(extracted.get("method_used") or "")
+        if source_tag not in method:
+            extracted["method_used"] = (method + "+" + source_tag).strip("+")
+    return extracted
+
+
+def _merge_text_recovery_fields(merged: dict[str, Any], recovery: dict[str, Any], source_tag: str) -> dict[str, Any]:
+    """Use deterministic text recovery as a cascading remediation layer."""
+    if not recovery:
+        return merged
+    field_sources = dict(merged.get("_field_sources") or {})
+
+    # Supplier: fill only when missing/suspicious, or when recovery has a much
+    # stronger company score.
+    rec_supplier = normalise_company_name(_clean_ocr_supplier_name(recovery.get("supplier_name")))
+    cur_supplier = normalise_company_name(_clean_ocr_supplier_name(merged.get("supplier_name")))
+    if rec_supplier and not suspicious_supplier_name(rec_supplier):
+        rec_score = _company_strength_score(rec_supplier)
+        cur_score = _company_strength_score(cur_supplier)
+        if not cur_supplier or suspicious_supplier_name(cur_supplier) or rec_score >= cur_score + 6:
+            merged["supplier_name"] = rec_supplier
+            field_sources["supplier_name"] = source_tag
+
+    # Invoice number: fill when missing/suspicious.
+    if recovery.get("invoice_number") and suspicious_invoice_number(merged.get("invoice_number")):
+        merged["invoice_number"] = recovery.get("invoice_number")
+        field_sources["invoice_number"] = source_tag
+
+    # Amounts: apply the same reconciliation-aware repair to the recovery text.
+    for field in ("net_amount", "vat_amount", "total_amount"):
+        if merged.get(field) is None and recovery.get(field) is not None:
+            merged[field] = recovery[field]
+            field_sources[field] = source_tag
+    if recovery.get("_deposit_candidate") is not None and merged.get("_deposit_candidate") is None:
+        merged["_deposit_candidate"] = recovery.get("_deposit_candidate")
+
+    if field_sources:
+        merged["_field_sources"] = field_sources
+        method = str(merged.get("method_used") or "")
+        if source_tag not in method:
+            merged["method_used"] = (method + "+" + source_tag).strip("+")
+    return merged
+
 def parse_date(value: str | None):
     if not value:
         return None
@@ -243,6 +468,16 @@ def get_ocr_backend():
         return OCRSpaceBackend()
     if provider == "paddleocr":
         return PaddleOCRBackend()
+    if provider in ("tesseract", "local_tesseract"):
+        return TesseractOCRBackend()
+    # Safe development/runtime fallback: when no external OCR provider is
+    # configured, use local Tesseract if it is available.  This is only invoked
+    # when the native PDF text layer is weak, so it does not slow digital PDFs.
+    if provider in ("none", "", "auto"):
+        try:
+            return TesseractOCRBackend()
+        except Exception:
+            return None
     return None
 
 
@@ -293,6 +528,11 @@ def bad_supplier_line(line: str) -> bool:
         r"http",
         r"tel",
         r"phone",
+        r"bcrs",
+        r"deposit",
+        r"gross",
+        r"net\s+total",
+        r"total\s+net",
     ]
     if any(re.search(p, line_l, re.I) for p in skip_patterns):
         return True
@@ -369,6 +609,11 @@ def suspicious_supplier_name(value: str | None) -> bool:
         r"\bcustomer\b",
         r"\bbill to\b",
         r"\bship to\b",
+        r"\bbcrs\b",
+        r"\bdeposit\b",
+        r"\bnet\s+total\b",
+        r"\btotal\s+net\b",
+        r"\bgross\b",
     ]
     if any(re.search(p, vl, re.I) for p in bad_patterns):
         return True
@@ -432,6 +677,9 @@ def _find_supplier_from_contact_block(
         r"\bstreet\b", r"\broad\b", r"\bave(?:nue)?\b", r"\bfloor\b",
         r"\bsuite\b", r"\bbuilding\b", r"\bindustrial\s+park\b",
         r"\btriq\b",                # Maltese word for "street"
+        r"\btrig\b",                # common OCR for Triq
+        r"^\s*[a-z]\s*[:\-]\s*trig\b",
+        r"^\s*[a-z]\s*[:\-]\s*triq\b",
         r"\bdistrict\b",            # e.g. "Central Business District"
         r"\bzone\s+\d",             # e.g. "Zone 3"
         r"^\d+[,/\s]",              # starts with street number
@@ -480,11 +728,27 @@ def _find_supplier_from_contact_block(
     for contact_idx in contact_indices:
         if contact_idx < 1:
             continue
-        # Walk backward up to 10 lines looking for a plausible company name
+        # Walk backward up to 10 lines looking for plausible company names.
+        # Do not simply return the nearest line: OCR often places an address or
+        # tagline immediately above Tel/Email, while the actual legal name is a
+        # few lines higher (e.g. "Mafimex Ltd." above "The Fruit and Vegetable Centre").
+        candidates: list[tuple[int, str]] = []
         for i in range(contact_idx - 1, max(-1, contact_idx - 10), -1):
             candidate = lines[i]
             if _is_plausible_company(candidate):
-                return candidate
+                score = _company_strength_score(candidate)
+                if re.search(r"\b(ltd|limited|plc|llc|inc|company|co\.?)\b", candidate, re.I):
+                    score += 14
+                if i <= 3:
+                    score += 5
+                # Taglines/product descriptors can be plausible text, but should
+                # lose to a nearby legal-name line.
+                if re.search(r"\b(centre|center|fruit|vegetable|fresh|quality|services?)\b", candidate, re.I) and not re.search(r"\b(ltd|limited|plc|llc|inc)\b", candidate, re.I):
+                    score -= 6
+                candidates.append((score, candidate))
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            return candidates[0][1]
         # If backward scan from this contact block found nothing, try the next block
 
     return None
@@ -1149,6 +1413,7 @@ def _rank_candidates_with_llm(field_name: str, candidates: list[str], page_text:
 
 def _collect_supplier_candidates(text: str, account_tokens: list[str] | None = None) -> list[str]:
     candidates: list[str] = []
+    account_tokens = account_tokens or frozenset()
     primary = find_supplier_name(text, account_tokens=account_tokens)
     if primary:
         candidates.append(primary)
@@ -1158,12 +1423,18 @@ def _collect_supplier_candidates(text: str, account_tokens: list[str] | None = N
             continue
         if suspicious_supplier_name(ln) or bad_supplier_line(ln):
             continue
-        if re.search(r"\b(invoice|date|vat|tax|customer|bill to|ship to|total|amount due|subtotal)\b", ln, re.I):
+        if re.search(r"\b(invoice|date|vat|tax|customer|bill to|ship to|total|amount due|subtotal|net total|total net|gross|bcrs|deposit|amount)\b", ln, re.I):
             continue
         if re.search(r"[A-Za-z]", ln) and len(ln) >= 4 and len(ln) <= 80:
             if _company_strength_score(ln) >= 6:
                 candidates.append(ln)
-    return sorted(_dedupe_candidates(candidates), key=_company_strength_score, reverse=True)
+    deduped = _dedupe_candidates(candidates)
+    if primary:
+        pkey = " ".join(str(primary).split()).strip().lower()
+        rest = [c for c in deduped if c.lower() != pkey]
+        rest = sorted(rest, key=_company_strength_score, reverse=True)
+        return [primary] + rest
+    return sorted(deduped, key=_company_strength_score, reverse=True)
 
 
 def _collect_invoice_number_candidates(text: str) -> list[str]:
@@ -1180,11 +1451,14 @@ def _collect_invoice_number_candidates(text: str) -> list[str]:
     fallback = _invoice_number_fallback(text)
     if fallback and not suspicious_invoice_number(fallback):
         candidates.append(fallback)
-    top = "\n".join(text.splitlines()[:20])
-    for m in re.finditer(r"\b([A-Z]{1,4}[\-\/]?[0-9]{3,}|[0-9]{4,}[A-Z0-9\-/]*)\b", top):
-        cand = m.group(1)
-        if not suspicious_invoice_number(cand):
-            candidates.append(cand)
+    top_lines = text.splitlines()[:30]
+    for line in top_lines:
+        if re.search(r"\b(tel|fax|phone|mob|mobile|vat|tax|bcrs|iban|swift)\b|^\s*[tmfw]\s*[:\-]|\+\s*\d", line, re.I):
+            continue
+        for m in re.finditer(r"\b([A-Z]{1,4}[\-\/]?[0-9]{3,}|[0-9]{4,}[A-Z0-9\-/]*)\b", line):
+            cand = m.group(1)
+            if not suspicious_invoice_number(cand):
+                candidates.append(cand)
     return _dedupe_candidates(candidates)
 
 
@@ -1334,6 +1608,26 @@ def simple_extract(
     net_amount = parse_amount(net_raw)
     vat_amount = parse_amount(vat_raw)
     total_amount = parse_amount(total_raw)
+    _deposit_candidate = None
+
+    # Finance-labelled line pass: fixes OCR/DI text such as
+    #   VAT 18% 525.18  -> VAT amount 525.18, not rate 18
+    #   TOTAL 3,442.85  -> total, not SUBTOTAL
+    # It is reconciliation-aware and only overrides weak/generic regex values.
+    _labelled_bundle = _extract_labeled_financial_bundle(text)
+    if _labelled_bundle:
+        _tmp_amounts = {
+            "net_amount": net_amount,
+            "vat_amount": vat_amount,
+            "total_amount": total_amount,
+        }
+        _tmp_amounts = _apply_financial_remediation(
+            _tmp_amounts, text, "labelled_summary"
+        )
+        net_amount = _tmp_amounts.get("net_amount")
+        vat_amount = _tmp_amounts.get("vat_amount")
+        total_amount = _tmp_amounts.get("total_amount")
+        _deposit_candidate = _labelled_bundle.get("_deposit_candidate")
 
     supplier_candidates = _collect_supplier_candidates(text, account_tokens=account_tokens)
     supplier_name = supplier_candidates[0] if supplier_candidates else None
@@ -1366,6 +1660,8 @@ def simple_extract(
             vat_amount = _struct["vat_amount"]
         if _struct.get("total_amount") is not None:
             total_amount = _struct["total_amount"]
+        if _struct.get("_deposit_candidate") is not None:
+            _deposit_candidate = _struct["_deposit_candidate"]
         # _deposit_candidate is passed through the return dict for BCRS detection
         # in batches.py; it does NOT by itself trigger a split.
 
@@ -1401,6 +1697,7 @@ def simple_extract(
             None
         ),
         "tax_code": None,
+        "_deposit_candidate": _deposit_candidate,
         "_field_sources": _field_sources,
         "_invoice_candidates": invoice_candidates,
         "_supplier_candidates": supplier_candidates,
@@ -2437,7 +2734,11 @@ def process_pdf_page(
         if count_meaningful_chars(native_text) < 80 and ocr_backend is not None:
             try:
                 ocr_text = clean_text(
-                    ocr_backend.extract_text_from_pdf_page(pdf_path, page_index, scale=1.8)
+                    ocr_backend.extract_text_from_pdf_page(
+                        pdf_path,
+                        page_index,
+                        scale=3.0 if getattr(ocr_backend, "name", "") == "tesseract" else 1.8,
+                    )
                 )
                 if count_meaningful_chars(ocr_text) > count_meaningful_chars(native_text):
                     final_text = ocr_text
@@ -2500,6 +2801,27 @@ def process_pdf_page(
             )
             if ai_fields:
                 extracted = merge_ai_fields(extracted, ai_fields, account_company_name)
+                # Cascading remediation: Azure DI sometimes misses VendorName or
+                # returns a semantic number that does not reconcile.  Its full
+                # OCR content is still valuable, so run the deterministic text
+                # extractor over that content and use it only to fill/repair
+                # missing or inconsistent fields.
+                _di_text = ai_fields.get("di_page_text") or ""
+                if count_meaningful_chars(_di_text) >= 20:
+                    try:
+                        _recovery = simple_extract(
+                            _di_text,
+                            openai_api_key=None,
+                            account_company_name=account_company_name,
+                        )
+                        extracted = _merge_text_recovery_fields(
+                            extracted, _recovery, "di_text_recovery"
+                        )
+                        extracted = _apply_financial_remediation(
+                            extracted, _di_text, "di_text_reconciliation"
+                        )
+                    except Exception as _rec_exc:
+                        logger.debug("DI text remediation failed p%d: %s", page_index, _rec_exc)
                 method = f"{method}+azure_di"
                 logger.info("Azure DI extraction succeeded for page %d", page_index)
 
@@ -2547,6 +2869,21 @@ def process_pdf_page(
     # STAGE 3 — Line normalization
     # ─────────────────────────────────────────────────────────────────────────
     logger.debug("Stage 3: line normalization for page %d", page_index)
+
+    # 3a0 — deterministic financial remediation over the best available text.
+    # This runs after all extraction providers so it can correct missed/misread
+    # DI numbers before formal validation and review-flagging.
+    try:
+        _remediation_text = "\n".join(
+            part for part in (final_text, extracted.get("di_page_text") or "")
+            if part and count_meaningful_chars(str(part)) >= 10
+        )
+        if _remediation_text:
+            extracted = _apply_financial_remediation(
+                extracted, _remediation_text, "financial_remediation"
+            )
+    except Exception as _fre:
+        logger.debug("financial remediation failed p%d: %s", page_index, _fre)
 
     # 3a — Net → Total fallback for zero-VAT / subscription / reverse-charge invoices
     if (
