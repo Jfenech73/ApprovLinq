@@ -66,6 +66,20 @@ def _clear_active(batch_id: UUID) -> None:
         _ACTIVE_BATCHES.discard(str(batch_id))
 
 
+
+def _safe_log_value(value: object, *, max_len: int = 80) -> str:
+    """Return a short, content-safe value for operational logs.
+
+    Logs should identify the processing step and high-level status without
+    leaking invoice contents, API keys, or full filenames.
+    """
+    text = str(value or "")
+    text = re.sub(r"[\r\n\t]+", " ", text).strip()
+    text = re.sub(r"[^\w .@#:/\-]+", "_", text)
+    if len(text) > max_len:
+        return text[: max_len - 1] + "…"
+    return text
+
 def _append_method_tag(row: InvoiceRow, tag: str) -> None:
     """Append a method_used tag once, preserving existing tags."""
     tag = (tag or "").strip()
@@ -2447,7 +2461,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         _batch_tenant_id  = batch.tenant_id
         _batch_company_id = batch.company_id
 
-        logger.info("_process_batch_job: batch %s started tenant=%s", batch_id, _batch_tenant_id)
+        logger.info("scan started batch=%s tenant=%s", batch_id, _batch_tenant_id)
 
         files = db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch_id).order_by(InvoiceFile.uploaded_at.asc(), InvoiceFile.id.asc()).all()
         if not files:
@@ -2520,6 +2534,13 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         from sqlalchemy import update as _upd
 
         processed_pages = processed_files = partial_files = failed_files = total_rows = 0
+        rule_apply_count = 0
+        saved_region_seen_count = 0
+        saved_region_applied_count = 0
+        saved_region_conflict_count = 0
+        review_required_count = 0
+        totals_status_counts: dict[str, int] = {}
+        extraction_method_counts: dict[str, int] = {}
         for file_index, invoice_file in enumerate(files, start=1):
             inserted_rows = 0
             page_failures = 0
@@ -2536,6 +2557,13 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             scan_mode=batch.scan_mode or "summary",
                             openai_api_key=settings.openai_api_key if settings.use_openai else None,
                             account_company_name=account_company_name,
+                        )
+                        page_methods = sorted({str(_r.get("method_used") or "unknown").split("+")[0] for _r in row_payloads}) or ["no_rows"]
+                        for _m in page_methods:
+                            extraction_method_counts[_m] = extraction_method_counts.get(_m, 0) + 1
+                        logger.info(
+                            "scan page completed batch=%s file_index=%d page=%d rows=%d methods=%s",
+                            batch_id, file_index, page_index + 1, len(row_payloads), ",".join(page_methods),
                         )
                         for r in row_payloads:
                             # --- Pattern-based supplier pre-fill ---------
@@ -2609,6 +2637,22 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             # rules, saved-region activity, supplier history/master data and
                             # totals evidence before final review/BCRS decisions.
                             arbitrate_invoice_row(db, batch, row, r, context={"scan_mode": batch.scan_mode or "summary"})
+
+                            _method_text = row.method_used or ""
+                            if "rule:" in _method_text or "arbitrated:correction_rule" in _method_text or "arbitrated:admin_global_rule" in _method_text:
+                                rule_apply_count += 1
+                            if "remap_hint" in _method_text or "saved_region" in _method_text:
+                                saved_region_seen_count += 1
+                            if "remap_hint:" in _method_text or "arbitrated:saved_region" in _method_text:
+                                saved_region_applied_count += 1
+                            if "remap_hint_conflict" in _method_text or "saved_region_conflict" in _method_text:
+                                saved_region_conflict_count += 1
+                            if row.review_required:
+                                review_required_count += 1
+                            if row.totals_reconciliation_status:
+                                _ts = str(row.totals_reconciliation_status)
+                                totals_status_counts[_ts] = totals_status_counts.get(_ts, 0) + 1
+
                             db.add(row)
                             inserted_rows += 1
                             total_rows += 1
@@ -2680,8 +2724,8 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                         page_failures += 1
                         processed_pages += 1
                         logger.warning(
-                            "_process_batch_job: page error batch=%s file=%s page=%d: %s",
-                            batch_id, invoice_file.original_filename, page_index + 1, page_error,
+                            "scan page failed batch=%s file_index=%d page=%d error=%s",
+                            batch_id, file_index, page_index + 1, _safe_log_value(page_error, max_len=160),
                         )
                         # Use snapshotted IDs — batch object is expired after rollback
                         fallback_row = InvoiceRow(
@@ -2774,8 +2818,11 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         db.commit()
 
         logger.info(
-            "_process_batch_job: batch %s completed status=%s files=%d rows=%d",
-            batch_id, final_status, processed_files, total_rows,
+            "scan completed batch=%s status=%s files_processed=%d files_partial=%d files_failed=%d rows=%d review_required=%d rules_applied=%d saved_regions_seen=%d saved_regions_applied=%d saved_region_conflicts=%d totals_status=%s extraction_methods=%s",
+            batch_id, final_status, processed_files, partial_files, failed_files, total_rows,
+            review_required_count, rule_apply_count, saved_region_seen_count,
+            saved_region_applied_count, saved_region_conflict_count, totals_status_counts,
+            extraction_method_counts,
         )
 
         # Learn supplier patterns from this batch's successfully matched rows

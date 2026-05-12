@@ -9,6 +9,7 @@ from __future__ import annotations
 from copy import copy
 from datetime import datetime
 from io import BytesIO
+import logging
 
 from openpyxl import load_workbook
 from sqlalchemy import select
@@ -19,6 +20,8 @@ from app.db.review_models import InvoiceRowFieldAudit, BatchExportEvent
 from app.services import correction_service as cs
 from app.services.exporter import workbook_from_rows
 from app.utils.storage import batch_export_folder
+
+logger = logging.getLogger(__name__)
 
 
 def _build_corrected_rows(db: Session, batch: M.InvoiceBatch) -> list[dict]:
@@ -98,6 +101,11 @@ def export_batch_corrected(
     out.seek(0)
 
     # Log export event + flip status + bump version
+    logger.info(
+        "export completed batch=%s version=%d rows=%d audit_rows=%d bytes=%d",
+        batch.id, next_version, len(rows), len(audits), len(export_bytes),
+    )
+
     ev = BatchExportEvent(
         batch_id=batch.id, export_version=next_version,
         exported_by=user.id, exported_at=datetime.utcnow(),
