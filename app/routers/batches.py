@@ -139,15 +139,41 @@ def _audit_saved_region_action(
     action: str,
     note: str,
 ) -> None:
-    """Record saved-region replay decisions in the review audit table.
+    """Record saved-region replay decisions and governance telemetry.
 
     Rows created during scanning can still be transient when saved regions run.
-    Flushing here keeps automatic saved-region activity visible without changing
-    the wider processing pipeline.
+    Flushing here keeps automatic saved-region activity visible.  The RemapHint
+    is also updated so the UI can show which supplier/field region was used,
+    whether it applied, failed, or conflicted, and which page was actually read.
     """
     if row.id is None:
         db.add(row)
         db.flush()
+
+    # Governance usage tracking.  Keep content short to avoid storing full OCR
+    # extracts while preserving enough evidence for support/review.
+    try:
+        hint.last_used_at = datetime.utcnow()
+        hint.last_used_batch_id = batch.id
+        hint.last_used_row_id = row.id
+        m = re.search(r"used_page=(\d+)", note or "")
+        if m:
+            hint.last_used_page_no = int(m.group(1))
+        read = str(new_value or "").strip()
+        hint.last_read_text = read[:500] if read else None
+        hint.last_result = action[:80]
+        if action == "saved_region_apply":
+            hint.apply_count = int(hint.apply_count or 0) + 1
+            hint.success_count = int(hint.success_count or 0) + 1
+        elif action in {"saved_region_blank", "saved_region_invalid"}:
+            hint.failure_count = int(hint.failure_count or 0) + 1
+        elif action == "saved_region_conflict":
+            hint.conflict_count = int(hint.conflict_count or 0) + 1
+        elif action == "saved_region_checked":
+            hint.success_count = int(hint.success_count or 0) + 1
+    except Exception:
+        logger.debug("RemapHint usage tracking failed for hint_id=%s", getattr(hint, "id", None), exc_info=True)
+
     db.add(InvoiceRowFieldAudit(
         batch_id=batch.id,
         row_id=row.id,
@@ -619,13 +645,15 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 RemapHint.tenant_id == batch.tenant_id,
                 RemapHint.field_name == field,
                 RemapHint.active.is_(True),
+                RemapHint.archived.is_(False),
+                RemapHint.deleted_at.is_(None),
                 RemapHint.x.isnot(None),
             )
             if batch.company_id:
                 hint_stmt = hint_stmt.where((RemapHint.company_id == batch.company_id) | (RemapHint.company_id.is_(None)))
             else:
                 hint_stmt = hint_stmt.where(RemapHint.company_id.is_(None))
-            hint_candidates = db.execute(hint_stmt.order_by(RemapHint.id.desc())).scalars().all()
+            hint_candidates = db.execute(hint_stmt.order_by(RemapHint.is_primary.desc(), RemapHint.success_count.desc(), RemapHint.id.desc())).scalars().all()
             hint = None
             # hint is None here until a supplier-linked candidate is selected;
             # this preserves the explicit no-hint guard below while avoiding
@@ -1022,6 +1050,8 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
     hints_q = db.query(RemapHint).filter(
         RemapHint.tenant_id == batch.tenant_id,
         RemapHint.active.is_(True),
+        RemapHint.archived.is_(False),
+        RemapHint.deleted_at.is_(None),
         RemapHint.x.isnot(None),
     )
     # Page number is a reference from the source invoice, not a hard match.
@@ -1128,6 +1158,24 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         matched.extend(supplier_hints)
     if not matched:
         return
+
+    def _hint_priority(h: RemapHint) -> tuple:
+        same_company = 0 if (batch.company_id and h.company_id == batch.company_id) else 1
+        supplier_exact = 0 if (supplier_id and getattr(h, "supplier_id", None) == supplier_id) else 1
+        snap_exact = 0 if ((getattr(h, "supplier_name_snapshot", None) or "") and row_norm and _normalize_rule_value(h.supplier_name_snapshot) == row_norm) else 1
+        # Lower tuple sorts first.  Primary regions win, then supplier/company
+        # precision, then historical success, then newest active region.
+        return (
+            0 if getattr(h, "is_primary", False) else 1,
+            same_company,
+            supplier_exact,
+            snap_exact,
+            -int(getattr(h, "success_count", 0) or 0),
+            -int(getattr(h, "apply_count", 0) or 0),
+            -int(getattr(h, "id", 0) or 0),
+        )
+
+    matched = sorted(matched, key=_hint_priority)
 
     from app.db.models import InvoiceFile as _IF
     file_obj = db.get(_IF, row.source_file_id) if row.source_file_id else None

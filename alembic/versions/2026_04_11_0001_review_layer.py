@@ -128,8 +128,27 @@ def upgrade() -> None:
             sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.true()),
             sa.Column("created_by", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=True),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.Column("is_primary", sa.Boolean(), nullable=False, server_default=sa.false()),
+            sa.Column("archived", sa.Boolean(), nullable=False, server_default=sa.false()),
+            sa.Column("archived_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("archived_by", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=True),
+            sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("deleted_by", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=True),
+            sa.Column("superseded_by_hint_id", sa.BigInteger(), nullable=True),
+            sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("last_used_batch_id", postgresql.UUID(as_uuid=True), nullable=True),
+            sa.Column("last_used_row_id", sa.BigInteger(), nullable=True),
+            sa.Column("last_used_page_no", sa.Integer(), nullable=True),
+            sa.Column("last_read_text", sa.Text(), nullable=True),
+            sa.Column("last_result", sa.Text(), nullable=True),
+            sa.Column("success_count", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("failure_count", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("conflict_count", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("apply_count", sa.Integer(), nullable=False, server_default="0"),
         )
         op.create_index("ix_remap_lookup", "remap_hints", ["supplier_id", "field_name", "active"])
+        op.create_index("ix_remap_governance", "remap_hints", ["tenant_id", "company_id", "supplier_id", "field_name", "active", "archived", "is_primary"])
+        op.create_index("ix_remap_lifecycle", "remap_hints", ["active", "archived", "deleted_at"])
 
     if "batch_export_events" not in insp.get_table_names():
         op.create_table(

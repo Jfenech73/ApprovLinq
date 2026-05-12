@@ -1189,6 +1189,124 @@ def _current_value_better_than_region_read(field_name: str, read_text: str | Non
         return True
     return False
 
+
+
+def _normalise_remap_group_supplier(value: str | None) -> str:
+    value = (value or "").lower()
+    value = re.sub(r"\b(ltd|limited|plc|llc|inc|corp|co|group|trading|holdings|services|solutions)\b", " ", value)
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", value)).strip()
+
+
+def _coords_close(h: RemapHint, x, y, w, hh, tolerance: float = 0.004) -> bool:
+    try:
+        vals = (float(h.x), float(h.y), float(h.w), float(h.h), float(x), float(y), float(w), float(hh))
+    except Exception:
+        return False
+    return (
+        abs(vals[0] - vals[4]) <= tolerance
+        and abs(vals[1] - vals[5]) <= tolerance
+        and abs(vals[2] - vals[6]) <= tolerance
+        and abs(vals[3] - vals[7]) <= tolerance
+    )
+
+
+def _remap_group_query(
+    db: Session,
+    tenant_id,
+    company_id,
+    field_name: str,
+    supplier_id: int | None,
+    supplier_snapshot: str | None,
+    *,
+    include_archived: bool = True,
+    include_deleted: bool = False,
+):
+    """Return the base query for one supplier/field saved-region governance group.
+
+    Identity deliberately excludes page_no.  Page is only a reference coordinate
+    replay hint; supplier + field is the user-facing saved-region relationship.
+    """
+    q = select(RemapHint).where(
+        RemapHint.tenant_id == tenant_id,
+        RemapHint.field_name == field_name,
+    )
+    if company_id:
+        q = q.where((RemapHint.company_id == company_id) | (RemapHint.company_id.is_(None)))
+    else:
+        q = q.where(RemapHint.company_id.is_(None))
+    if supplier_id:
+        q = q.where(RemapHint.supplier_id == supplier_id)
+    else:
+        norm = _normalise_remap_group_supplier(supplier_snapshot)
+        if norm:
+            q = q.where(RemapHint.supplier_name_snapshot.isnot(None))
+        else:
+            q = q.where(RemapHint.supplier_name_snapshot.is_(None))
+    if not include_archived:
+        q = q.where(RemapHint.archived.is_(False))
+    if not include_deleted:
+        q = q.where(RemapHint.deleted_at.is_(None))
+    return q
+
+
+def _same_remap_group(a: RemapHint, b: RemapHint) -> bool:
+    if a.tenant_id != b.tenant_id or a.field_name != b.field_name:
+        return False
+    if (a.company_id or None) != (b.company_id or None):
+        # Tenant-wide and company-specific hints are related in application, but
+        # primary uniqueness is enforced per exact company scope.
+        return False
+    if a.supplier_id or b.supplier_id:
+        return bool(a.supplier_id and b.supplier_id and a.supplier_id == b.supplier_id)
+    return _normalise_remap_group_supplier(a.supplier_name_snapshot) == _normalise_remap_group_supplier(b.supplier_name_snapshot)
+
+
+def _get_remap_hint_for_user(hint_id: int, db: Session, user, x_tenant_id: str | None = None) -> RemapHint:
+    tenant_id = None if getattr(user, "role", None) == "admin" and not x_tenant_id else _active_tenant_id_for_user(db, user, x_tenant_id)
+    hint = db.get(RemapHint, hint_id)
+    if not hint or (tenant_id is not None and hint.tenant_id != tenant_id):
+        raise HTTPException(404, "Remap hint not found")
+    return hint
+
+
+def _disable_related_remap_rules(db: Session, hint: RemapHint, user=None) -> int:
+    """Disable region-backed rules that would make an archived hint look active."""
+    q = select(CorrectionRule).where(
+        CorrectionRule.tenant_id == hint.tenant_id,
+        CorrectionRule.rule_type == "remap_field_value",
+        CorrectionRule.field_name == hint.field_name,
+        CorrectionRule.active.is_(True),
+    )
+    if hint.company_id:
+        q = q.where((CorrectionRule.company_id == hint.company_id) | (CorrectionRule.company_id.is_(None)))
+    rules = db.execute(q).scalars().all()
+    disabled = 0
+    snap_norm = _normalise_remap_group_supplier(hint.supplier_name_snapshot)
+    for rule in rules:
+        src_norm = _normalise_remap_group_supplier(rule.source_pattern)
+        if snap_norm and src_norm and snap_norm != src_norm:
+            continue
+        rule.active = False
+        rule.disabled_by = getattr(user, "id", None)
+        rule.disabled_at = datetime.utcnow()
+        disabled += 1
+    return disabled
+
+
+def _set_primary_hint(db: Session, hint: RemapHint) -> None:
+    peers = db.execute(select(RemapHint).where(
+        RemapHint.tenant_id == hint.tenant_id,
+        RemapHint.field_name == hint.field_name,
+        RemapHint.active.is_(True),
+        RemapHint.archived.is_(False),
+        RemapHint.deleted_at.is_(None),
+    )).scalars().all()
+    for peer in peers:
+        if _same_remap_group(hint, peer):
+            peer.is_primary = peer.id == hint.id
+    hint.is_primary = True
+
+
 @router.post("/batches/{batch_id}/rows/{row_id}/remap")
 def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
                db: Session = Depends(get_db), user=Depends(current_user)):
@@ -1230,24 +1348,30 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
             supplier_q = supplier_q.where(M.TenantSupplier.company_id == batch.company_id)
         supplier = db.execute(supplier_q).scalar_one_or_none()
 
-    hint_stmt = select(RemapHint).where(
-        RemapHint.tenant_id == batch.tenant_id,
-        RemapHint.field_name == payload.field_name,
-        RemapHint.page_no == payload.page_no,
-    )
-    if batch.company_id:
-        hint_stmt = hint_stmt.where(
-            (RemapHint.company_id == batch.company_id) | (RemapHint.company_id.is_(None))
-        )
-    else:
-        hint_stmt = hint_stmt.where(RemapHint.company_id.is_(None))
-    if supplier:
-        hint_stmt = hint_stmt.where(RemapHint.supplier_id == supplier.id)
-    else:
-        hint_stmt = hint_stmt.where(RemapHint.supplier_name_snapshot == row.supplier_name)
-    existing_hint = db.execute(hint_stmt.limit(1)).scalar_one_or_none()
-
     _snapshot_supplier_name = row.supplier_name
+
+    # Governance grouping: saved regions are supplier + field instructions.
+    # Page number is reference evidence only and must not create a separate
+    # identity.  Reuse an existing hint only when the coordinates are effectively
+    # the same; otherwise save the new region as an active fallback unless it is
+    # the first region in the group.
+    group_stmt = _remap_group_query(
+        db, batch.tenant_id, batch.company_id, payload.field_name,
+        supplier.id if supplier else None, _snapshot_supplier_name,
+        include_archived=False, include_deleted=False,
+    )
+    group_hints = db.execute(group_stmt.order_by(desc(RemapHint.is_primary), desc(RemapHint.created_at), desc(RemapHint.id))).scalars().all()
+    if not supplier:
+        wanted_norm = _normalise_remap_group_supplier(_snapshot_supplier_name)
+        group_hints = [h for h in group_hints if _normalise_remap_group_supplier(h.supplier_name_snapshot) == wanted_norm]
+
+    existing_hint = None
+    for candidate in group_hints:
+        if _coords_close(candidate, payload.x, payload.y, payload.w, payload.h):
+            existing_hint = candidate
+            break
+
+    has_primary = any(bool(getattr(h, "is_primary", False)) for h in group_hints if h.active and not h.archived and not h.deleted_at)
 
     if existing_hint:
         existing_hint.x = payload.x
@@ -1255,6 +1379,13 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         existing_hint.w = payload.w
         existing_hint.h = payload.h
         existing_hint.active = True
+        existing_hint.archived = False
+        existing_hint.archived_at = None
+        existing_hint.archived_by = None
+        existing_hint.deleted_at = None
+        existing_hint.deleted_by = None
+        if not has_primary:
+            existing_hint.is_primary = True
         existing_hint.source_batch_id = batch.id
         existing_hint.source_file_id  = payload.file_id or row.source_file_id
         existing_hint.source_row_id   = row.id
@@ -1278,6 +1409,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
             source_file_id=payload.file_id or row.source_file_id,
             source_row_id=row.id,
             created_by=user.id,
+            is_primary=not has_primary,
         )
         db.add(hint)
         logger.debug("save_remap: created new RemapHint for supplier=%r field=%r",
@@ -1538,6 +1670,10 @@ def _remap_hint_as_rule_dict(h: RemapHint, tenant_lookup: dict | None = None) ->
     hh = float(h.h) if h.h is not None else None
     coords = f"x={x:.3f}, y={y:.3f}, w={w:.3f}, h={hh:.3f}" if None not in (x, y, w, hh) else "coordinates not set"
     supplier = h.supplier_name_snapshot or "supplier/layout saved region"
+    archived = bool(getattr(h, "archived", False) or getattr(h, "deleted_at", None))
+    role = "Archived saved region" if archived else ("Primary saved region" if getattr(h, "is_primary", False) else "Fallback saved region")
+    if not h.active:
+        role = "Region disabled"
     return {
         "id": f"hint-{h.id}",
         "hint_id": h.id,
@@ -1551,8 +1687,17 @@ def _remap_hint_as_rule_dict(h: RemapHint, tenant_lookup: dict | None = None) ->
         "rule_type": "saved_region",
         "field_name": h.field_name,
         "source_pattern": supplier,
-        "target_value": f"Supplier-linked region; reference page {h.page_no or 1}; page-independent replay; {coords}",
-        "active": h.active,
+        "target_value": f"{role}; reference page {h.page_no or 1}; page-independent replay; {coords}",
+        "active": bool(h.active and not archived),
+        "is_primary": bool(getattr(h, "is_primary", False)),
+        "archived": bool(getattr(h, "archived", False)),
+        "deleted_at": h.deleted_at.isoformat() if getattr(h, "deleted_at", None) else None,
+        "last_used_at": h.last_used_at.isoformat() if getattr(h, "last_used_at", None) else None,
+        "last_result": getattr(h, "last_result", None),
+        "success_count": int(getattr(h, "success_count", 0) or 0),
+        "failure_count": int(getattr(h, "failure_count", 0) or 0),
+        "conflict_count": int(getattr(h, "conflict_count", 0) or 0),
+        "apply_count": int(getattr(h, "apply_count", 0) or 0),
         "created_at": h.created_at.isoformat() if h.created_at else None,
         "disabled_at": None,
         "origin_batch_id": str(h.source_batch_id) if h.source_batch_id else None,
@@ -1614,7 +1759,7 @@ def list_rules_tenant(
     from uuid import UUID as _UUID
 
     q = select(CorrectionRule)
-    hint_q = select(RemapHint)
+    hint_q = select(RemapHint).where(RemapHint.deleted_at.is_(None))
     is_admin = getattr(user, "role", None) == "admin"
 
     selected_tid = None
@@ -1662,7 +1807,7 @@ def list_rules_tenant(
             raise HTTPException(400, "company_id is not a valid UUID")
     if active_only:
         q = q.where(CorrectionRule.active.is_(True))
-        hint_q = hint_q.where(RemapHint.active.is_(True))
+        hint_q = hint_q.where(RemapHint.active.is_(True), RemapHint.archived.is_(False))
 
     tenant_lookup = _tenant_lookup(db) if is_admin else {}
     rules = db.execute(q.order_by(desc(CorrectionRule.created_at))).scalars().all()
@@ -1965,15 +2110,21 @@ def apply_saved_regions_to_row(
 def list_remap_hints(
     active: bool | None = Query(default=None),
     include_inactive: bool = Query(default=False),
+    include_archived: bool = Query(default=True),
     field_name: str | None = Query(default=None),
     company_id: str | None = Query(default=None),
     x_tenant_id: str | None = Header(default=None),
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
-    """List saved remap regions for maintenance/de-duplication."""
+    """List saved remap regions with governance status.
+
+    The response remains backwards-compatible (`items`) and also returns grouped
+    supplier/field summaries (`groups`) so the UI can show which region is the
+    primary one used by the scanner.
+    """
     tenant_id = _active_tenant_id_for_user(db, user, x_tenant_id)
-    q = select(RemapHint).where(RemapHint.tenant_id == tenant_id)
+    q = select(RemapHint).where(RemapHint.tenant_id == tenant_id, RemapHint.deleted_at.is_(None))
     if company_id:
         try:
             cid = UUID(company_id)
@@ -1986,55 +2137,90 @@ def list_remap_hints(
         q = q.where(RemapHint.active.is_(active))
     elif active is not None:
         q = q.where(RemapHint.active.is_(active))
+    if not include_archived:
+        q = q.where(RemapHint.archived.is_(False))
     if field_name:
         q = q.where(RemapHint.field_name == field_name)
-    hints = db.execute(q.order_by(desc(RemapHint.created_at), desc(RemapHint.id))).scalars().all()
-    keys: dict[tuple, int] = {}
+    hints = db.execute(q.order_by(desc(RemapHint.is_primary), desc(RemapHint.created_at), desc(RemapHint.id))).scalars().all()
+
+    def _group_key(h: RemapHint) -> tuple:
+        supplier_key = f"id:{h.supplier_id}" if h.supplier_id else f"name:{_normalise_remap_group_supplier(h.supplier_name_snapshot)}"
+        return (str(h.company_id) if h.company_id else "tenant", supplier_key, h.field_name)
+
+    group_counts: dict[tuple, dict] = {}
     for h in hints:
-        key = (
-            h.field_name,
-            h.page_no,
-            (h.supplier_name_snapshot or "").strip().lower(),
-            round(float(h.x or 0), 3), round(float(h.y or 0), 3),
-            round(float(h.w or 0), 3), round(float(h.h or 0), 3),
-        )
-        keys[key] = keys.get(key, 0) + 1
+        key = _group_key(h)
+        g = group_counts.setdefault(key, {
+            "company_id": str(h.company_id) if h.company_id else None,
+            "supplier_name_snapshot": h.supplier_name_snapshot,
+            "field_name": h.field_name,
+            "active_count": 0,
+            "fallback_count": 0,
+            "archived_count": 0,
+            "primary_hint_id": None,
+            "last_used_at": None,
+            "last_result": None,
+            "success_count": 0,
+            "failure_count": 0,
+            "conflict_count": 0,
+            "apply_count": 0,
+        })
+        if h.archived:
+            g["archived_count"] += 1
+        elif h.active:
+            g["active_count"] += 1
+            if h.is_primary:
+                g["primary_hint_id"] = h.id
+            else:
+                g["fallback_count"] += 1
+        for k in ("success_count", "failure_count", "conflict_count", "apply_count"):
+            g[k] += int(getattr(h, k, 0) or 0)
+        if h.last_used_at and (not g["last_used_at"] or h.last_used_at.isoformat() > g["last_used_at"]):
+            g["last_used_at"] = h.last_used_at.isoformat()
+            g["last_result"] = h.last_result
+
     items = []
     for h in hints:
-        key = (
-            h.field_name,
-            h.page_no,
-            (h.supplier_name_snapshot or "").strip().lower(),
-            round(float(h.x or 0), 3), round(float(h.y or 0), 3),
-            round(float(h.w or 0), 3), round(float(h.h or 0), 3),
-        )
+        key = _group_key(h)
         x = float(h.x) if h.x is not None else None
         y = float(h.y) if h.y is not None else None
         w = float(h.w) if h.w is not None else None
         hh = float(h.h) if h.h is not None else None
+        role = "archived" if h.archived else ("primary" if h.is_primary else "fallback")
+        if not h.active:
+            role = "disabled"
         items.append({
             "id": h.id,
             "tenant_id": str(h.tenant_id),
             "company_id": str(h.company_id) if h.company_id else None,
+            "group_key": "|".join(map(str, key)),
             "field_name": h.field_name,
             "supplier_id": h.supplier_id,
             "supplier_name_snapshot": h.supplier_name_snapshot,
             "page_no": h.page_no,
-            "x": x,
-            "y": y,
-            "w": w,
-            "h": hh,
+            "reference_page_no": h.page_no,
+            "x": x, "y": y, "w": w, "h": hh,
             "coordinates": f"x={x:.3f}, y={y:.3f}, w={w:.3f}, h={hh:.3f}" if None not in (x, y, w, hh) else None,
             "active": h.active,
+            "is_primary": bool(h.is_primary),
+            "archived": bool(h.archived),
+            "deleted_at": h.deleted_at.isoformat() if h.deleted_at else None,
+            "governance_role": role,
             "source_batch_id": str(h.source_batch_id) if h.source_batch_id else None,
             "source_file_id": h.source_file_id,
             "source_row_id": h.source_row_id,
             "created_at": h.created_at.isoformat() if h.created_at else None,
-            "last_used_at": None,
-            "last_result": None,
-            "duplicate_count": keys.get(key, 1),
+            "last_used_at": h.last_used_at.isoformat() if h.last_used_at else None,
+            "last_used_page_no": h.last_used_page_no,
+            "last_read_text": h.last_read_text,
+            "last_result": h.last_result,
+            "success_count": int(h.success_count or 0),
+            "failure_count": int(h.failure_count or 0),
+            "conflict_count": int(h.conflict_count or 0),
+            "apply_count": int(h.apply_count or 0),
+            "duplicate_count": group_counts[key]["active_count"] + group_counts[key]["archived_count"],
         })
-    return {"items": items, "count": len(items)}
+    return {"items": items, "groups": list(group_counts.values()), "count": len(items)}
 
 
 @router.post("/remap-hints/{hint_id}/disable")
@@ -2044,13 +2230,11 @@ def disable_remap_hint(
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
-    tenant_id = None if getattr(user, "role", None) == "admin" and not x_tenant_id else _active_tenant_id_for_user(db, user, x_tenant_id)
-    hint = db.get(RemapHint, hint_id)
-    if not hint or (tenant_id is not None and hint.tenant_id != tenant_id):
-        raise HTTPException(404, "Remap hint not found")
+    hint = _get_remap_hint_for_user(hint_id, db, user, x_tenant_id)
     hint.active = False
+    hint.is_primary = False
     db.commit()
-    return {"id": hint.id, "active": hint.active}
+    return {"id": hint.id, "active": hint.active, "is_primary": hint.is_primary}
 
 
 @router.post("/remap-hints/{hint_id}/enable")
@@ -2060,26 +2244,173 @@ def enable_remap_hint(
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
-    tenant_id = None if getattr(user, "role", None) == "admin" and not x_tenant_id else _active_tenant_id_for_user(db, user, x_tenant_id)
-    hint = db.get(RemapHint, hint_id)
-    if not hint or (tenant_id is not None and hint.tenant_id != tenant_id):
-        raise HTTPException(404, "Remap hint not found")
+    hint = _get_remap_hint_for_user(hint_id, db, user, x_tenant_id)
     hint.active = True
+    hint.archived = False
+    hint.archived_at = None
+    hint.archived_by = None
+    hint.deleted_at = None
+    hint.deleted_by = None
+    # If there is no primary in this group, enabling this region makes it primary.
+    peers = db.execute(select(RemapHint).where(
+        RemapHint.tenant_id == hint.tenant_id,
+        RemapHint.field_name == hint.field_name,
+        RemapHint.active.is_(True),
+        RemapHint.archived.is_(False),
+        RemapHint.deleted_at.is_(None),
+    )).scalars().all()
+    if not any(p.is_primary for p in peers if p.id != hint.id and _same_remap_group(hint, p)):
+        _set_primary_hint(db, hint)
     db.commit()
-    return {"id": hint.id, "active": hint.active}
+    return {"id": hint.id, "active": hint.active, "is_primary": hint.is_primary, "archived": hint.archived}
 
 
-@router.delete("/remap-hints/{hint_id}")
-def delete_remap_hint(
+@router.post("/remap-hints/{hint_id}/primary")
+def set_remap_hint_primary(
     hint_id: int,
     x_tenant_id: str | None = Header(default=None),
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
-    tenant_id = None if getattr(user, "role", None) == "admin" and not x_tenant_id else _active_tenant_id_for_user(db, user, x_tenant_id)
-    hint = db.get(RemapHint, hint_id)
-    if not hint or (tenant_id is not None and hint.tenant_id != tenant_id):
-        raise HTTPException(404, "Remap hint not found")
-    db.delete(hint)
+    hint = _get_remap_hint_for_user(hint_id, db, user, x_tenant_id)
+    hint.active = True
+    hint.archived = False
+    hint.deleted_at = None
+    hint.deleted_by = None
+    _set_primary_hint(db, hint)
     db.commit()
-    return {"deleted": True, "id": hint_id}
+    return {"id": hint.id, "is_primary": True, "active": True}
+
+
+@router.post("/remap-hints/{hint_id}/archive")
+def archive_remap_hint(
+    hint_id: int,
+    x_tenant_id: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    hint = _get_remap_hint_for_user(hint_id, db, user, x_tenant_id)
+    hint.archived = True
+    hint.active = False
+    hint.is_primary = False
+    hint.archived_at = datetime.utcnow()
+    hint.archived_by = getattr(user, "id", None)
+    disabled_rules = _disable_related_remap_rules(db, hint, user)
+    db.commit()
+    return {"id": hint.id, "archived": True, "active": False, "disabled_related_rules": disabled_rules}
+
+
+@router.post("/remap-hints/{hint_id}/restore")
+def restore_remap_hint(
+    hint_id: int,
+    x_tenant_id: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    hint = _get_remap_hint_for_user(hint_id, db, user, x_tenant_id)
+    hint.archived = False
+    hint.archived_at = None
+    hint.archived_by = None
+    hint.deleted_at = None
+    hint.deleted_by = None
+    hint.active = True
+    peers = db.execute(select(RemapHint).where(
+        RemapHint.tenant_id == hint.tenant_id,
+        RemapHint.field_name == hint.field_name,
+        RemapHint.active.is_(True),
+        RemapHint.archived.is_(False),
+        RemapHint.deleted_at.is_(None),
+    )).scalars().all()
+    if not any(p.is_primary for p in peers if p.id != hint.id and _same_remap_group(hint, p)):
+        _set_primary_hint(db, hint)
+    db.commit()
+    return {"id": hint.id, "archived": False, "active": True, "is_primary": hint.is_primary}
+
+
+@router.post("/remap-hints/deduplicate")
+def deduplicate_remap_hints(
+    x_tenant_id: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    """Archive duplicate saved regions and keep one primary per supplier/field group."""
+    tenant_id = _active_tenant_id_for_user(db, user, x_tenant_id)
+    hints = db.execute(select(RemapHint).where(
+        RemapHint.tenant_id == tenant_id,
+        RemapHint.deleted_at.is_(None),
+    ).order_by(desc(RemapHint.is_primary), desc(RemapHint.success_count), desc(RemapHint.created_at), desc(RemapHint.id))).scalars().all()
+    groups: list[list[RemapHint]] = []
+    for h in hints:
+        placed = False
+        for g in groups:
+            if _same_remap_group(h, g[0]):
+                g.append(h)
+                placed = True
+                break
+        if not placed:
+            groups.append([h])
+
+    archived = 0
+    primary_set = 0
+    for g in groups:
+        active = [h for h in g if h.active and not h.archived and not h.deleted_at]
+        if not active:
+            continue
+        active.sort(key=lambda h: (
+            0 if h.is_primary else 1,
+            0 if h.company_id else 1,
+            -int(h.success_count or 0),
+            -int(h.apply_count or 0),
+            -int(h.id or 0),
+        ))
+        primary = active[0]
+        for h in active:
+            h.is_primary = h.id == primary.id
+        primary_set += 1
+        seen_coords = set()
+        for h in active[1:]:
+            coord_key = (
+                round(float(h.x or 0), 3), round(float(h.y or 0), 3),
+                round(float(h.w or 0), 3), round(float(h.h or 0), 3),
+            )
+            if coord_key in seen_coords or _coords_close(primary, h.x, h.y, h.w, h.h):
+                h.archived = True
+                h.active = False
+                h.is_primary = False
+                h.archived_at = datetime.utcnow()
+                h.archived_by = getattr(user, "id", None)
+                h.superseded_by_hint_id = primary.id
+                _disable_related_remap_rules(db, h, user)
+                archived += 1
+            else:
+                seen_coords.add(coord_key)
+    db.commit()
+    return {"groups_checked": len(groups), "primary_groups": primary_set, "archived_duplicates": archived}
+
+
+@router.delete("/remap-hints/{hint_id}")
+def delete_remap_hint(
+    hint_id: int,
+    hard_delete: bool = Query(default=False),
+    x_tenant_id: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    hint = _get_remap_hint_for_user(hint_id, db, user, x_tenant_id)
+    if hard_delete:
+        if not hint.archived and not hint.deleted_at:
+            raise HTTPException(409, "Archive this saved region before permanent deletion")
+        db.delete(hint)
+        db.commit()
+        return {"deleted": True, "hard_delete": True, "id": hint_id}
+
+    hint.archived = True
+    hint.active = False
+    hint.is_primary = False
+    hint.archived_at = hint.archived_at or datetime.utcnow()
+    hint.archived_by = hint.archived_by or getattr(user, "id", None)
+    hint.deleted_at = datetime.utcnow()
+    hint.deleted_by = getattr(user, "id", None)
+    disabled_rules = _disable_related_remap_rules(db, hint, user)
+    db.commit()
+    return {"deleted": False, "archived": True, "soft_delete": True, "id": hint_id, "disabled_related_rules": disabled_rules}

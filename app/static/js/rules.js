@@ -4,6 +4,7 @@
  * not depend on app.js being present on this page.
  */
 "use strict";
+// saved-region governance labels: primary saved region, fallback saved region, archived saved region
 
 // ── Local api() — apiFetch is provided by common.js ──────────────────────────
 async function api(path, options = {}) {
@@ -113,9 +114,14 @@ function renderTable() {
   document.getElementById("rulesTableBody").innerHTML = rows.map(r => {
     const isSavedRegion = r.item_type === "saved_region" || r.rule_type === "saved_region";
     const isGlobal = !!r.is_global;
-    const pill  = r.active
-      ? '<span class="pill ok" style="font-size:11px">active</span>'
-      : '<span class="pill"    style="font-size:11px;background:var(--ap-bg-sub)">disabled</span>';
+    const regionRole = isSavedRegion
+      ? (r.archived ? "archived" : r.is_primary ? "primary" : r.active ? "fallback" : "disabled")
+      : null;
+    const pill  = isSavedRegion
+      ? `<span class="pill ${r.active ? "ok" : ""}" style="font-size:11px">${escHtml(regionRole)}</span>`
+      : (r.active
+        ? '<span class="pill ok" style="font-size:11px">active</span>'
+        : '<span class="pill"    style="font-size:11px;background:var(--ap-bg-sub)">disabled</span>');
     const globalPill = isGlobal ? '<br><span class="pill" style="font-size:11px;background:var(--ap-info-bg);color:var(--ap-info-fg)">global</span>' : '';
     const tenantLabel = r.tenant_name ? `${r.tenant_name}${r.tenant_code ? " (" + r.tenant_code + ")" : ""}` : "";
     const scopeLabel = isGlobal
@@ -134,6 +140,7 @@ function renderTable() {
       <td>
         <strong style="font-size:var(--ap-fs-13)">${escHtml(fieldLabel(r.field_name))}</strong>
         ${r.rule_type ? `<br><span class="muted" style="font-size:11px">${escHtml(typeLabel(r.rule_type))}</span>` : ""}
+        ${isSavedRegion ? `<br><span class="muted" style="font-size:11px">${escHtml(regionRole)} saved region</span>` : ""}
         ${globalPill}
       </td>
       <td>${sourceHtml}</td>
@@ -170,12 +177,12 @@ document.getElementById("rulesTable").addEventListener("click", async e => {
     if (!confirm(`Delete ${label}:
   "${rule.source_pattern}"  →  "${rule.target_value}"
 
-This cannot be undone.`)) return;
+${isHint ? "This will archive the saved region first. Permanent deletion is only available after archiving." : "This cannot be undone."}`)) return;
     try {
       await api(isHint ? `/review/remap-hints/${rawId}` : `/review/rules/${rawId}`, { method: "DELETE" });
       _allRules = _allRules.filter(r => String(r.id) !== String(id));
       renderTable();
-      setMsg(document.getElementById("pageMessage"), `${isHint ? "Saved region" : "Rule"} deleted.`, "success");
+      setMsg(document.getElementById("pageMessage"), `${isHint ? "Saved region archived" : "Rule deleted"}.`, "success");
     } catch (err) {
       setMsg(document.getElementById("pageMessage"), "Delete failed: " + (err.message||err), "error");
     }

@@ -93,7 +93,7 @@ class RemapHint(Base):
     supplier_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("tenant_suppliers.id", ondelete="CASCADE"), nullable=True)
     supplier_name_snapshot: Mapped[str | None] = mapped_column(Text)
     field_name: Mapped[str] = mapped_column(String(80), nullable=False)
-    page_no: Mapped[int | None] = mapped_column(Integer)
+    page_no: Mapped[int | None] = mapped_column(Integer)  # reference page only; not identity
     x: Mapped[float | None] = mapped_column(Numeric(8, 4))
     y: Mapped[float | None] = mapped_column(Numeric(8, 4))
     w: Mapped[float | None] = mapped_column(Numeric(8, 4))
@@ -104,6 +104,28 @@ class RemapHint(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    # Governance / lifecycle.  Saved regions are supplier-field instructions,
+    # not throwaway page coordinates.  Page is only a reference hint.
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    superseded_by_hint_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    # Usage telemetry used by governance UI and future ML/candidate ranking.
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_batch_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    last_used_row_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_used_page_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_read_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    success_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    conflict_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    apply_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class BatchExportEvent(Base):

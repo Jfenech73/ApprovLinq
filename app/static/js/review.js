@@ -873,24 +873,33 @@ async function loadSavedRegions() {
       list.innerHTML = `<div class="muted">No saved regions found for this tenant yet.</div>`;
       return;
     }
-    list.innerHTML = items.slice(0, 120).map(h => `
-      <div class="row gap-sm" style="align-items:center;justify-content:space-between;border-bottom:1px solid var(--ap-border);padding:4px 0;opacity:${h.active ? '1' : '0.55'}">
+    const groupSummary = (data.groups || []).length
+      ? `<div class="muted" style="margin-bottom:6px">${esc((data.groups || []).length)} supplier/field group(s). Primary regions are tried before fallbacks; archived/deleted regions are not used.</div>`
+      : "";
+    list.innerHTML = groupSummary + items.slice(0, 160).map(h => {
+      const role = h.archived ? "archived" : (h.is_primary ? "primary" : (h.active ? "fallback" : "disabled"));
+      return `
+      <div class="row gap-sm" style="align-items:center;justify-content:space-between;border-bottom:1px solid var(--ap-border);padding:4px 0;opacity:${h.active && !h.archived ? '1' : '0.55'}">
         <span title="${esc(h.supplier_name_snapshot || '')}">
           <strong>${esc(h.field_name)}</strong>
-          <span class="muted">p${esc(h.page_no || 1)}</span>
-          <span class="pill ${h.active ? '' : 'warning'}">${h.active ? 'active' : 'disabled'}</span>
-          ${h.duplicate_count > 1 ? `<span class="pill warning">dup ${h.duplicate_count}</span>` : ""}
+          <span class="muted">ref p${esc(h.reference_page_no || h.page_no || 1)}</span>
+          <span class="pill ${h.is_primary ? 'ok' : h.archived ? 'warning' : ''}">${esc(role)}</span>
+          ${h.duplicate_count > 1 ? `<span class="pill warning">group ${h.duplicate_count}</span>` : ""}
           <br><span class="muted">${esc((h.supplier_name_snapshot || 'no supplier snapshot').slice(0, 52))}</span>
           <br><span class="muted">${esc(h.coordinates || '')}${h.source_row_id ? ` · row ${esc(h.source_row_id)}` : ''}${h.source_batch_id ? ` · batch ${esc(String(h.source_batch_id).slice(0, 8))}` : ''}</span>
-          ${h.last_used_at ? `<br><span class="muted">last used ${esc(h.last_used_at)}${h.last_result ? ` · ${esc(h.last_result)}` : ''}</span>` : ''}
+          <br><span class="muted">used ${esc(h.apply_count || 0)} · ok ${esc(h.success_count || 0)} · fail ${esc(h.failure_count || 0)} · conflict ${esc(h.conflict_count || 0)}</span>
+          ${h.last_used_at ? `<br><span class="muted">last used ${esc(h.last_used_at)}${h.last_result ? ` · ${esc(h.last_result)}` : ''}${h.last_used_page_no ? ` · p${esc(h.last_used_page_no)}` : ''}</span>` : ''}
         </span>
         <span class="row gap-sm">
-          ${h.active
-            ? `<button class="btn btn-sm" type="button" data-disable-region="${h.id}">Disable</button>`
-            : `<button class="btn btn-sm" type="button" data-enable-region="${h.id}">Enable</button>`}
-          <button class="btn btn-sm" type="button" data-delete-region="${h.id}">Delete</button>
+          ${!h.archived && !h.is_primary ? `<button class="btn btn-sm" type="button" data-primary-region="${h.id}">Set primary</button>` : ""}
+          ${h.archived
+            ? `<button class="btn btn-sm" type="button" data-restore-region="${h.id}">Restore</button><button class="btn btn-sm" type="button" data-hard-delete-region="${h.id}" style="color:var(--ap-err-fg);border-color:var(--ap-err-fg)">Delete permanently</button>`
+            : `${h.active
+                ? `<button class="btn btn-sm" type="button" data-disable-region="${h.id}">Disable</button>`
+                : `<button class="btn btn-sm" type="button" data-enable-region="${h.id}">Enable</button>`}
+               <button class="btn btn-sm" type="button" data-archive-region="${h.id}" data-delete-region="${h.id}" title="Archive saved region">Archive</button>`}
         </span>
-      </div>`).join("");
+      </div>`}).join("");
   } catch (e) {
     list.innerHTML = `<div class="message error">Could not load saved regions: ${esc(e.message)}</div>`;
     msg(`Could not load saved regions: ${e.message}`, "error");
@@ -932,20 +941,28 @@ if (savedRegionsBtn) {
 }
 
 document.addEventListener("click", async (e) => {
-  const disableBtn = e.target.closest("[data-disable-region]");
-  const enableBtn = e.target.closest("[data-enable-region]");
-  const deleteBtn = e.target.closest("[data-delete-region]");
-  if (!disableBtn && !enableBtn && !deleteBtn) return;
-  const id = disableBtn ? disableBtn.getAttribute("data-disable-region")
-           : enableBtn ? enableBtn.getAttribute("data-enable-region")
-           : deleteBtn.getAttribute("data-delete-region");
-  const action = deleteBtn ? "delete" : (enableBtn ? "enable" : "disable");
-  if (!confirm(`${action === "delete" ? "Delete" : action === "enable" ? "Enable" : "Disable"} saved remap region ${id}?`)) return;
-  const url = action === "delete" ? `/review/remap-hints/${id}` : `/review/remap-hints/${id}/${action}`;
-  const method = action === "delete" ? "DELETE" : "POST";
+  const targets = [
+    ["disable", e.target.closest("[data-disable-region]")],
+    ["enable", e.target.closest("[data-enable-region]")],
+    ["archive", e.target.closest("[data-archive-region]")],
+    ["restore", e.target.closest("[data-restore-region]")],
+    ["primary", e.target.closest("[data-primary-region]")],
+    ["hard-delete", e.target.closest("[data-hard-delete-region]")],
+  ];
+  const picked = targets.find(x => x[1]);
+  if (!picked) return;
+  const action = picked[0];
+  const btn = picked[1];
+  const id = btn.getAttribute(`data-${action}-region`);
+  const label = action === "hard-delete" ? "permanently delete" : action;
+  if (!confirm(`${label} saved region ${id}?`)) return;
+  const url = action === "hard-delete"
+    ? `/review/remap-hints/${id}?hard_delete=true`
+    : `/review/remap-hints/${id}/${action === "primary" ? "primary" : action}`;
+  const method = action === "hard-delete" ? "DELETE" : "POST";
   const r = await fetch(url, { method, headers: hdrs() });
-  if (!r.ok) { msg(`Saved region ${action} failed: ${await r.text()}`, "error"); return; }
-  msg(`Saved region ${action}d.`, "success");
+  if (!r.ok) { msg(`Saved region ${label} failed: ${await r.text()}`, "error"); return; }
+  msg(`Saved region ${label} complete.`, "success");
   await loadSavedRegions();
 });
 
