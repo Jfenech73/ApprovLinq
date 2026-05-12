@@ -127,12 +127,14 @@ function renderTable() {
     const scopeLabel = isGlobal
       ? "All tenants"
       : `${coName(r.company_id)}${tenantLabel ? " · " + tenantLabel : ""}`;
+    const itemTypeAttr = isSavedRegion ? 'saved_region' : 'rule';
+    const hintIdAttr = isSavedRegion ? (r.hint_id || String(r.id).replace(/^hint-/, '')) : '';
     const tog   = r.active
-      ? `<button class="btn btn-sm" data-action="disable" data-id="${r.id}" style="color:var(--ap-warn-fg)">Disable</button>`
-      : `<button class="btn btn-sm" data-action="enable"  data-id="${r.id}" style="color:var(--ap-ok-fg)">Enable</button>`;
+      ? `<button class="btn btn-sm" data-action="disable" data-id="${r.id}" data-item-type="${itemTypeAttr}" data-hint-id="${hintIdAttr}" style="color:var(--ap-warn-fg)">Disable</button>`
+      : `<button class="btn btn-sm" data-action="enable"  data-id="${r.id}" data-item-type="${itemTypeAttr}" data-hint-id="${hintIdAttr}" style="color:var(--ap-ok-fg)">Enable</button>`;
     const editBtn = isSavedRegion
-      ? `<button class="btn btn-sm" data-action="edit" data-id="${r.id}" disabled title="Edit saved regions from the Review page saved-regions panel">Edit</button>`
-      : `<button class="btn btn-sm" data-action="edit" data-id="${r.id}">Edit</button>`;
+      ? `<button class="btn btn-sm" data-action="edit" data-id="${r.id}" data-item-type="${itemTypeAttr}" data-hint-id="${hintIdAttr}" disabled title="Edit saved regions from the Review page saved-regions panel">Edit</button>`
+      : `<button class="btn btn-sm" data-action="edit" data-id="${r.id}" data-item-type="${itemTypeAttr}">Edit</button>`;
     const sourceHtml = isSavedRegion
       ? `<span>${escHtml(r.source_pattern || "Saved region")}</span>`
       : `<code style="font-size:var(--ap-fs-12)">${escHtml(r.source_pattern)}</code>`;
@@ -152,6 +154,8 @@ function renderTable() {
         ${editBtn}
         ${tog}
         <button class="btn btn-sm" data-action="delete" data-id="${r.id}"
+                data-item-type="${isSavedRegion ? 'saved_region' : 'rule'}"
+                data-hint-id="${isSavedRegion ? (r.hint_id || String(r.id).replace(/^hint-/, '')) : ''}"
                 style="color:var(--ap-err-fg);border-color:var(--ap-err-fg)">Delete</button>
       </td>
     </tr>`;
@@ -161,26 +165,54 @@ function renderTable() {
 
 // ── Table actions ─────────────────────────────────────────────────────────────
 document.getElementById("rulesTable").addEventListener("click", async e => {
-  const btn    = e.target.closest("[data-action]");
+  const btn = e.target.closest("[data-action]");
   if (!btn) return;
-  const id     = btn.dataset.id;
-  const action = btn.dataset.action;
-  const isHint = String(id).startsWith("hint-");
-  const rawId = isHint ? String(id).replace("hint-", "") : id;
 
-  if (action === "edit") { if (!isHint) openEditModal(id); return; }
+  const id = btn.dataset.id;
+  const action = btn.dataset.action;
+  const row = _allRules.find(r => String(r.id) === String(id));
+  const itemType = btn.dataset.itemType || row?.item_type || "rule";
+  const isHint = itemType === "saved_region" || String(id).startsWith("hint-") || !!row?.hint_id;
+  const rawId = isHint
+    ? String(btn.dataset.hintId || row?.hint_id || id).replace(/^hint-/, "")
+    : String(id);
+
+  // Guard against sending saved-region composite ids such as "hint-123" to
+  // /review/rules/{rule_id}. FastAPI expects numeric rule ids; saved-region composite ids must never be
+  // sent to rule endpoints.
+  if (!/^\d+$/.test(rawId)) {
+    setMsg(document.getElementById("pageMessage"), `Invalid ${isHint ? "saved region" : "rule"} id: ${escHtml(rawId)}`, "error");
+    return;
+  }
+
+  if (action === "edit") {
+    if (isHint) {
+      setMsg(document.getElementById("pageMessage"), "Saved-region coordinates are edited from the Review page saved-regions panel. Use enable, disable, archive/delete, or set primary here.", "warning");
+      return;
+    }
+    openEditModal(rawId);
+    return;
+  }
 
   if (action === "delete") {
-    const rule = _allRules.find(r => String(r.id) === String(id));
     const label = isHint ? "saved region" : "rule";
-    if (!rule) return;
+    if (!row) return;
     if (!confirm(`Delete ${label}:
-  "${rule.source_pattern}"  →  "${rule.target_value}"
+  "${row.source_pattern}"  →  "${row.target_value}"
 
 ${isHint ? "This will archive the saved region first. Permanent deletion is only available after archiving." : "This cannot be undone."}`)) return;
     try {
       await api(isHint ? `/review/remap-hints/${rawId}` : `/review/rules/${rawId}`, { method: "DELETE" });
-      _allRules = _allRules.filter(r => String(r.id) !== String(id));
+      if (isHint) {
+        const idx = _allRules.findIndex(r => String(r.id) === String(id));
+        if (idx >= 0) {
+          _allRules[idx].active = false;
+          _allRules[idx].archived = true;
+          _allRules[idx].deleted_at = new Date().toISOString();
+        }
+      } else {
+        _allRules = _allRules.filter(r => String(r.id) !== String(id));
+      }
       renderTable();
       setMsg(document.getElementById("pageMessage"), `${isHint ? "Saved region archived" : "Rule deleted"}.`, "success");
     } catch (err) {
@@ -194,8 +226,13 @@ ${isHint ? "This will archive the saved region first. Permanent deletion is only
       const updated = await api(isHint ? `/review/remap-hints/${rawId}/${action}` : `/review/rules/${rawId}/${action}`, { method: "POST" });
       const idx = _allRules.findIndex(r => String(r.id) === String(id));
       if (idx >= 0) {
-        if (isHint) { _allRules[idx].active = !!updated.active; }
-        else { _allRules[idx] = updated; }
+        if (isHint) {
+          _allRules[idx].active = !!updated.active;
+          _allRules[idx].archived = !!updated.archived;
+          _allRules[idx].is_primary = !!updated.is_primary;
+        } else {
+          _allRules[idx] = updated;
+        }
       }
       renderTable();
       setMsg(document.getElementById("pageMessage"), `${isHint ? "Saved region" : "Rule"} ${action}d.`, "success");

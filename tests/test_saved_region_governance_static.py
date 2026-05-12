@@ -57,3 +57,16 @@ def test_ui_surfaces_primary_fallback_archive_actions():
     assert 'primary saved region' in rules_js
     assert 'fallback saved region' in rules_js
     assert 'archived' in rules_js
+
+
+def test_rules_page_routes_saved_region_actions_to_remap_hint_endpoints():
+    src = read('app/static/js/rules.js')
+    assert 'data-item-type="${itemTypeAttr}"' in src
+    assert 'data-hint-id="${hintIdAttr}"' in src
+    assert 'row?.item_type' in src
+    assert '`/review/remap-hints/${rawId}/${action}`' in src
+    assert '`/review/rules/${rawId}/${action}`' in src
+    assert 'rule_id: Input should be a valid integer' not in src
+    # Guard that composite ids such as hint-123 are stripped before API calls.
+    assert 'replace(/^hint-/, "")' in src
+    assert '!/^\\d+$/.test(rawId)' in src
