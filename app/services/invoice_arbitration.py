@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.db.models import InvoiceBatch, InvoiceRow, TenantNominalAccount, TenantSupplier
 from app.db.review_models import CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
 from app.services.validate_invoice import validate_invoice
+from app.services.supplier_history import get_supplier_history_profile
 
 ARBITRATION_FIELDS: tuple[str, ...] = (
     "supplier_name",
@@ -453,63 +454,36 @@ def _nominal_master_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow
 
 
 def _history_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> list[Candidate]:
-    supplier_norm = _norm_supplier(row.supplier_name)
-    if not supplier_norm or not batch.tenant_id:
+    supplier_key = row.supplier_name
+    if not supplier_key or not batch.tenant_id:
         return []
-    rows = db.execute(
-        select(InvoiceRow)
-        .where(
-            InvoiceRow.tenant_id == batch.tenant_id,
-            InvoiceRow.id != (row.id or -1),
-            InvoiceRow.supplier_name.isnot(None),
-        )
-        .order_by(desc(InvoiceRow.created_at))
-        .limit(300)
-    ).scalars().all()
+    profile = get_supplier_history_profile(db, batch.tenant_id, batch.company_id, supplier_key)
     out: list[Candidate] = []
-    support: dict[str, dict[str, list[InvoiceRow]]] = {f: {} for f in ARBITRATION_FIELDS}
-    for prev in rows:
-        if batch.company_id and prev.company_id not in {batch.company_id, None}:
+    for signal in profile.signals:
+        # Saved-region availability is useful metadata, but it is not itself a
+        # field value candidate. Actual saved-region values are produced by
+        # _apply_remap_hints and collected through _audit_candidates.
+        if signal.value == "__saved_region_available__":
             continue
-        if _similarity(prev.supplier_name, row.supplier_name) < 0.92:
+        if signal.field_name not in ARBITRATION_FIELDS:
             continue
-        corr = db.get(InvoiceRowCorrection, prev.id)
-        accepted = bool(corr and corr.row_reviewed) or bool(prev.auto_approved) or str(prev.validation_status or "").lower() in {"ok", "valid", "passed"}
-        if not accepted:
+        if not _value_valid_for_field(signal.field_name, signal.value, row):
             continue
-        for field_name in ARBITRATION_FIELDS:
-            value = getattr(corr, field_name, None) if corr and getattr(corr, field_name, None) is not None else getattr(prev, field_name, None)
-            if not _value_valid_for_field(field_name, value, row):
-                continue
-            key = _norm_supplier(value) if field_name == "supplier_name" else str(_normalise_field_value(field_name, value))
-            support[field_name].setdefault(key, []).append(prev)
-    for field_name, buckets in support.items():
-        if not buckets:
-            continue
-        key, refs = max(buckets.items(), key=lambda kv: len(kv[1]))
-        count = len(refs)
-        # One prior correction should be visible but not strong enough to apply.
-        if count <= 1:
-            conf = 0.48
-        elif count <= 3:
-            conf = 0.66
-        else:
-            conf = 0.78
-        example = getattr(refs[0], field_name, None)
-        corr = db.get(InvoiceRowCorrection, refs[0].id)
-        if corr and getattr(corr, field_name, None) is not None:
-            example = getattr(corr, field_name)
+        source = signal.source_type or ("supplier_history" if signal.support_count > 1 else "accepted_correction")
         out.append(Candidate(
-            field_name=field_name,
-            value=_normalise_field_value(field_name, example),
-            source_type="supplier_history" if count > 1 else "accepted_correction",
-            confidence=conf,
-            evidence=f"{count} accepted previous row(s) for same supplier",
-            source_row_id=refs[0].id,
-            reason="Repeated accepted supplier history." if count > 1 else "Single previous accepted correction; suggestion only.",
+            field_name=signal.field_name,
+            value=_normalise_field_value(signal.field_name, signal.value),
+            source_type=source,
+            confidence=signal.confidence,
+            evidence=(
+                f"{signal.evidence}; matched_rows={profile.matched_row_count}; "
+                f"accepted_rows={profile.accepted_row_count}; company_accepted_rows={profile.company_accepted_row_count}"
+            ),
+            source_row_id=signal.source_row_id,
+            reason=signal.reason,
+            should_apply=signal.should_apply,
         ))
     return out
-
 
 def _totals_candidates(row: InvoiceRow, extraction_payload: dict[str, Any] | None) -> list[Candidate]:
     out: list[Candidate] = []
@@ -631,7 +605,9 @@ def arbitrate_invoice_row(
         if same:
             can_apply = False
             _append_method(row, f"arbitrated:{winner.source_type}:{field_name}")
-        elif weak_current and winner.confidence >= 0.60:
+        elif weak_current and winner.confidence >= 0.60 and (winner.source_type not in {"supplier_history", "accepted_correction"} or winner.should_apply):
+            can_apply = True
+        elif winner.source_type == "supplier_history" and winner.should_apply and weak_current:
             can_apply = True
         elif source_rank >= 80 and winner.confidence >= 0.78:
             can_apply = True
