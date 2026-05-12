@@ -412,7 +412,12 @@ def import_nominal_accounts(file: UploadFile = File(...), company_id: UUID | Non
 
 @router.get("/issues", response_model=list[IssueOut])
 def list_issues(tenant_id=Depends(current_tenant_id), _user: User = Depends(require_tenant_user), db: Session = Depends(get_db)):
-    return db.query(IssueLog).filter(IssueLog.tenant_id == tenant_id).order_by(IssueLog.updated_at.desc()).all()
+    return (
+        db.query(IssueLog)
+        .filter(IssueLog.tenant_id == tenant_id, IssueLog.created_by_user_id.isnot(None))
+        .order_by(IssueLog.updated_at.desc())
+        .all()
+    )
 
 
 @router.post("/issues", response_model=IssueOut)

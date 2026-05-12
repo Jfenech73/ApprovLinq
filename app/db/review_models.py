@@ -80,6 +80,9 @@ class CorrectionRule(Base):
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     origin_batch_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     origin_row_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Platform-admin global rules apply in the background for every tenant.
+    # tenant_id remains populated for origin/audit compatibility.
+    is_global: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class RemapHint(Base):

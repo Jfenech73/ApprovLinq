@@ -145,8 +145,11 @@ def ensure_runtime_schema() -> None:
             disabled_by UUID REFERENCES users(id),
             disabled_at TIMESTAMPTZ,
             origin_batch_id UUID,
-            origin_row_id BIGINT)""",
+            origin_row_id BIGINT,
+            is_global BOOLEAN NOT NULL DEFAULT FALSE)""",
+        "ALTER TABLE correction_rules ADD COLUMN IF NOT EXISTS is_global BOOLEAN NOT NULL DEFAULT FALSE",
         "CREATE INDEX IF NOT EXISTS ix_rules_lookup ON correction_rules(tenant_id, rule_type, field_name, source_pattern, active)",
+        "CREATE INDEX IF NOT EXISTS ix_rules_global_lookup ON correction_rules(is_global, rule_type, field_name, source_pattern, active)",
         """CREATE TABLE IF NOT EXISTS remap_hints (
             id BIGSERIAL PRIMARY KEY,
             tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,

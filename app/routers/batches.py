@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
@@ -102,7 +103,7 @@ def _audit_rule_application(
         old_value=str(old_value) if old_value is not None else None,
         new_value=str(new_value) if new_value is not None else None,
         action="rule_apply",
-        note=f"{note}; rule_id={rule.id}; rule_type={rule.rule_type}",
+        note=f"{note}; rule_id={rule.id}; rule_type={rule.rule_type}; scope={'global' if getattr(rule, 'is_global', False) else 'tenant'}",
         rule_created=False,
         user_id=None,
         username="system",
@@ -282,17 +283,19 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         or flagged for review.
     """
     rules_q = db.query(CorrectionRule).filter(
-        CorrectionRule.tenant_id == batch.tenant_id,
         CorrectionRule.active.is_(True),
+        or_(CorrectionRule.tenant_id == batch.tenant_id, CorrectionRule.is_global.is_(True)),
     )
     if batch.company_id:
         rules_q = rules_q.filter(
             (CorrectionRule.company_id == batch.company_id)
             | (CorrectionRule.company_id.is_(None))
+            | (CorrectionRule.is_global.is_(True))
         )
     else:
-        rules_q = rules_q.filter(CorrectionRule.company_id.is_(None))
-    all_rules = rules_q.order_by(CorrectionRule.id.asc()).all()
+        rules_q = rules_q.filter((CorrectionRule.company_id.is_(None)) | (CorrectionRule.is_global.is_(True)))
+    # Tenant/company rules have precedence over platform-global background rules.
+    all_rules = rules_q.order_by(CorrectionRule.is_global.asc(), CorrectionRule.id.asc()).all()
 
     # ── 1. supplier_alias and nominal_remap ───────────────────────────────
     for rule in all_rules:
@@ -495,7 +498,7 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 continue
 
             # Look up the RemapHint that stores the bounding-box coordinates
-            from sqlalchemy import select as _sel2
+            from sqlalchemy import or_, select as _sel2
             hint = db.execute(
                 _sel2(RemapHint).where(
                     RemapHint.tenant_id == batch.tenant_id,
@@ -2585,8 +2588,9 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
 
         # Learn supplier patterns from this batch's successfully matched rows
         _learn_supplier_patterns(batch_id, _batch_tenant_id, _batch_company_id, db)
-        # Auto-create issue logs for rows needing review
-        _create_batch_issue_logs(batch_id, _batch_tenant_id, db)
+        # Issue Log is reserved for tenant-raised support tickets.
+        # Do not auto-create one ticket per scan/review row here; extraction
+        # review needs stay on the Review page via review_required/review_reasons.
     finally:
         db.close()
         _clear_active(batch_id)

@@ -5,9 +5,11 @@ const userForm = document.getElementById("userForm");
 const refreshCapacityBtn = document.getElementById("refreshCapacityBtn");
 const userRoleSelect = document.getElementById("userRole");
 const userTenantIdSelect = document.getElementById("userTenantId");
+const refreshAdminRulesBtn = document.getElementById("refreshAdminRulesBtn");
 
 // logoutBtn is injected by ap-ui.js shell — wired there via logoutAndGo
 refreshCapacityBtn.addEventListener("click", loadCapacity);
+if (refreshAdminRulesBtn) refreshAdminRulesBtn.addEventListener("click", loadAdminRules);
 userRoleSelect.addEventListener("change", syncUserTenantSelectState);
 
 tenantForm.addEventListener("submit", async (event) => {
@@ -205,6 +207,91 @@ async function loadCapacity() {
   }
 }
 
+function ruleTypeLabel(type) {
+  return ({
+    supplier_alias: "Supplier alias",
+    nominal_remap: "Nominal remap",
+    remap_field_value: "Saved region replay",
+    text_correction: "Text correction",
+  })[type] || type || "-";
+}
+
+function fieldLabel(field) {
+  return ({
+    supplier_name: "Supplier name",
+    supplier_posting_account: "Posting account",
+    nominal_account_code: "Nominal code",
+    invoice_number: "Invoice number",
+    invoice_date: "Invoice date",
+    description: "Description",
+    net_amount: "Net",
+    vat_amount: "VAT",
+    total_amount: "Total",
+    tax_code: "Tax code",
+    currency: "Currency",
+  })[field] || field || "-";
+}
+
+async function loadAdminRules() {
+  const tbody = document.getElementById("adminRulesTableBody");
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="8" class="muted">Loading rules…</td></tr>';
+  try {
+    const rules = await apiFetch("/review/admin/rules");
+    tbody.innerHTML = rules.length
+      ? rules.map((rule) => {
+          const tenant = rule.tenant_name
+            ? `${escapeHtml(rule.tenant_name)}${rule.tenant_code ? " (" + escapeHtml(rule.tenant_code) + ")" : ""}`
+            : escapeHtml(rule.tenant_id || "-");
+          const scope = rule.is_global ? "Global — all tenants" : (rule.company_id ? "Tenant company" : "Tenant all companies");
+          const status = `${rule.active ? "active" : "disabled"}${rule.is_global ? " / global" : ""}`;
+          const action = rule.is_global
+            ? `<button class="btn btn-secondary" data-tenant-rule="${rule.id}">Make tenant-scoped</button>`
+            : `<button class="btn btn-secondary" data-global-rule="${rule.id}">Make global</button>`;
+          return `
+            <tr>
+              <td>${tenant}</td>
+              <td>${escapeHtml(fieldLabel(rule.field_name))}</td>
+              <td>${escapeHtml(ruleTypeLabel(rule.rule_type))}</td>
+              <td><code>${escapeHtml(rule.source_pattern)}</code></td>
+              <td>${escapeHtml(rule.target_value)}</td>
+              <td>${escapeHtml(scope)}</td>
+              <td>${escapeHtml(status)}</td>
+              <td>${action}</td>
+            </tr>
+          `;
+        }).join("")
+      : '<tr><td colspan="8" class="muted">No rules found.</td></tr>';
+
+    tbody.querySelectorAll("button[data-global-rule]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        if (!confirm("Make this a global background rule for all tenants? Only do this for supplier-independent rules.")) return;
+        try {
+          await apiFetch(`/review/admin/rules/${button.dataset.globalRule}/global`, { method: "POST" });
+          await loadAdminRules();
+          setMessage("pageMessage", "Rule converted to global.", "success");
+        } catch (error) {
+          setMessage("pageMessage", error.message);
+        }
+      });
+    });
+    tbody.querySelectorAll("button[data-tenant-rule]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        try {
+          await apiFetch(`/review/admin/rules/${button.dataset.tenantRule}/tenant-scoped`, { method: "POST" });
+          await loadAdminRules();
+          setMessage("pageMessage", "Rule changed back to tenant-scoped.", "success");
+        } catch (error) {
+          setMessage("pageMessage", error.message);
+        }
+      });
+    });
+  } catch (error) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted">Failed to load rules.</td></tr>';
+    setMessage("pageMessage", error.message);
+  }
+}
+
 async function loadIssues() {
   try {
     const [issues, tenants] = await Promise.all([
@@ -264,7 +351,7 @@ async function initAdminPage() {
       window.location.href = "/static/tenant.html";
       return;
     }
-    await Promise.all([loadTenants(), loadUsers(), loadCapacity(), loadIssues()]);
+    await Promise.all([loadTenants(), loadUsers(), loadCapacity(), loadAdminRules(), loadIssues()]);
   } catch (error) {
     setMessage("pageMessage", error.message);
   }
@@ -280,7 +367,7 @@ initPageHelp({
     { heading: "Create tenant", items: ["Create the tenant with a unique tenant code and display name.", "Use Active for paying or approved clients.", "Use Inactive to block operational access without deleting data."] },
     { heading: "Create user", items: ["Create a platform admin or tenant user.", "Tenant users should normally be assigned to one tenant during setup.", "Use a temporary password and ask the client to change it after first login."] },
     { heading: "Tenant and user lists", items: ["Use Set Active or Set Inactive to control access quickly.", "Inactive tenants should not use the scanning tool.", "Inactive users remain stored for audit and reactivation later."] },
-    { heading: "Capacity and issues", items: ["Capacity shows a high-level view of companies, batches, files, rows and storage by tenant.", "Issue Log allows status updates from pending to in progress to resolved.", "Use the resolution field to record the actual fix or workaround."] }
+    { heading: "Capacity, rules and support", items: ["Capacity shows a high-level view of companies, batches, files, rows and storage by tenant.", "Rule Governance shows tenant rules and lets admins promote safe rules to global background rules.", "Support Tickets are tenant-raised issues only; scan review lines stay on the Review page."] }
   ],
   quickChecks: ["Create the tenant before the first tenant user.", "Keep tenant codes short and unique.", "Set inactive immediately if a client should no longer use the service."]
 });

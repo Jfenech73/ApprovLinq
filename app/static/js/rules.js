@@ -38,7 +38,8 @@ function fieldLabel(fn) {
 
 function typeLabel(rt) {
   return ({ supplier_alias: "Supplier alias", nominal_remap: "Nominal remap",
-            remap_field_value: "Saved region replay", text_correction: "Text correction" })[rt] || (rt || "");
+            remap_field_value: "Saved region replay", text_correction: "Text correction",
+            saved_region: "Saved region" })[rt] || (rt || "");
 }
 
 function escHtml(s) {
@@ -94,7 +95,8 @@ function renderTable() {
   const rows = _allRules.filter(r => {
     if (sf === "active"   && !r.active) return false;
     if (sf === "disabled" &&  r.active) return false;
-    if (q && !((r.source_pattern + " " + r.target_value + " " + (r.field_name||"")).toLowerCase().includes(q))) return false;
+    const haystack = [r.source_pattern, r.target_value, r.field_name, r.rule_type, r.tenant_name, r.tenant_code].join(" ").toLowerCase();
+    if (q && !haystack.includes(q)) return false;
     return true;
   });
 
@@ -109,49 +111,71 @@ function renderTable() {
   const coName = id => (_companies.find(c => c.id === id) || {}).name || (id ? "Company" : "All companies");
 
   document.getElementById("rulesTableBody").innerHTML = rows.map(r => {
+    const isSavedRegion = r.item_type === "saved_region" || r.rule_type === "saved_region";
+    const isGlobal = !!r.is_global;
     const pill  = r.active
       ? '<span class="pill ok" style="font-size:11px">active</span>'
       : '<span class="pill"    style="font-size:11px;background:var(--ap-bg-sub)">disabled</span>';
+    const globalPill = isGlobal ? '<br><span class="pill" style="font-size:11px;background:var(--ap-info-bg);color:var(--ap-info-fg)">global</span>' : '';
+    const tenantLabel = r.tenant_name ? `${r.tenant_name}${r.tenant_code ? " (" + r.tenant_code + ")" : ""}` : "";
+    const scopeLabel = isGlobal
+      ? "All tenants"
+      : `${coName(r.company_id)}${tenantLabel ? " · " + tenantLabel : ""}`;
     const tog   = r.active
       ? `<button class="btn btn-sm" data-action="disable" data-id="${r.id}" style="color:var(--ap-warn-fg)">Disable</button>`
       : `<button class="btn btn-sm" data-action="enable"  data-id="${r.id}" style="color:var(--ap-ok-fg)">Enable</button>`;
+    const editBtn = isSavedRegion
+      ? `<button class="btn btn-sm" data-action="edit" data-id="${r.id}" disabled title="Edit saved regions from the Review page saved-regions panel">Edit</button>`
+      : `<button class="btn btn-sm" data-action="edit" data-id="${r.id}">Edit</button>`;
+    const sourceHtml = isSavedRegion
+      ? `<span>${escHtml(r.source_pattern || "Saved region")}</span>`
+      : `<code style="font-size:var(--ap-fs-12)">${escHtml(r.source_pattern)}</code>`;
     return `<tr data-id="${r.id}" class="${r.active?"":"muted"}">
       <td>
         <strong style="font-size:var(--ap-fs-13)">${escHtml(fieldLabel(r.field_name))}</strong>
         ${r.rule_type ? `<br><span class="muted" style="font-size:11px">${escHtml(typeLabel(r.rule_type))}</span>` : ""}
+        ${globalPill}
       </td>
-      <td><code style="font-size:var(--ap-fs-12)">${escHtml(r.source_pattern)}</code></td>
+      <td>${sourceHtml}</td>
       <td><strong>${escHtml(r.target_value)}</strong></td>
-      <td><span class="muted" style="font-size:12px">${escHtml(coName(r.company_id))}</span></td>
+      <td><span class="muted" style="font-size:12px">${escHtml(scopeLabel)}</span></td>
       <td>${pill}</td>
       <td><span class="muted" style="font-size:12px">${fmtDate(r.created_at)}</span></td>
       <td style="text-align:right;white-space:nowrap">
-        <button class="btn btn-sm" data-action="edit"   data-id="${r.id}">Edit</button>
+        ${editBtn}
         ${tog}
         <button class="btn btn-sm" data-action="delete" data-id="${r.id}"
                 style="color:var(--ap-err-fg);border-color:var(--ap-err-fg)">Delete</button>
       </td>
     </tr>`;
   }).join("");
+
 }
 
 // ── Table actions ─────────────────────────────────────────────────────────────
 document.getElementById("rulesTable").addEventListener("click", async e => {
   const btn    = e.target.closest("[data-action]");
   if (!btn) return;
-  const id     = parseInt(btn.dataset.id, 10);
+  const id     = btn.dataset.id;
   const action = btn.dataset.action;
+  const isHint = String(id).startsWith("hint-");
+  const rawId = isHint ? String(id).replace("hint-", "") : id;
 
-  if (action === "edit") { openEditModal(id); return; }
+  if (action === "edit") { if (!isHint) openEditModal(id); return; }
 
   if (action === "delete") {
-    const rule = _allRules.find(r => r.id === id);
-    if (!confirm(`Delete rule:\n  "${rule.source_pattern}"  →  "${rule.target_value}"\n\nThis cannot be undone.`)) return;
+    const rule = _allRules.find(r => String(r.id) === String(id));
+    const label = isHint ? "saved region" : "rule";
+    if (!rule) return;
+    if (!confirm(`Delete ${label}:
+  "${rule.source_pattern}"  →  "${rule.target_value}"
+
+This cannot be undone.`)) return;
     try {
-      await api(`/review/rules/${id}`, { method: "DELETE" });
-      _allRules = _allRules.filter(r => r.id !== id);
+      await api(isHint ? `/review/remap-hints/${rawId}` : `/review/rules/${rawId}`, { method: "DELETE" });
+      _allRules = _allRules.filter(r => String(r.id) !== String(id));
       renderTable();
-      setMsg(document.getElementById("pageMessage"), "Rule deleted.", "success");
+      setMsg(document.getElementById("pageMessage"), `${isHint ? "Saved region" : "Rule"} deleted.`, "success");
     } catch (err) {
       setMsg(document.getElementById("pageMessage"), "Delete failed: " + (err.message||err), "error");
     }
@@ -160,11 +184,14 @@ document.getElementById("rulesTable").addEventListener("click", async e => {
 
   if (action === "enable" || action === "disable") {
     try {
-      const updated = await api(`/review/rules/${id}/${action}`, { method: "POST" });
-      const idx = _allRules.findIndex(r => r.id === id);
-      if (idx >= 0) _allRules[idx] = updated;
+      const updated = await api(isHint ? `/review/remap-hints/${rawId}/${action}` : `/review/rules/${rawId}/${action}`, { method: "POST" });
+      const idx = _allRules.findIndex(r => String(r.id) === String(id));
+      if (idx >= 0) {
+        if (isHint) { _allRules[idx].active = !!updated.active; }
+        else { _allRules[idx] = updated; }
+      }
       renderTable();
-      setMsg(document.getElementById("pageMessage"), `Rule ${action}d.`, "success");
+      setMsg(document.getElementById("pageMessage"), `${isHint ? "Saved region" : "Rule"} ${action}d.`, "success");
     } catch (err) {
       setMsg(document.getElementById("pageMessage"), `Failed to ${action}: ` + (err.message||err), "error");
     }
@@ -173,7 +200,7 @@ document.getElementById("rulesTable").addEventListener("click", async e => {
 
 // ── Edit modal ────────────────────────────────────────────────────────────────
 function openEditModal(id) {
-  const rule = _allRules.find(r => r.id === id);
+  const rule = _allRules.find(r => String(r.id) === String(id));
   if (!rule) return;
   _editingId = id;
   document.getElementById("editSource").value = rule.source_pattern || "";
@@ -239,7 +266,7 @@ document.getElementById("editSaveBtn").addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ source_pattern: src, target_value: tgt, applies_to: appliesTo, company_id: companyId }),
     });
-    const idx = _allRules.findIndex(r => r.id === _editingId);
+    const idx = _allRules.findIndex(r => String(r.id) === String(_editingId));
     if (idx >= 0) _allRules[idx] = updated;
     closeEditModal();
     renderTable();

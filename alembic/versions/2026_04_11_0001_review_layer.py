@@ -87,9 +87,20 @@ def upgrade() -> None:
             sa.Column("disabled_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("origin_batch_id", postgresql.UUID(as_uuid=True), nullable=True),
             sa.Column("origin_row_id", sa.BigInteger(), nullable=True),
+            sa.Column("is_global", sa.Boolean(), nullable=False, server_default=sa.false()),
         )
         op.create_index("ix_rules_lookup", "correction_rules",
                         ["tenant_id", "rule_type", "field_name", "source_pattern", "active"])
+        op.create_index("ix_rules_global_lookup", "correction_rules",
+                        ["is_global", "rule_type", "field_name", "source_pattern", "active"])
+    else:
+        cols = {c["name"] for c in insp.get_columns("correction_rules")}
+        if "is_global" not in cols:
+            op.add_column("correction_rules", sa.Column("is_global", sa.Boolean(), nullable=False, server_default=sa.false()))
+        existing_indexes = {ix["name"] for ix in insp.get_indexes("correction_rules")}
+        if "ix_rules_global_lookup" not in existing_indexes:
+            op.create_index("ix_rules_global_lookup", "correction_rules",
+                            ["is_global", "rule_type", "field_name", "source_pattern", "active"])
 
     if "remap_hints" not in insp.get_table_names():
         op.create_table(

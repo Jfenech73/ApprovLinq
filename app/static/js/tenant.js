@@ -309,7 +309,7 @@ async function loadIssues() {
           <td>${escapeHtml(row.priority)}</td>
           <td>${escapeHtml(row.resolution_notes || "-")}</td>
           <td>${fmtDate(row.updated_at)}</td>
-        </tr>`).join("") : '<tr><td colspan="6" class="muted">No issues logged.</td></tr>';
+        </tr>`).join("") : '<tr><td colspan="6" class="muted">No support tickets logged.</td></tr>';
 }
 
 async function reloadTenantAdmin() {
@@ -341,7 +341,7 @@ initPageHelp({
     { heading: "Tenant details", items: ["Update the display name, contact details and notes for the selected tenant.", "If you have access to more than one tenant, switch the tenant from the selector before editing details."] },
     { heading: "Companies", items: ["Create a company for each legal entity or reporting entity that will own scanned invoice data.", "Choose a company in the selector before maintaining supplier and nominal master data."] },
     { heading: "Suppliers and nominal accounts", items: ["Suppliers and nominal accounts are company-specific.", "Use the company selector to refresh the lists and import data into the correct company.", "Keep names and codes consistent with your finance system for the best matching results."] },
-    { heading: "Password and issues", items: ["Use Change Password to rotate credentials.", "Use Report Issue to raise a support request and track progress and resolution directly in the system."] }
+    { heading: "Password and support tickets", items: ["Use Change Password to rotate credentials.", "Use Report Support Issue to raise a support request and track progress and resolution directly in the system. Invoice review items remain on the Review page."] }
   ],
   quickChecks: ["Create at least one company before using the Scanning Tool.", "Select the correct company before importing supplier or nominal CSV files.", "Raise issues with enough detail for support to reproduce the problem."]
 });

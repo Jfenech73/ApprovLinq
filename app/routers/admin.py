@@ -223,7 +223,12 @@ def capacity_usage(_user: User = Depends(require_admin), db: Session = Depends(g
 
 @router.get("/issues", response_model=list[IssueOut])
 def list_issues(_user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    return db.query(IssueLog).order_by(IssueLog.updated_at.desc(), IssueLog.id.desc()).all()
+    return (
+        db.query(IssueLog)
+        .filter(IssueLog.created_by_user_id.isnot(None))
+        .order_by(IssueLog.updated_at.desc(), IssueLog.id.desc())
+        .all()
+    )
 
 
 @router.put("/issues/{issue_id}", response_model=IssueOut)

@@ -131,10 +131,37 @@
         </div>
       </section>
 
+
+
       <section class="card full-width">
         <div class="section-head">
-          <h2>Issue Log</h2>
-          <span class="muted">Pending, in progress, resolved.</span>
+          <h2>Rule Governance</h2>
+          <span class="muted">Admin view across tenants. Promote recurring rules to global background rules when they are safe for all tenants.</span>
+          <button id="refreshAdminRulesBtn" class="btn btn-secondary" type="button">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tenant</th>
+                <th>Field</th>
+                <th>Type</th>
+                <th>Source</th>
+                <th>Target</th>
+                <th>Scope</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="adminRulesTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card full-width">
+        <div class="section-head">
+          <h2>Support Tickets</h2>
+          <span class="muted">Tenant-raised support requests only. Scan review lines stay on the Review page.</span>
         </div>
         <div class="table-wrap">
           <table>

@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, or_
 from sqlalchemy.orm import Session
 
 from app.db import models as M
@@ -1258,13 +1258,19 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
 
 # ── Rules management (admin + tenant-scoped user access) ──────────────────────
 
-def _rule_to_dict(r: CorrectionRule) -> dict:
+def _rule_to_dict(r: CorrectionRule, tenant_lookup: dict | None = None) -> dict:
+    tenant_meta = (tenant_lookup or {}).get(r.tenant_id) or {}
+    is_global = bool(getattr(r, "is_global", False))
     return {
         "id": r.id,
+        "item_type": "rule",
         "tenant_id": str(r.tenant_id),
+        "tenant_name": tenant_meta.get("tenant_name"),
+        "tenant_code": tenant_meta.get("tenant_code"),
         "company_id": str(r.company_id) if r.company_id else None,
         # applies_to: human-readable scope label for UI display
-        "applies_to": "this_company" if r.company_id else "all_companies",
+        "applies_to": "global" if is_global else ("this_company" if r.company_id else "all_companies"),
+        "is_global": is_global,
         "rule_type": r.rule_type,
         "field_name": r.field_name,
         "source_pattern": r.source_pattern,
@@ -1273,7 +1279,46 @@ def _rule_to_dict(r: CorrectionRule) -> dict:
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "disabled_at": r.disabled_at.isoformat() if r.disabled_at else None,
         "origin_batch_id": str(r.origin_batch_id) if r.origin_batch_id else None,
+        "origin_row_id": r.origin_row_id,
     }
+
+
+def _remap_hint_as_rule_dict(h: RemapHint, tenant_lookup: dict | None = None) -> dict:
+    tenant_meta = (tenant_lookup or {}).get(h.tenant_id) or {}
+    x = float(h.x) if h.x is not None else None
+    y = float(h.y) if h.y is not None else None
+    w = float(h.w) if h.w is not None else None
+    hh = float(h.h) if h.h is not None else None
+    coords = f"x={x:.3f}, y={y:.3f}, w={w:.3f}, h={hh:.3f}" if None not in (x, y, w, hh) else "coordinates not set"
+    supplier = h.supplier_name_snapshot or "supplier/layout saved region"
+    return {
+        "id": f"hint-{h.id}",
+        "hint_id": h.id,
+        "item_type": "saved_region",
+        "tenant_id": str(h.tenant_id),
+        "tenant_name": tenant_meta.get("tenant_name"),
+        "tenant_code": tenant_meta.get("tenant_code"),
+        "company_id": str(h.company_id) if h.company_id else None,
+        "applies_to": "this_company" if h.company_id else "all_companies",
+        "is_global": False,
+        "rule_type": "saved_region",
+        "field_name": h.field_name,
+        "source_pattern": supplier,
+        "target_value": f"Page {h.page_no or 1}; {coords}",
+        "active": h.active,
+        "created_at": h.created_at.isoformat() if h.created_at else None,
+        "disabled_at": None,
+        "origin_batch_id": str(h.source_batch_id) if h.source_batch_id else None,
+        "origin_row_id": h.source_row_id,
+        "source_batch_id": str(h.source_batch_id) if h.source_batch_id else None,
+        "source_row_id": h.source_row_id,
+        "readonly_edit": True,
+    }
+
+
+def _tenant_lookup(db: Session) -> dict:
+    rows = db.execute(select(M.Tenant)).scalars().all()
+    return {t.id: {"tenant_name": t.tenant_name, "tenant_code": t.tenant_code} for t in rows}
 
 
 def _get_rule_for_user(rule_id: int, db: Session, user: M.User) -> CorrectionRule:
@@ -1300,41 +1345,44 @@ class RuleUpdatePayload(BaseModel):
     # company_id: required when applies_to="this_company"
     applies_to: str | None = None
     company_id: str | None = None
+    is_global: bool | None = None
 
 
 @router.get("/rules")
 def list_rules_tenant(
     company_id: str | None = Query(default=None),
     active_only: bool = Query(default=False),
+    include_saved_regions: bool = Query(default=True),
     x_tenant_id: str | None = Header(default=None),
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
-    """List correction rules visible in the active tenant context.
+    """List correction rules and, by default, saved regions visible to the user.
 
-    Tenant users should manage rules for the tenant selected in the UI
-    (X-Tenant-Id).  If no header is supplied, fall back to the user's default
-    tenant to preserve existing direct-page behaviour.  Admins keep the
-    previous broad behaviour unless they explicitly provide X-Tenant-Id.
+    Tenant users manage the active tenant context selected in the UI.  Admins can
+    see all tenant rules and saved regions by default, or filter using
+    X-Tenant-Id/company_id.
     """
     from app.db.models import UserTenant as _UT
     from uuid import UUID as _UUID
 
     q = select(CorrectionRule)
+    hint_q = select(RemapHint)
     is_admin = getattr(user, "role", None) == "admin"
 
+    selected_tid = None
+    if x_tenant_id:
+        try:
+            selected_tid = _UUID(x_tenant_id)
+        except ValueError:
+            raise HTTPException(400, "Invalid X-Tenant-Id header")
+
     if is_admin:
-        if x_tenant_id:
-            try:
-                q = q.where(CorrectionRule.tenant_id == _UUID(x_tenant_id))
-            except ValueError:
-                raise HTTPException(400, "Invalid X-Tenant-Id header")
+        if selected_tid:
+            q = q.where(or_(CorrectionRule.tenant_id == selected_tid, CorrectionRule.is_global.is_(True)))
+            hint_q = hint_q.where(RemapHint.tenant_id == selected_tid)
     else:
-        if x_tenant_id:
-            try:
-                selected_tid = _UUID(x_tenant_id)
-            except ValueError:
-                raise HTTPException(400, "Invalid X-Tenant-Id header")
+        if selected_tid:
             link = db.execute(
                 select(_UT).where(_UT.user_id == user.id, _UT.tenant_id == selected_tid).limit(1)
             ).scalar_one_or_none()
@@ -1343,31 +1391,78 @@ def list_rules_tenant(
             tenant_id = selected_tid
         else:
             tenant_id = _user_default_tenant_id(db, user)
+        # Tenant users see only their own tenant-authored rules.
+        # Platform-global rules apply in the background but remain admin-only.
         q = q.where(CorrectionRule.tenant_id == tenant_id)
+        hint_q = hint_q.where(RemapHint.tenant_id == tenant_id)
 
     if company_id:
         try:
             cid = _UUID(company_id)
-            # Company filter returns both company-specific and tenant-wide rules,
-            # matching application behaviour during scan.
-            q = q.where(
-                (CorrectionRule.company_id == cid) | (CorrectionRule.company_id.is_(None))
-            )
+            if is_admin:
+                q = q.where(
+                    (CorrectionRule.company_id == cid)
+                    | (CorrectionRule.company_id.is_(None))
+                    | (CorrectionRule.is_global.is_(True))
+                )
+            else:
+                q = q.where(
+                    (CorrectionRule.company_id == cid)
+                    | (CorrectionRule.company_id.is_(None))
+                )
+            hint_q = hint_q.where((RemapHint.company_id == cid) | (RemapHint.company_id.is_(None)))
         except ValueError:
             raise HTTPException(400, "company_id is not a valid UUID")
     if active_only:
         q = q.where(CorrectionRule.active.is_(True))
+        hint_q = hint_q.where(RemapHint.active.is_(True))
+
+    tenant_lookup = _tenant_lookup(db) if is_admin else {}
     rules = db.execute(q.order_by(desc(CorrectionRule.created_at))).scalars().all()
-    return [_rule_to_dict(r) for r in rules]
+    items = [_rule_to_dict(r, tenant_lookup) for r in rules]
+    if include_saved_regions:
+        hints = db.execute(hint_q.order_by(desc(RemapHint.created_at), desc(RemapHint.id))).scalars().all()
+        items.extend(_remap_hint_as_rule_dict(h, tenant_lookup) for h in hints)
+    items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return items
 
 
 @router.get("/admin/rules")
 def list_rules(db: Session = Depends(get_db), user=Depends(current_user)):
     _require_admin(user)
+    tenant_lookup = _tenant_lookup(db)
     rules = db.execute(
         select(CorrectionRule).order_by(desc(CorrectionRule.created_at))
     ).scalars().all()
-    return [_rule_to_dict(r) for r in rules]
+    return [_rule_to_dict(r, tenant_lookup) for r in rules]
+
+
+@router.post("/admin/rules/{rule_id}/global")
+def convert_rule_to_global(rule_id: int, db: Session = Depends(get_db), user=Depends(current_user)):
+    """Promote one tenant-authored rule to a platform global background rule."""
+    _require_admin(user)
+    r = db.get(CorrectionRule, rule_id)
+    if not r:
+        raise HTTPException(404, "Rule not found")
+    r.is_global = True
+    r.company_id = None
+    r.active = True
+    r.disabled_by = None
+    r.disabled_at = None
+    db.commit()
+    return _rule_to_dict(r, _tenant_lookup(db))
+
+
+@router.post("/admin/rules/{rule_id}/tenant-scoped")
+def convert_rule_to_tenant_scoped(rule_id: int, db: Session = Depends(get_db), user=Depends(current_user)):
+    """Demote a global rule back to its origin tenant scope."""
+    _require_admin(user)
+    r = db.get(CorrectionRule, rule_id)
+    if not r:
+        raise HTTPException(404, "Rule not found")
+    r.is_global = False
+    db.commit()
+    return _rule_to_dict(r, _tenant_lookup(db))
 
 
 @router.patch("/rules/{rule_id}")
@@ -1409,6 +1504,12 @@ def update_rule(
         else:
             r.disabled_by = None
             r.disabled_at = None
+
+    if payload.is_global is not None:
+        _require_admin(user)
+        r.is_global = bool(payload.is_global)
+        if r.is_global:
+            r.company_id = None
 
     # ── Scope reassignment ──────────────────────────────────────────────────
     if payload.applies_to is not None:
@@ -1696,9 +1797,9 @@ def disable_remap_hint(
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
-    tenant_id = _active_tenant_id_for_user(db, user, x_tenant_id)
+    tenant_id = None if getattr(user, "role", None) == "admin" and not x_tenant_id else _active_tenant_id_for_user(db, user, x_tenant_id)
     hint = db.get(RemapHint, hint_id)
-    if not hint or hint.tenant_id != tenant_id:
+    if not hint or (tenant_id is not None and hint.tenant_id != tenant_id):
         raise HTTPException(404, "Remap hint not found")
     hint.active = False
     db.commit()
@@ -1712,9 +1813,9 @@ def enable_remap_hint(
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
-    tenant_id = _active_tenant_id_for_user(db, user, x_tenant_id)
+    tenant_id = None if getattr(user, "role", None) == "admin" and not x_tenant_id else _active_tenant_id_for_user(db, user, x_tenant_id)
     hint = db.get(RemapHint, hint_id)
-    if not hint or hint.tenant_id != tenant_id:
+    if not hint or (tenant_id is not None and hint.tenant_id != tenant_id):
         raise HTTPException(404, "Remap hint not found")
     hint.active = True
     db.commit()
@@ -1728,9 +1829,9 @@ def delete_remap_hint(
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
-    tenant_id = _active_tenant_id_for_user(db, user, x_tenant_id)
+    tenant_id = None if getattr(user, "role", None) == "admin" and not x_tenant_id else _active_tenant_id_for_user(db, user, x_tenant_id)
     hint = db.get(RemapHint, hint_id)
-    if not hint or hint.tenant_id != tenant_id:
+    if not hint or (tenant_id is not None and hint.tenant_id != tenant_id):
         raise HTTPException(404, "Remap hint not found")
     db.delete(hint)
     db.commit()
