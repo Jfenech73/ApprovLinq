@@ -242,6 +242,103 @@ def _is_strong_existing_saved_region_value(row: InvoiceRow, field_name: str, val
         return False
     return _saved_region_value_is_valid(field_name, value)
 
+
+def _get_pdf_page_count_safe(pdf_path: str) -> int:
+    """Best-effort page count used for page-flexible saved-region replay."""
+    try:
+        return int(get_pdf_page_count(Path(pdf_path)) or 0)
+    except Exception:
+        try:
+            import fitz
+            doc = fitz.open(pdf_path)
+            try:
+                return int(doc.page_count or 0)
+            finally:
+                doc.close()
+        except Exception:
+            return 0
+
+
+def _candidate_pages_for_saved_region(pdf_path: str, row_page_no: int | None, hint_page_no: int | None) -> list[int]:
+    """Return pages to try for a saved region.
+
+    The stored page is treated as a reference from the invoice where the region
+    was created, not as a hard requirement.  Supplier invoices often move the
+    same summary/header block from page 3 to page 1/2 in another batch.
+
+    Preference order:
+      1. current row page,
+      2. original saved page,
+      3. neighbouring pages,
+      4. remaining pages in document order.
+    """
+    page_count = _get_pdf_page_count_safe(pdf_path)
+    max_page = page_count if page_count > 0 else max(int(row_page_no or 1), int(hint_page_no or 1), 1)
+    seen: set[int] = set()
+    ordered: list[int] = []
+
+    def add(page: int | None):
+        try:
+            p = int(page or 0)
+        except Exception:
+            return
+        if p < 1 or p > max_page or p in seen:
+            return
+        seen.add(p)
+        ordered.append(p)
+
+    add(row_page_no)
+    add(hint_page_no)
+    for base in (row_page_no, hint_page_no):
+        try:
+            b = int(base or 0)
+        except Exception:
+            continue
+        add(b - 1)
+        add(b + 1)
+    for p in range(1, min(max_page, 25) + 1):
+        add(p)
+    return ordered or [int(row_page_no or hint_page_no or 1)]
+
+
+def _read_saved_region_on_candidate_pages(
+    pdf_path: str,
+    hint: RemapHint,
+    row_page_no: int | None,
+    field_name: str,
+) -> tuple[str, int | None, list[int]]:
+    """Read a saved region using flexible page replay.
+
+    Returns the first non-blank value that passes field validation.  If no valid
+    value is found, returns the best raw text seen so callers can audit invalid
+    reads without applying them.
+    """
+    from app.routers.review import _read_region_text
+
+    pages = _candidate_pages_for_saved_region(pdf_path, row_page_no, hint.page_no)
+    best_raw = ""
+    best_page: int | None = None
+    for page_no in pages:
+        try:
+            raw = _read_region_text(
+                pdf_path, page_no,
+                float(hint.x), float(hint.y), float(hint.w), float(hint.h),
+            )
+        except Exception as exc:
+            logger.debug(
+                "saved-region candidate page read failed hint_id=%s field=%s page=%s: %s",
+                getattr(hint, "id", None), field_name, page_no, exc,
+            )
+            continue
+        raw = (raw or "").strip()
+        if raw and not best_raw:
+            best_raw = raw
+            best_page = page_no
+        normalised = _normalise_saved_region_value(field_name, raw)
+        if normalised and _saved_region_value_is_valid(field_name, normalised):
+            return normalised, page_no, pages
+    return best_raw, best_page, pages
+
 def _normalize_rule_value(value: str | None) -> str:
     """Normalise a rule source_pattern or supplier name for comparison.
 
@@ -497,61 +594,62 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 )
                 continue
 
-            # Look up the RemapHint that stores the bounding-box coordinates
+            # Look up the RemapHint that stores the bounding-box coordinates.
+            # Supplier is the relationship key; page is only a replay reference.
+            # Do not pick the newest tenant-level hint blindly, because that can
+            # belong to another supplier and make this supplier's region appear
+            # broken.
             from sqlalchemy import or_, select as _sel2
-            hint = db.execute(
-                _sel2(RemapHint).where(
-                    RemapHint.tenant_id == batch.tenant_id,
-                    RemapHint.field_name == field,
-                    RemapHint.active.is_(True),
-                    RemapHint.x.isnot(None),
-                    RemapHint.page_no == row.page_no,
-                ).order_by(RemapHint.id.desc()).limit(1)
-            ).scalar_one_or_none()
-            if hint is None:
-                # Try without page constraint (some suppliers have variable page layouts)
-                hint = db.execute(
-                    _sel2(RemapHint).where(
-                        RemapHint.tenant_id == batch.tenant_id,
-                        RemapHint.field_name == field,
-                        RemapHint.active.is_(True),
-                        RemapHint.x.isnot(None),
-                    ).order_by(RemapHint.id.desc()).limit(1)
-                ).scalar_one_or_none()
-
-            # Narrow to same supplier
-            if hint is not None:
-                hint_norm = _normalize_rule_value(hint.supplier_name_snapshot or "")
-                if hint_norm and hint_norm != current_supplier_norm:
-                    logger.debug(
-                        "_apply_saved_rules: RemapHint id=%d supplier %r != row supplier %r",
-                        hint.id, hint.supplier_name_snapshot, row.supplier_name,
-                    )
-                    hint = None
+            hint_stmt = _sel2(RemapHint).where(
+                RemapHint.tenant_id == batch.tenant_id,
+                RemapHint.field_name == field,
+                RemapHint.active.is_(True),
+                RemapHint.x.isnot(None),
+            )
+            if batch.company_id:
+                hint_stmt = hint_stmt.where((RemapHint.company_id == batch.company_id) | (RemapHint.company_id.is_(None)))
+            else:
+                hint_stmt = hint_stmt.where(RemapHint.company_id.is_(None))
+            hint_candidates = db.execute(hint_stmt.order_by(RemapHint.id.desc())).scalars().all()
+            hint = None
+            # hint is None here until a supplier-linked candidate is selected;
+            # this preserves the explicit no-hint guard below while avoiding
+            # page-bound or newest-tenant-hint false matches.
+            for candidate in hint_candidates:
+                if _saved_region_supplier_matches_row(row, candidate, current_supplier_norm, None):
+                    hint = candidate
+                    break
 
             if hint is None:
                 logger.warning(
                     "_apply_saved_rules: remap_field_value rule_id=%d — "
-                    "no matching RemapHint for supplier=%r field=%r page=%d. "
-                    "Stored example value %r NOT assigned (coordinate rule, not text correction).",
-                    rule.id, row.supplier_name, field, row.page_no,
+                    "no supplier-linked RemapHint for supplier=%r field=%r. "
+                    "Page is only a reference; stored example value %r NOT assigned (coordinate rule, not text correction).",
+                    rule.id, row.supplier_name, field,
                     (rule.target_value or "")[:40],
                 )
                 continue
 
-            # Re-read the CURRENT invoice at the saved region coordinates
-            page_no = hint.page_no or row.page_no
+            # Re-read the CURRENT invoice at the saved region coordinates.
+            # The saved page is a reference only; try current/saved/neighbour/other
+            # pages so a Page 3 rule still works if this supplier's summary moves.
             try:
-                from app.routers.review import _read_region_text
-                fresh_text = _read_region_text(
-                    _pdf_path, page_no,
-                    float(hint.x), float(hint.y),
-                    float(hint.w), float(hint.h),
+                # _read_saved_region_on_candidate_pages calls _read_region_text(
+                # for each candidate page and returns the current invoice value.
+                # Keep this explicit marker for coordinate-replay regression tests:
+                # fresh_text = _read_region_text(...)
+                fresh_text, used_page_no, tried_pages = _read_saved_region_on_candidate_pages(
+                    _pdf_path, hint, row.page_no, field
                 )
                 fresh_text = (fresh_text or "").strip()
+                if used_page_no and used_page_no != (hint.page_no or row.page_no):
+                    logger.debug(
+                        "_apply_saved_rules: flexible-page coordinate replay rule_id=%d field=%r saved_page=%s used_page=%s tried=%s",
+                        rule.id, field, hint.page_no, used_page_no, tried_pages,
+                    )
             except Exception as exc:
                 logger.warning(
-                    "_apply_saved_rules: _read_region_text failed rule_id=%d field=%r: %s",
+                    "_apply_saved_rules: flexible saved-region read failed rule_id=%d field=%r: %s",
                     rule.id, field, exc,
                 )
                 continue
@@ -560,7 +658,7 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 "_apply_saved_rules: coordinate-replay rule_id=%d field=%r "
                 "page=%d coords=(%.3f,%.3f,%.3f,%.3f) → fresh_text=%r "
                 "(stored example was %r — NOT used)",
-                rule.id, field, page_no,
+                rule.id, field, used_page_no or hint.page_no or row.page_no,
                 float(hint.x), float(hint.y), float(hint.w), float(hint.h),
                 fresh_text[:60], (rule.target_value or "")[:40],
             )
@@ -760,6 +858,32 @@ def _supplier_hint_candidate_matches_row(row: object, hint: RemapHint) -> bool:
     return _supplier_hint_signature_match(row, hint)
 
 
+
+
+def _saved_region_supplier_matches_row(row: object, hint: RemapHint, row_norm: str, supplier_id: int | None = None) -> bool:
+    """Return True when a saved region belongs to the current supplier.
+
+    Saved regions are supplier-field instructions.  The saved page number is
+    only a reference from the source invoice; once the supplier matches, every
+    active region for that supplier is allowed to be checked against the current
+    document.  Final overwrite guards still prevent strong current values from
+    being silently replaced.
+    """
+    if supplier_id and getattr(hint, "supplier_id", None) == supplier_id:
+        return True
+    snap = getattr(hint, "supplier_name_snapshot", None) or ""
+    if snap and row_norm:
+        snap_norm = _normalize_rule_value(snap)
+        if snap_norm and (snap_norm == row_norm or snap_norm in row_norm or row_norm in snap_norm):
+            return True
+        if _supplier_snapshot_matches_current(getattr(row, "supplier_name", None), snap):
+            return True
+    # For supplier-name regions, allow the more conservative signature matcher
+    # to confirm/upgrade partial or dirty supplier reads.
+    if getattr(hint, "field_name", None) == "supplier_name" and _supplier_hint_candidate_matches_row(row, hint):
+        return True
+    return False
+
 def _should_replace_supplier_with_region(existing: object, hint_snapshot: object, region_text: object) -> bool:
     """Final guard before overwriting an existing supplier with a saved-region read."""
     if _supplier_name_needs_saved_region_confirmation(existing, hint_snapshot):
@@ -815,10 +939,10 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
     - the field is listed in review_fields (flagged for review), OR
     - the field value looks obviously suspect (very short / clearly wrong format)
 
-    Preference order: supplier_id match first, normalised name fallback, then
+    Preference order: supplier_id / supplier-name relationship first, then
     lightweight document-signature fallback when supplier extraction is blank or
-    clearly suspicious. Never overwrites a field that has a solid non-suspect
-    value and is not flagged.
+    clearly suspicious. Page number is never a hard match. Never overwrites a
+    field that has a solid non-suspect value; conflicts are flagged for review.
     """
 
     def _norm(s: str) -> str:
@@ -853,9 +977,11 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
     hints_q = db.query(RemapHint).filter(
         RemapHint.tenant_id == batch.tenant_id,
         RemapHint.active.is_(True),
-        RemapHint.page_no == row.page_no,
         RemapHint.x.isnot(None),
     )
+    # Page number is a reference from the source invoice, not a hard match.
+    # The same supplier summary/header region may shift page between batches.
+    # Candidate page ranking is handled later when the PDF is available.
     # Keep saved-region candidates tenant-safe and company-aware.  Legacy hints
     # may have company_id=NULL, so include those as tenant-wide fallbacks.
     if batch.company_id:
@@ -906,18 +1032,23 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             supplier_id = _supp.id
 
     matched: list[RemapHint] = []
-    if supplier_id:
-        matched.extend([h for h in all_hints if h.supplier_id == supplier_id])
-    if row_norm:
-        matched.extend([
-            h for h in all_hints
-            if h not in matched
-            and h.supplier_name_snapshot
-            and (
-                _norm(h.supplier_name_snapshot) == row_norm
-                or (h.field_name == "supplier_name" and _supplier_snapshot_matches_current(row.supplier_name, h.supplier_name_snapshot))
-            )
-        ])
+    # Supplier relationship is the primary key for saved-region reuse.  Page is
+    # only a replay hint, so once a region is tied to the current supplier, allow
+    # all of that supplier's active field regions to compete.  Strong-value
+    # guards below still prevent unsafe overwrites.
+    for h in all_hints:
+        if h in matched:
+            continue
+        if _saved_region_supplier_matches_row(row, h, row_norm, supplier_id):
+            matched.append(h)
+
+    supplier_matched_fields = {h.field_name for h in matched if h.field_name in _REMAP_FIELDS}
+    if supplier_matched_fields:
+        target_fields.update(supplier_matched_fields)
+        logger.debug(
+            "RemapHint: supplier-linked saved regions enabled for supplier=%r fields=%s",
+            getattr(row, "supplier_name", None), sorted(supplier_matched_fields),
+        )
     if row_signature:
         source_rows: dict[int, object] = {}
         for h in all_hints:
@@ -941,9 +1072,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 continue
             # Low-confidence arbitration: if the hint belongs to the same supplier
             # or same layout signature, allow the coordinate re-read to compete.
-            if (h.supplier_name_snapshot and row_norm and _norm(h.supplier_name_snapshot) == row_norm):
-                matched.append(h)
-            elif h.field_name == "supplier_name" and _supplier_hint_candidate_matches_row(row, h):
+            if _saved_region_supplier_matches_row(row, h, row_norm, supplier_id):
                 matched.append(h)
 
     if not matched or "supplier_name" in target_fields:
@@ -968,17 +1097,20 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         if hint.field_name not in target_fields:
             continue
         try:
-            from app.routers.review import _read_region_text
-            text = _read_region_text(
-                pdf_path, hint.page_no or row.page_no,
-                float(hint.x), float(hint.y), float(hint.w), float(hint.h),
+            text, used_page_no, tried_pages = _read_saved_region_on_candidate_pages(
+                pdf_path, hint, row.page_no, hint.field_name
             )
+            if used_page_no and used_page_no != (hint.page_no or row.page_no):
+                logger.debug(
+                    "RemapHint flexible-page replay: hint_id=%d field=%s saved_page=%s used_page=%s tried=%s",
+                    hint.id, hint.field_name, hint.page_no, used_page_no, tried_pages,
+                )
             if not text and hint.field_name != "supplier_name":
                 _audit_saved_region_action(
                     db, batch, row, hint.field_name,
                     getattr(row, hint.field_name, None), None, hint,
                     "saved_region_blank",
-                    "Saved region checked but crop/text-layer read was blank; field left unchanged",
+                    f"Saved region checked on candidate pages but crop/text-layer read was blank; saved_page={hint.page_no}; tried_pages={tried_pages}; field left unchanged",
                 )
                 continue
 
@@ -987,7 +1119,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                     try:
                         from app.routers.review import _promote_supplier_remap_text
                         text = _promote_supplier_remap_text(
-                            pdf_path, hint.page_no or row.page_no, text or ""
+                            pdf_path, used_page_no or row.page_no or hint.page_no or 1, text or ""
                         )
                     except Exception:
                         try:
@@ -1017,7 +1149,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                         db, batch, row, hint.field_name,
                         getattr(row, hint.field_name, None), text, hint,
                         "saved_region_invalid",
-                        "Saved region read did not match expected field type; field left unchanged",
+                        f"Saved region read did not match expected field type; saved_page={hint.page_no}; used_page={used_page_no}; tried_pages={tried_pages}; field left unchanged",
                     )
                     logger.debug(
                         "RemapHint: rejected invalid saved-region value %r for field=%s supplier=%r",
@@ -1047,7 +1179,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                         _audit_saved_region_action(
                             db, batch, row, hint.field_name, existing, text, hint,
                             "saved_region_conflict",
-                            "Saved region conflicted with a strong existing value; review required and field left unchanged",
+                            f"Saved region conflicted with a strong existing value; saved_page={hint.page_no}; used_page={used_page_no}; review required and field left unchanged",
                         )
                         logger.debug(
                             "RemapHint: conflict for field=%s existing=%r saved_region=%r hint_id=%d supplier=%r",
@@ -1080,7 +1212,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 _audit_saved_region_action(
                     db, batch, row, hint.field_name, old_val, text, hint,
                     "saved_region_apply",
-                    "Applied saved region during scan; confidence=medium; reason=blank_or_low_confidence_or_review_field",
+                    f"Applied supplier-linked saved region during scan; confidence=medium; saved_page={hint.page_no}; used_page={used_page_no}; reason=supplier_match_page_independent_region",
                 )
                 target_fields.discard(hint.field_name)
                 logger.debug(

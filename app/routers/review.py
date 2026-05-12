@@ -1311,7 +1311,7 @@ def _remap_hint_as_rule_dict(h: RemapHint, tenant_lookup: dict | None = None) ->
         "rule_type": "saved_region",
         "field_name": h.field_name,
         "source_pattern": supplier,
-        "target_value": f"Page {h.page_no or 1}; {coords}",
+        "target_value": f"Supplier-linked region; reference page {h.page_no or 1}; page-independent replay; {coords}",
         "active": h.active,
         "created_at": h.created_at.isoformat() if h.created_at else None,
         "disabled_at": None,
