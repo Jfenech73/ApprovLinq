@@ -720,10 +720,14 @@ window.addEventListener("mouseup", async (e) => {
   const fieldLabel = remapField;
 
   if (data && data.error) {
-    // Backend returned an explicit failure (e.g. empty region)
+    // Backend returned an explicit failure.
     msg(`Remap: ${data.error}`, "error");
     remapSel.hidden = true;
     return;
+  }
+  if (data && data.warning) {
+    // Empty OCR should not feel like a total failure when coordinates were saved.
+    msg(`Remap: ${data.warning}`, "warning");
   }
 
   if (data && data.read_text) {

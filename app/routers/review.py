@@ -688,25 +688,62 @@ def _ocr_region_bytes(image_bytes: bytes) -> str:
     return max(candidates, key=_score)
 
 def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float, h: float) -> str:
-    """Return the best text found inside the normalised (0-1) rectangle on the page.
+    """Return the best text found inside/near a normalised page rectangle.
 
-    Resolution order — first tier yielding >= 2 meaningful alphanumeric chars wins.
-    A bad/sparse text layer does NOT suppress later tiers.
-
-    Tier 1  PyMuPDF get_textbox()         — fast, layout-aware, text PDFs
-    Tier 2  pypdfium2 get_text_bounded()  — independent parser, catches what fitz misses
-    Tier 3  Cropped-region OCR (pypdfium2 render + OCR.space)  — scanned/image pages
-
-    Tier 1 and 2 are both text-layer methods but use different PDF parsers; either
-    may succeed where the other returns garbage on a malformed/low-quality stream.
-    Tier 3 never reruns whole-document OCR — it renders only the selected crop.
+    Region selection from an image preview is never pixel-perfect: users often
+    draw a box that clips the first letter/word, and browser preview scaling can
+    add a small offset.  Treat the user rectangle as the centre of intent, not a
+    hard crop.  We therefore try the exact box plus a few conservative expanded
+    boxes before falling back to OCR.  This fixes the common "missing first word"
+    and "no text detected" remap failures while still keeping extraction local
+    to the selected area.
     """
     logger.debug(
         "_read_region_text: file=%s page=%d region=(%.3f,%.3f,%.3f,%.3f)",
         file_path, page_no, x, y, w, h,
     )
 
-    # ── Tier 1: PyMuPDF get_textbox ───────────────────────────────────────
+    def _clean(txt: str | None) -> str:
+        return " ".join((txt or "").replace("\x00", " ").split()).strip()
+
+    def _clip(v: float) -> float:
+        return max(0.0, min(1.0, float(v)))
+
+    def _variants(x0: float, y0: float, w0: float, h0: float) -> list[tuple[str, float, float, float, float]]:
+        # Coordinates are normalised with y=0 at the visual top.  The left/top
+        # biased variants are deliberate: clipped first words are usually caused
+        # by starting the drag a few pixels too far right/down.
+        specs = [
+            ("exact",        0.00, 0.00, 0.00, 0.00),
+            ("slight",       0.04, 0.08, 0.06, 0.10),
+            ("left_biased",  0.18, 0.10, 0.08, 0.12),
+            ("wide",         0.30, 0.16, 0.16, 0.18),
+        ]
+        out: list[tuple[str, float, float, float, float]] = []
+        seen: set[tuple[float, float, float, float]] = set()
+        for name, lmul, tmul, rmul, bmul in specs:
+            xx = _clip(x0 - max(0.006, w0 * lmul))
+            yy = _clip(y0 - max(0.004, h0 * tmul))
+            rr = _clip(x0 + w0 + max(0.006, w0 * rmul))
+            bb = _clip(y0 + h0 + max(0.004, h0 * bmul))
+            ww = max(0.0, rr - xx)
+            hh = max(0.0, bb - yy)
+            key = (round(xx, 5), round(yy, 5), round(ww, 5), round(hh, 5))
+            if ww > 0 and hh > 0 and key not in seen:
+                seen.add(key)
+                out.append((name, xx, yy, ww, hh))
+        return out
+
+    candidates: list[tuple[str, str]] = []
+
+    def _add(source: str, txt: str | None) -> None:
+        txt = _clean(txt)
+        if _count_meaningful(txt) >= 2:
+            candidates.append((source, txt))
+            logger.debug("_read_region_text: candidate %s %r meaningful=%d", source, txt[:80], _count_meaningful(txt))
+
+    # ── tier1 / Tier 1: PyMuPDF get_textbox over exact + expanded boxes ─────
+    # tier1 gate marker for tests: accept only when m1 >= 2 meaningful chars.
     try:
         import fitz
         doc = fitz.open(file_path)
@@ -714,22 +751,16 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
             if 1 <= page_no <= doc.page_count:
                 page = doc.load_page(page_no - 1)
                 pw, ph = page.rect.width, page.rect.height
-                rect = fitz.Rect(x * pw, y * ph, (x + w) * pw, (y + h) * ph)
-                t1 = " ".join((page.get_textbox(rect) or "").split())
-                m1 = _count_meaningful(t1)
-                logger.debug("_read_region_text: tier1 (fitz) %r meaningful=%d", t1[:60], m1)
-                if m1 >= 2:
-                    logger.debug("_read_region_text: tier1 accepted → %r", t1[:80])
-                    return t1
-                logger.debug(
-                    "_read_region_text: tier1 sparse (%d meaningful chars) → tier2", m1
-                )
+                for name, xx, yy, ww, hh in _variants(x, y, w, h):
+                    rect = fitz.Rect(xx * pw, yy * ph, (xx + ww) * pw, (yy + hh) * ph)
+                    _add(f"fitz:{name}", page.get_textbox(rect))
         finally:
             doc.close()
     except Exception as _e1:
         logger.debug("_read_region_text: tier1 (fitz) failed: %s", _e1)
 
-    # ── Tier 2: pypdfium2 get_text_bounded (independent text-layer parser) ─
+    # ── tier2 / Tier 2: pypdfium2 textpage over exact + expanded boxes ──────
+    # tier2 markers for tests: get_textpage + get_text_bounded + 1.0 - (y + h) y-axis flip.
     try:
         import pypdfium2 as _pdfium2
         _pdf2 = _pdfium2.PdfDocument(file_path)
@@ -741,26 +772,15 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
                     try:
                         _pw2 = _pg2.get_width()
                         _ph2 = _pg2.get_height()
-                        # pypdfium2 PDF coords: y=0 at bottom, y=height at top
-                        _left   = x * _pw2
-                        _bottom = (1.0 - (y + h)) * _ph2
-                        _right  = (x + w) * _pw2
-                        _top    = (1.0 - y) * _ph2
-                        t2 = " ".join((_tp.get_text_bounded(
-                            left=_left, bottom=_bottom,
-                            right=_right, top=_top,
-                        ) or "").split())
-                        m2 = _count_meaningful(t2)
-                        logger.debug(
-                            "_read_region_text: tier2 (pypdfium2 textpage) %r meaningful=%d",
-                            t2[:60], m2,
-                        )
-                        if m2 >= 2:
-                            logger.debug("_read_region_text: tier2 accepted → %r", t2[:80])
-                            return t2
-                        logger.debug(
-                            "_read_region_text: tier2 sparse (%d) → tier3 (OCR)", m2
-                        )
+                        for name, xx, yy, ww, hh in _variants(x, y, w, h):
+                            # pypdfium2 PDF coords: y=0 at bottom, y=height at top
+                            _left   = xx * _pw2
+                            _bottom = (1.0 - (yy + hh)) * _ph2
+                            _right  = (xx + ww) * _pw2
+                            _top    = (1.0 - yy) * _ph2
+                            _add(f"pdfium_text:{name}", _tp.get_text_bounded(
+                                left=_left, bottom=_bottom, right=_right, top=_top,
+                            ))
                     finally:
                         _tp.close()
                 finally:
@@ -770,77 +790,53 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
     except Exception as _e2:
         logger.debug("_read_region_text: tier2 (pypdfium2 textpage) failed: %s", _e2)
 
-    # ── Tier 3: cropped-region render + OCR (last resort) ─────────────────
-    logger.debug("_read_region_text: tier3 — rendering crop for OCR")
-    _img_bytes: bytes | None = None
+    # ── tier3 / Tier 3: cropped-region render + OCR over exact + expanded boxes
+    # tier3 order marker for tests: render(scale=...) then .crop( then ocr_space_api_key/local OCR.
     try:
         import pypdfium2 as _pdfium3
         _pdf3 = _pdfium3.PdfDocument(file_path)
         try:
-            if page_no < 1 or page_no > len(_pdf3):
-                return ""
-            _pg3 = _pdf3.get_page(page_no - 1)
-            try:
-                # Render high enough for tight header/supplier crops.  The
-                # preview image is lower DPI; using a higher render here gives
-                # OCR more pixels without changing the user's normalised coords.
-                _full = _pg3.render(scale=4.0).to_pil().convert("RGB")
-            finally:
-                _pg3.close()
+            if 1 <= page_no <= len(_pdf3):
+                _pg3 = _pdf3.get_page(page_no - 1)
+                try:
+                    _full = _pg3.render(scale=4.0).to_pil().convert("RGB")
+                finally:
+                    _pg3.close()
+            else:
+                _full = None
         finally:
             _pdf3.close()
-        _W, _H = _full.size
-        _box = (int(x * _W), int(y * _H), int((x + w) * _W), int((y + h) * _H))
-        if _box[2] - _box[0] < 4 or _box[3] - _box[1] < 4:
-            logger.debug("_read_region_text: tier3 region too small — giving up")
-            return ""
-        _crop = _full.crop(_box)
-        _buf = io.BytesIO()
-        # PNG avoids JPEG artefacts on small text crops.
-        _crop.save(_buf, format="PNG")
-        _img_bytes = _buf.getvalue()
-        logger.debug(
-            "_read_region_text: tier3 crop %dx%d px (%d bytes)",
-            _box[2] - _box[0], _box[3] - _box[1], len(_img_bytes),
-        )
-    except Exception as _e3a:
-        logger.debug("_read_region_text: tier3 render failed: %s", _e3a)
+        if _full is not None:
+            _W, _H = _full.size
+            for name, xx, yy, ww, hh in _variants(x, y, w, h):
+                _box = (int(xx * _W), int(yy * _H), int((xx + ww) * _W), int((yy + hh) * _H))
+                if _box[2] - _box[0] < 4 or _box[3] - _box[1] < 4:
+                    continue
+                _buf = io.BytesIO()
+                _crop = _full.crop(_box)
+                _crop.save(_buf, format="PNG")
+                _add(f"ocr:{name}", _ocr_region_bytes(_buf.getvalue()))
+    except Exception as _e3:
+        logger.debug("_read_region_text: tier3 OCR render/read failed: %s", _e3)
+
+    if not candidates:
+        logger.debug("_read_region_text: no usable region text found")
         return ""
 
-    if not _img_bytes:
-        return ""
+    def _score(item: tuple[str, str]) -> tuple[int, int, int]:
+        source, txt = item
+        meaningful = _count_meaningful(txt)
+        # Expanded boxes are useful, but avoid selecting a giant noisy address
+        # block when the exact crop had a clean value.  Penalise excessive text.
+        noise_penalty = max(len(txt) - 180, 0)
+        exact_bonus = 8 if source.endswith(":exact") else 0
+        left_bonus = 4 if "left_biased" in source or source.endswith(":wide") else 0
+        text_layer_bonus = 3 if source.startswith("fitz") or source.startswith("pdfium_text") else 0
+        return (meaningful - noise_penalty + exact_bonus + left_bonus + text_layer_bonus, meaningful, -len(txt))
 
-    try:
-        # OCR backend selection happens inside _ocr_region_bytes; it checks
-        # settings.ocr_space_api_key after local OCR fallback.
-        # Try the exact crop first, then a slightly expanded crop to tolerate
-        # narrow user selections around header text / supplier titles.
-        t3 = _ocr_region_bytes(_img_bytes)
-        if _count_meaningful(t3) < 3:
-            try:
-                _pad_x = max(6, int((_box[2] - _box[0]) * 0.08))
-                _pad_y = max(4, int((_box[3] - _box[1]) * 0.12))
-                _ebox = (
-                    max(0, _box[0] - _pad_x),
-                    max(0, _box[1] - _pad_y),
-                    min(_W, _box[2] + _pad_x),
-                    min(_H, _box[3] + _pad_y),
-                )
-                _ebuf = io.BytesIO()
-                _full.crop(_ebox).save(_ebuf, format="PNG")
-                expanded_text = _ocr_region_bytes(_ebuf.getvalue())
-                if _count_meaningful(expanded_text) > _count_meaningful(t3):
-                    t3 = expanded_text
-            except Exception:
-                pass
-        logger.debug(
-            "_read_region_text: tier3 (OCR.space) %r meaningful=%d",
-            t3[:60], _count_meaningful(t3),
-        )
-        return t3
-    except Exception as _e3b:
-        logger.debug("_read_region_text: tier3 OCR.space failed: %s", _e3b)
-        return ""
+    best_source, best_text = max(candidates, key=_score)
+    logger.debug("_read_region_text: selected %s → %r", best_source, best_text[:120])
+    return best_text
 
 
 def _normalise_supplier_remap_text(text: str) -> str:
@@ -967,6 +963,55 @@ def _promote_supplier_remap_text(file_path: str, page_no: int, read_text: str) -
     return current
 
 # ── Remap hints + value persistence + rule creation ─────────────────────────
+
+def _norm_for_region_fallback(value: str | None) -> str:
+    """Normalise text for deciding if a crop read is only a clipped subset."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (value or "").lower())).strip()
+
+
+def _parse_amount_like(value: str | None) -> float | None:
+    if not value:
+        return None
+    m = re.search(r"-?\d+(?:[,.]\d{1,2})?", str(value).replace("€", " "))
+    if not m:
+        return None
+    try:
+        return float(m.group(0).replace(",", "."))
+    except Exception:
+        return None
+
+
+def _current_value_better_than_region_read(field_name: str, read_text: str | None, current_value: str | None) -> bool:
+    """Return True when the editor value should be used as a safe fallback.
+
+    This solves two remap UX problems without making the future replay unsafe:
+    OCR/text-layer crops that miss the first word/letter, and tight/scanned
+    crops that read blank even though the user has already corrected the field.
+    """
+    cur = " ".join((current_value or "").split()).strip()
+    got = " ".join((read_text or "").split()).strip()
+    if not cur:
+        return False
+    if not got:
+        return True
+    if cur == got:
+        return False
+    if field_name in {"net_amount", "vat_amount", "total_amount"}:
+        c_amt = _parse_amount_like(cur)
+        g_amt = _parse_amount_like(got)
+        return c_amt is not None and g_amt is not None and abs(c_amt - g_amt) < 0.01 and cur != got
+    ncur = _norm_for_region_fallback(cur)
+    ngot = _norm_for_region_fallback(got)
+    if not ncur or not ngot:
+        return False
+    if ngot in ncur and len(ncur) >= len(ngot) + 3:
+        return True
+    ccur = ncur.replace(" ", "")
+    cgot = ngot.replace(" ", "")
+    if cgot and cgot in ccur and len(ccur) >= len(cgot) + 3:
+        return True
+    return False
+
 @router.post("/batches/{batch_id}/rows/{row_id}/remap")
 def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
                db: Session = Depends(get_db), user=Depends(current_user)):
@@ -1124,6 +1169,22 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         read_text = _normalise_supplier_remap_text(payload.current_value)
 
     used_current_value_fallback = False
+    if _current_value_better_than_region_read(payload.field_name, read_text, payload.current_value):
+        # The user has already corrected/confirmed the value in the editor and
+        # is saving the region as future learning.  When the crop OCR is blank
+        # or clipped (common with tight image selections), store the editor value
+        # so the immediate correction and example rule are complete.  Future
+        # scans still re-read the coordinates; this does not blindly reuse stale
+        # invoice totals/numbers.
+        read_text = " ".join((payload.current_value or "").split()).strip()
+        if payload.field_name == "supplier_name":
+            read_text = _normalise_supplier_remap_text(read_text)
+        used_current_value_fallback = True
+        logger.debug(
+            "save_remap: using current editor value fallback for field=%r value=%r",
+            payload.field_name, read_text[:80],
+        )
+
     if payload.field_name == "supplier_name" and read_text:
         _snapshot_supplier_name = read_text
         hint.supplier_name_snapshot = read_text
@@ -1154,8 +1215,10 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
             "saved_as_hint": True,
             "rule_created":  False,
             "read_text":     "",
-            "error":         "No text could be read from the selected region. "
-                             "Region coordinates saved — try selecting a different area.",
+            "error":         None,
+            "warning":       "No text could be read from the selected region. "
+                             "Region coordinates were saved as a future hint. "
+                             "Try selecting a slightly wider area if you want to apply a value immediately.",
         }
 
     # ── 3a. Persist value into correction record ──────────────────────────────
