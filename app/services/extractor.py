@@ -552,6 +552,85 @@ def extract_native_pdf_page(pdf_path: str | Path, page_index: int) -> str:
         doc.close()
 
 
+
+def _invoice_text_signal_score(text: str | None) -> int:
+    """Return a lightweight score for whether a PDF text layer looks useful for invoice extraction.
+
+    Some image PDFs contain a misleading/empty native text layer.  A high raw
+    character count alone is not enough: the text must contain invoice-like
+    labels, monetary values, dates, or tax terms.  Low-score native text is used
+    only as weak evidence and should trigger OCR/DI/vision fallback.
+    """
+    t = clean_text(text or "")
+    if count_meaningful_chars(t) < 40:
+        return 0
+    low = t.lower()
+    score = 0
+    label_patterns = [
+        r"\binvoice\b", r"\binv\.?\s*(no|number|#)?\b", r"\bvat\b",
+        r"\btax\b", r"\btotal\b", r"\bsubtotal\b", r"\bnet\b",
+        r"\bamount\b", r"\bbalance\b", r"\bdue\b", r"\bdate\b",
+        r"\bsupplier\b", r"\bbill\s*to\b", r"\bpayment\b",
+    ]
+    for pat in label_patterns:
+        if re.search(pat, low):
+            score += 1
+    # Money/date evidence is especially important for deciding whether native
+    # text is good enough to avoid OCR.
+    if re.search(r"(?:€|eur|usd|gbp|£|\$)?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2}", t, re.I):
+        score += 2
+    if re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", t):
+        score += 1
+    if len([ln for ln in t.splitlines() if ln.strip()]) >= 4:
+        score += 1
+    return score
+
+
+def _native_text_looks_usable(text: str | None) -> bool:
+    """True when native PDF text should be trusted as the primary text source."""
+    return count_meaningful_chars(text or "") >= 80 and _invoice_text_signal_score(text) >= 3
+
+
+def _extraction_has_minimum_invoice_fields(extracted: dict[str, Any] | None) -> bool:
+    """Detect whether deterministic extraction found enough to avoid OCR fallback.
+
+    A supplier-only or text-only result is not enough.  We need at least a
+    supplier/invoice/date clue and one monetary amount, or a sufficiently
+    complete financial bundle.
+    """
+    if not extracted:
+        return False
+    has_identity = bool(extracted.get("supplier_name") or extracted.get("invoice_number") or extracted.get("invoice_date"))
+    amount_count = sum(1 for k in ("net_amount", "vat_amount", "total_amount") if extracted.get(k) is not None)
+    if has_identity and amount_count >= 1:
+        return True
+    return amount_count >= 2
+
+
+def _get_fallback_ocr_text(pdf_path: str | Path, page_index: int, native_text: str | None = None) -> tuple[str | None, str | None]:
+    """Read a page with OCR when the native text layer is weak or non-invoice-like.
+
+    Returns (text, method_tag).  The caller decides whether the OCR result is
+    strong enough to replace native text.
+    """
+    ocr_backend = get_ocr_backend()
+    if ocr_backend is None:
+        return None, None
+    try:
+        ocr_text = clean_text(
+            ocr_backend.extract_text_from_pdf_page(
+                pdf_path,
+                page_index,
+                scale=3.0 if getattr(ocr_backend, "name", "") == "tesseract" else 1.8,
+            )
+        )
+        if not ocr_text:
+            return None, None
+        return ocr_text, f"ocr_{ocr_backend.name}"
+    except Exception as e:
+        logger.warning("OCR fallback failed for page %d: %s", page_index, e)
+        return None, None
+
 def get_ocr_backend():
     provider = (settings.ocr_provider or "none").strip().lower()
     if provider == "ocr_space":
@@ -2851,23 +2930,26 @@ def process_pdf_page(
 
     use_vision = bool(settings.use_openai and openai_api_key)
     final_text = native_text
+    native_text_score = _invoice_text_signal_score(native_text)
 
-    if not use_vision:
-        ocr_backend = get_ocr_backend()
-        if count_meaningful_chars(native_text) < 80 and ocr_backend is not None:
-            try:
-                ocr_text = clean_text(
-                    ocr_backend.extract_text_from_pdf_page(
-                        pdf_path,
-                        page_index,
-                        scale=3.0 if getattr(ocr_backend, "name", "") == "tesseract" else 1.8,
-                    )
-                )
-                if count_meaningful_chars(ocr_text) > count_meaningful_chars(native_text):
-                    final_text = ocr_text
-                    method = f"ocr_{ocr_backend.name}"
-            except Exception as e:
-                logger.warning("OCR failed for page %d: %s", page_index, e)
+    # Native PDF text is fast, but some PDFs expose a misleading text layer that
+    # contains enough characters to pass a raw length check while still being
+    # useless for invoice extraction.  Treat native text as a candidate, not a
+    # final source: if it lacks invoice signals, immediately try OCR so scanned
+    # or hybrid PDFs do not return blank rows labelled as "native_text".
+    if not _native_text_looks_usable(native_text):
+        ocr_text, ocr_method = _get_fallback_ocr_text(pdf_path, page_index, native_text)
+        if ocr_text and (
+            _invoice_text_signal_score(ocr_text) > native_text_score
+            or count_meaningful_chars(ocr_text) > count_meaningful_chars(native_text)
+        ):
+            final_text = ocr_text
+            method = f"{ocr_method}+native_text_rejected"
+        elif count_meaningful_chars(native_text) < 20:
+            # Keep the text explicitly unavailable so downstream review reasons
+            # are clear and AI/DI/image fallbacks are preferred where configured.
+            final_text = "(page text unavailable)"
+            method = "native_text_empty"
 
     if count_meaningful_chars(final_text) == 0:
         final_text = "(page text unavailable)"
@@ -2884,6 +2966,27 @@ def process_pdf_page(
         openai_api_key=openai_api_key,
         account_company_name=account_company_name,
     )
+
+    # Second-chance OCR gate: if native text looked invoice-like enough to try
+    # first but the deterministic extractor still found almost nothing, do not
+    # keep a blank/weak native result.  Re-read with OCR and use it when it gives
+    # a stronger invoice extraction.  This directly protects multi-page PDFs
+    # with poor or partial text layers.
+    if method == "native_text" and not _extraction_has_minimum_invoice_fields(extracted):
+        ocr_text, ocr_method = _get_fallback_ocr_text(pdf_path, page_index, native_text)
+        if ocr_text and _invoice_text_signal_score(ocr_text) >= max(2, native_text_score):
+            try:
+                ocr_extracted = simple_extract(
+                    ocr_text,
+                    openai_api_key=openai_api_key,
+                    account_company_name=account_company_name,
+                )
+                if _extraction_has_minimum_invoice_fields(ocr_extracted):
+                    final_text = ocr_text
+                    extracted = ocr_extracted
+                    method = f"{ocr_method}+native_text_weak_result"
+            except Exception as _ocr_rec_exc:
+                logger.debug("OCR second-pass extraction failed p%d: %s", page_index, _ocr_rec_exc)
 
     _di_ok, _di_reason = azure_di_available()
     use_azure_di = _di_ok
@@ -2953,7 +3056,7 @@ def process_pdf_page(
             jpeg_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
             ai_fields = openai_extract_invoice_vision(
                 jpeg_b64,
-                native_text,
+                final_text,
                 openai_api_key,
                 model=settings.openai_model,
                 account_company_name=account_company_name,
@@ -2979,7 +3082,7 @@ def process_pdf_page(
         # 2e — OpenAI validation pass (cross-checks the merged result)
         if use_vision and openai_api_key:
             validation_result = openai_validate_extraction(
-                native_text or final_text,
+                final_text or native_text,
                 extracted,
                 openai_api_key,
                 model=settings.openai_model,
