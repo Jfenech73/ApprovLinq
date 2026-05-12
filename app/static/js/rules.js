@@ -14,6 +14,7 @@ async function api(path, options = {}) {
 let _allRules  = [];
 let _editingId = null;
 let _companies = [];
+let _companyLoadWarning = "";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function setMsg(el, text, kind) {
@@ -36,7 +37,8 @@ function fieldLabel(fn) {
 }
 
 function typeLabel(rt) {
-  return ({ supplier_alias: "Supplier alias", nominal_remap: "Nominal remap" })[rt] || (rt || "");
+  return ({ supplier_alias: "Supplier alias", nominal_remap: "Nominal remap",
+            remap_field_value: "Saved region replay", text_correction: "Text correction" })[rt] || (rt || "");
 }
 
 function escHtml(s) {
@@ -59,13 +61,16 @@ async function loadCompanies() {
       o2.value = c.id; o2.textContent = c.name;
       document.getElementById("editCompany").appendChild(o2);
     });
-  } catch (_) {}
+  } catch (e) {
+    _companyLoadWarning = "Companies could not be loaded; rules can still be managed. " + (e.message || e);
+    setMsg(document.getElementById("pageMessage"), _companyLoadWarning, "warning");
+  }
 }
 
 async function loadRules() {
-  setMsg(document.getElementById("pageMessage"), "");
+  setMsg(document.getElementById("pageMessage"), _companyLoadWarning, _companyLoadWarning ? "warning" : "");
   document.getElementById("rulesTableBody").innerHTML =
-    '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">Loading…</td></tr>';
+    '<tr><td colspan="7" class="muted" style="text-align:center;padding:24px">Loading…</td></tr>';
 
   const cid = document.getElementById("companyFilter").value;
   const url = "/review/rules" + (cid ? "?company_id=" + encodeURIComponent(cid) : "");
@@ -77,7 +82,7 @@ async function loadRules() {
     setMsg(document.getElementById("pageMessage"),
       "Failed to load rules: " + (e.message || e), "error");
     document.getElementById("rulesTableBody").innerHTML =
-      '<tr><td colspan="6" class="muted" style="text-align:center">Error loading rules.</td></tr>';
+      '<tr><td colspan="7" class="muted" style="text-align:center">Error loading rules.</td></tr>';
   }
 }
 
@@ -97,7 +102,7 @@ function renderTable() {
 
   if (!rows.length) {
     document.getElementById("rulesTableBody").innerHTML =
-      '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">No rules match the current filters.</td></tr>';
+      '<tr><td colspan="7" class="muted" style="text-align:center;padding:24px">No rules match the current filters.</td></tr>';
     return;
   }
 

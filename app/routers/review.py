@@ -1299,28 +1299,55 @@ class RuleUpdatePayload(BaseModel):
 def list_rules_tenant(
     company_id: str | None = Query(default=None),
     active_only: bool = Query(default=False),
+    x_tenant_id: str | None = Header(default=None),
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
-    """List correction rules for the calling user's tenants."""
+    """List correction rules visible in the active tenant context.
+
+    Tenant users should manage rules for the tenant selected in the UI
+    (X-Tenant-Id).  If no header is supplied, fall back to the user's default
+    tenant to preserve existing direct-page behaviour.  Admins keep the
+    previous broad behaviour unless they explicitly provide X-Tenant-Id.
+    """
+    from app.db.models import UserTenant as _UT
+    from uuid import UUID as _UUID
+
     q = select(CorrectionRule)
-    if getattr(user, "role", None) != "admin":
-        from app.db.models import UserTenant as _UT
-        tenant_ids = [
-            row[0] for row in db.execute(select(_UT.tenant_id).where(_UT.user_id == user.id)).all()
-        ]
-        if not tenant_ids:
-            return []
-        q = q.where(CorrectionRule.tenant_id.in_(tenant_ids))
+    is_admin = getattr(user, "role", None) == "admin"
+
+    if is_admin:
+        if x_tenant_id:
+            try:
+                q = q.where(CorrectionRule.tenant_id == _UUID(x_tenant_id))
+            except ValueError:
+                raise HTTPException(400, "Invalid X-Tenant-Id header")
+    else:
+        if x_tenant_id:
+            try:
+                selected_tid = _UUID(x_tenant_id)
+            except ValueError:
+                raise HTTPException(400, "Invalid X-Tenant-Id header")
+            link = db.execute(
+                select(_UT).where(_UT.user_id == user.id, _UT.tenant_id == selected_tid).limit(1)
+            ).scalar_one_or_none()
+            if not link:
+                raise HTTPException(403, "Forbidden for selected tenant")
+            tenant_id = selected_tid
+        else:
+            tenant_id = _user_default_tenant_id(db, user)
+        q = q.where(CorrectionRule.tenant_id == tenant_id)
+
     if company_id:
-        from uuid import UUID as _UUID
         try:
             cid = _UUID(company_id)
+            # Company filter returns both company-specific and tenant-wide rules,
+            # matching application behaviour during scan.
             q = q.where(
                 (CorrectionRule.company_id == cid) | (CorrectionRule.company_id.is_(None))
             )
         except ValueError:
-            pass
+            raise HTTPException(400, "company_id is not a valid UUID")
     if active_only:
         q = q.where(CorrectionRule.active.is_(True))
     rules = db.execute(q.order_by(desc(CorrectionRule.created_at))).scalars().all()

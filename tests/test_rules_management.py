@@ -527,3 +527,78 @@ class TestNavigation:
         entry = m.group(0)
         assert "adminOnly" not in entry, \
             "Rules nav entry must not be adminOnly — all users need access"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 11. Phase 1 visibility/audit additions
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPhase1RuleVisibilityAndAudit:
+
+    def test_apply_saved_rules_writes_method_tag_and_audit(self, db, tenant_row, company_row):
+        """Automatic rule application must be visible via method_used and audit."""
+        from app.routers.batches import _apply_saved_rules
+        from app.db.review_models import InvoiceRowFieldAudit
+
+        rule = _make_rule(db, tenant_row.id, source="old supplier",
+                          target="New Supplier Ltd", active=True)
+        db.commit()
+
+        batch = _make_batch(db, tenant_row.id, company_row.id)
+        row = _make_row(db, batch)
+        row.supplier_name = "Old Supplier"
+        db.commit()
+
+        _apply_saved_rules(db, batch, row)
+        db.commit()
+
+        assert row.supplier_name == "New Supplier Ltd"
+        assert "rule:supplier_alias" in (row.method_used or "")
+
+        audit = db.query(InvoiceRowFieldAudit).filter_by(
+            batch_id=batch.id,
+            row_id=row.id,
+            field_name="supplier_name",
+            action="rule_apply",
+        ).one_or_none()
+        assert audit is not None
+        assert audit.old_value == "Old Supplier"
+        assert audit.new_value == "New Supplier Ltd"
+        assert f"rule_id={rule.id}" in (audit.note or "")
+
+    def test_rules_list_uses_default_tenant_when_no_header(self, db, user_row):
+        """Tenant users without X-Tenant-Id should see only their default tenant."""
+        from app.routers.review import list_rules_tenant
+
+        t1 = Tenant(id=uuid.uuid4(), tenant_code="TDEF", tenant_name="Default Tenant")
+        t2 = Tenant(id=uuid.uuid4(), tenant_code="TOTHER", tenant_name="Other Tenant")
+        db.add_all([t1, t2])
+        db.flush()
+        db.add_all([
+            UserTenant(user_id=user_row.id, tenant_id=t1.id, is_default=True),
+            UserTenant(user_id=user_row.id, tenant_id=t2.id, is_default=False),
+        ])
+        r1 = _make_rule(db, t1.id, source="default", target="Default Target")
+        _make_rule(db, t2.id, source="other", target="Other Target")
+        db.commit()
+
+        result = list_rules_tenant(db=db, user=user_row)
+        assert [r["id"] for r in result] == [r1.id]
+
+    def test_rules_list_respects_x_tenant_id_header(self, db, user_row):
+        """Tenant users with X-Tenant-Id should see the selected authorised tenant only."""
+        from app.routers.review import list_rules_tenant
+
+        t1 = Tenant(id=uuid.uuid4(), tenant_code="T1X", tenant_name="Tenant One")
+        t2 = Tenant(id=uuid.uuid4(), tenant_code="T2X", tenant_name="Tenant Two")
+        db.add_all([t1, t2])
+        db.flush()
+        db.add_all([
+            UserTenant(user_id=user_row.id, tenant_id=t1.id, is_default=True),
+            UserTenant(user_id=user_row.id, tenant_id=t2.id, is_default=False),
+        ])
+        _make_rule(db, t1.id, source="one", target="One Target")
+        r2 = _make_rule(db, t2.id, source="two", target="Two Target")
+        db.commit()
+
+        result = list_rules_tenant(x_tenant_id=str(t2.id), db=db, user=user_row)
+        assert [r["id"] for r in result] == [r2.id]

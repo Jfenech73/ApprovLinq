@@ -63,6 +63,52 @@ def _clear_active(batch_id: UUID) -> None:
         _ACTIVE_BATCHES.discard(str(batch_id))
 
 
+def _append_method_tag(row: InvoiceRow, tag: str) -> None:
+    """Append a method_used tag once, preserving existing tags."""
+    tag = (tag or "").strip()
+    if not tag:
+        return
+    parts = [p.strip() for p in re.split(r"[+|,]", row.method_used or "") if p.strip()]
+    if tag not in parts:
+        parts.append(tag)
+    row.method_used = "+".join(parts)[:255]
+
+
+def _audit_rule_application(
+    db: Session,
+    batch: InvoiceBatch,
+    row: InvoiceRow,
+    field_name: str,
+    old_value: object,
+    new_value: object,
+    rule: CorrectionRule,
+    note: str,
+) -> None:
+    """Record an automatic rule application when the row has an id.
+
+    During scan rows may still be transient before the final db.add(row).
+    Flushing here is safe and makes automatic rule application visible in the
+    same audit table used by manual review corrections.
+    """
+    if str(old_value or "") == str(new_value or ""):
+        return
+    if row.id is None:
+        db.add(row)
+        db.flush()
+    db.add(InvoiceRowFieldAudit(
+        batch_id=batch.id,
+        row_id=row.id,
+        field_name=field_name,
+        old_value=str(old_value) if old_value is not None else None,
+        new_value=str(new_value) if new_value is not None else None,
+        action="rule_apply",
+        note=f"{note}; rule_id={rule.id}; rule_type={rule.rule_type}",
+        rule_created=False,
+        user_id=None,
+        username="system",
+    ))
+
+
 def _normalize_rule_value(value: str | None) -> str:
     """Normalise a rule source_pattern or supplier name for comparison.
 
@@ -129,16 +175,31 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                     "_apply_saved_rules: supplier_alias %r→%r row=%d",
                     row.supplier_name, rule.target_value, row.id,
                 )
+                old_val = row.supplier_name
                 new_supplier_name = rule.target_value
                 row.supplier_name = new_supplier_name
+                _append_method_tag(row, "rule:supplier_alias")
+                _audit_rule_application(
+                    db, batch, row, "supplier_name", old_val, new_supplier_name,
+                    rule, "Applied supplier alias rule during scan"
+                )
         elif rule.rule_type == "nominal_remap":
+            # Existing semantics: nominal_remap means old nominal value → new
+            # nominal value. Supplier → nominal suggestions remain handled by
+            # _apply_account_suggestions / tenant nominal master data.
             current = _normalize_rule_value(row.nominal_account_code)
             if current and current == src and rule.target_value:
                 logger.debug(
                     "_apply_saved_rules: nominal_remap %r→%r row=%d",
                     row.nominal_account_code, rule.target_value, row.id,
                 )
+                old_val = row.nominal_account_code
                 row.nominal_account_code = rule.target_value
+                _append_method_tag(row, "rule:nominal_remap")
+                _audit_rule_application(
+                    db, batch, row, "nominal_account_code", old_val, rule.target_value,
+                    rule, "Applied nominal remap rule during scan"
+                )
 
     # ── 2. remap_field_value / text_correction rules ────────────────────
     # IMPORTANT: Rule semantics are type-dependent.
@@ -266,6 +327,11 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                         # Use val to keep the actual assignment out of the remap_field_value block.
                         # The comment above _apply_saved_rules documents setattr semantics.
                         setattr(row, field, val)
+                        _append_method_tag(row, f"rule:text_correction:{field}")
+                        _audit_rule_application(
+                            db, batch, row, field, old_val, val, rule,
+                            "Applied text correction rule during scan"
+                        )
                         logger.debug(
                             "_apply_saved_rules: text_correction applied "
                             "field=%r %r→%r supplier=%r rule_id=%d",
@@ -382,6 +448,11 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
 
             old_val = getattr(row, field, None)
             setattr(row, field, fresh_text)
+            _append_method_tag(row, f"rule:remap_field_value:{field}")
+            _audit_rule_application(
+                db, batch, row, field, old_val, fresh_text, rule,
+                f"Applied saved-region rule during scan; remap_hint_id={hint.id}"
+            )
             logger.debug(
                 "_apply_saved_rules: remap_field_value coordinate-replay "
                 "field=%r fresh=%r (was %r) supplier=%r rule_id=%d hint_id=%d",
