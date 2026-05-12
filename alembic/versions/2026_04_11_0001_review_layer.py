@@ -28,6 +28,14 @@ def upgrade() -> None:
     add("reopened_by",  sa.Column("reopened_by",  postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=True))
     add("current_export_version", sa.Column("current_export_version", sa.Integer(), nullable=False, server_default="0"))
 
+    # Durable file storage for ephemeral hosts such as Koyeb.
+    if "invoice_files" in insp.get_table_names():
+        file_cols = {c["name"] for c in insp.get_columns("invoice_files")}
+        if "file_bytes" not in file_cols:
+            op.add_column("invoice_files", sa.Column("file_bytes", sa.LargeBinary(), nullable=True))
+        if "storage_backend" not in file_cols:
+            op.add_column("invoice_files", sa.Column("storage_backend", sa.String(30), nullable=False, server_default="database+local"))
+
     if "invoice_row_corrections" not in insp.get_table_names():
         op.create_table(
             "invoice_row_corrections",
@@ -133,9 +141,17 @@ def upgrade() -> None:
             sa.Column("exported_by", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=True),
             sa.Column("exported_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
             sa.Column("file_path", sa.Text()),
+            sa.Column("file_bytes", sa.LargeBinary(), nullable=True),
+            sa.Column("storage_backend", sa.String(30), nullable=False, server_default="database+local"),
             sa.Column("row_count", sa.Integer()),
         )
         op.create_index("ix_export_events_batch", "batch_export_events", ["batch_id"])
+    else:
+        export_cols = {c["name"] for c in insp.get_columns("batch_export_events")}
+        if "file_bytes" not in export_cols:
+            op.add_column("batch_export_events", sa.Column("file_bytes", sa.LargeBinary(), nullable=True))
+        if "storage_backend" not in export_cols:
+            op.add_column("batch_export_events", sa.Column("storage_backend", sa.String(30), nullable=False, server_default="database+local"))
 
 
 def downgrade() -> None:

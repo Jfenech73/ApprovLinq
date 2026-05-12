@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     JSON,
     UniqueConstraint,
+    LargeBinary,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -170,6 +171,11 @@ class InvoiceFile(Base):
     original_filename: Mapped[str] = mapped_column(String(500), nullable=False)
     stored_filename: Mapped[str] = mapped_column(String(500), nullable=False)
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    # Durable copy for platforms with ephemeral filesystem storage (for example Koyeb).
+    # The local file_path is still used as a runtime cache, but file_bytes is the
+    # recovery source after a redeploy/restart removes local files.
+    file_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    storage_backend: Mapped[str] = mapped_column(String(30), default="database+local", nullable=False)
     mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     file_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="uploaded", nullable=False)

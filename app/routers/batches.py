@@ -34,6 +34,7 @@ from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
 from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
 from app.services.template_render_service import render_template_sheet, resolve_effective_template
 from app.utils.storage import batch_upload_folder, batch_export_folder, resolve_upload_path
+from app.utils.persistent_files import attach_invoice_file_bytes, materialize_invoice_file
 
 logger = logging.getLogger(__name__)
 
@@ -395,11 +396,10 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
     # Resolve the PDF path once for coordinate-based re-reading
     _pdf_path: str | None = None
     from app.db.models import InvoiceFile as _IF2
-    from app.utils.storage import resolve_upload_path as _rup2
     _file_obj = db.get(_IF2, row.source_file_id) if row.source_file_id else None
     if _file_obj:
         try:
-            _pdf_path = str(_rup2(_file_obj.file_path))
+            _pdf_path = str(materialize_invoice_file(_file_obj))
         except Exception:
             _pdf_path = None
 
@@ -956,12 +956,11 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         return
 
     from app.db.models import InvoiceFile as _IF
-    from app.utils.storage import resolve_upload_path as _rup
     file_obj = db.get(_IF, row.source_file_id) if row.source_file_id else None
     if not file_obj:
         return
     try:
-        pdf_path = str(_rup(file_obj.file_path))
+        pdf_path = str(materialize_invoice_file(file_obj))
     except Exception:
         return
 
@@ -2275,7 +2274,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         total_target_pages = 0
         for invoice_file in files:
             try:
-                page_count = get_pdf_page_count(resolve_upload_path(invoice_file.file_path))
+                page_count = get_pdf_page_count(materialize_invoice_file(invoice_file))
             except Exception:
                 page_count = 0
             invoice_file.page_count = page_count
@@ -2343,7 +2342,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 for page_index in range(page_count):
                     try:
                         row_payloads = process_pdf_page_rows(
-                            str(resolve_upload_path(invoice_file.file_path)),
+                            str(materialize_invoice_file(invoice_file)),
                             page_index=page_index,
                             scan_mode=batch.scan_mode or "summary",
                             openai_api_key=settings.openai_api_key if settings.use_openai else None,
@@ -2678,6 +2677,7 @@ def upload_files(batch_id: UUID, files: list[UploadFile] = File(...), db: Sessio
             file_size_bytes=len(content),
             status="uploaded",
         )
+        attach_invoice_file_bytes(invoice_file, content)
         db.add(invoice_file)
         saved.append(upload.filename)
     db.commit()

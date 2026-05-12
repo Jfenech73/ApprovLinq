@@ -22,6 +22,7 @@ from app.routers.auth import current_user
 from app.utils.security import session_token_hash, utcnow
 from app.services import correction_service as cs
 from app.utils.storage import resolve_upload_path
+from app.utils.persistent_files import materialize_invoice_file
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -522,7 +523,10 @@ def file_info(
     f = db.get(M.InvoiceFile, file_id)
     if not f:
         raise HTTPException(404, "File not found")
-    file_path = resolve_upload_path(f.file_path)
+    try:
+        file_path = materialize_invoice_file(f)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc))
     if not file_path.exists():
         raise HTTPException(404, f"PDF missing from disk: stored={f.file_path} resolved={file_path}")
     return {"file_id": file_id, "page_count": _open_pdf_page_count(str(file_path))}
@@ -541,7 +545,10 @@ def preview(
     f = db.get(M.InvoiceFile, file_id)
     if not f:
         raise HTTPException(404, "File not found")
-    file_path = resolve_upload_path(f.file_path)
+    try:
+        file_path = materialize_invoice_file(f)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc))
     if not file_path.exists():
         raise HTTPException(404, f"PDF missing from disk: stored={f.file_path} resolved={file_path}")
     errors = []
@@ -1075,7 +1082,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         if f:
             try:
                 raw = _read_region_text(
-                    str(resolve_upload_path(f.file_path)),
+                    str(materialize_invoice_file(f)),
                     payload.page_no,
                     payload.x, payload.y, payload.w, payload.h,
                 )
@@ -1099,7 +1106,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         if file_obj_for_supplier:
             try:
                 read_text = _promote_supplier_remap_text(
-                    str(resolve_upload_path(file_obj_for_supplier.file_path)),
+                    str(materialize_invoice_file(file_obj_for_supplier)),
                     payload.page_no,
                     read_text or "",
                 )

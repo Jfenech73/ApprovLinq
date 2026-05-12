@@ -93,14 +93,15 @@ def export_batch_corrected(
     export_folder = batch_export_folder(batch.id)
     export_filename = f"batch_{batch.id}_v{next_version}.xlsx"
     export_path = export_folder / export_filename
-    export_path.write_bytes(out.getvalue())
+    export_bytes = out.getvalue()
+    export_path.write_bytes(export_bytes)
     out.seek(0)
 
     # Log export event + flip status + bump version
     ev = BatchExportEvent(
         batch_id=batch.id, export_version=next_version,
         exported_by=user.id, exported_at=datetime.utcnow(),
-        file_path=str(export_path), row_count=len(rows),
+        file_path=str(export_path), file_bytes=export_bytes, storage_backend="database+local", row_count=len(rows),
     )
     db.add(ev)
     batch.current_export_version = next_version

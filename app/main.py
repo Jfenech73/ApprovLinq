@@ -61,6 +61,8 @@ def ensure_runtime_schema() -> None:
         "ALTER TABLE invoice_files ADD COLUMN IF NOT EXISTS tenant_id UUID",
         "ALTER TABLE invoice_files ADD COLUMN IF NOT EXISTS company_id UUID",
         "ALTER TABLE invoice_files ADD COLUMN IF NOT EXISTS file_size_bytes INTEGER",
+        "ALTER TABLE invoice_files ADD COLUMN IF NOT EXISTS file_bytes BYTEA",
+        "ALTER TABLE invoice_files ADD COLUMN IF NOT EXISTS storage_backend VARCHAR(30) NOT NULL DEFAULT 'database+local'",
         "UPDATE invoice_files AS f SET company_id = b.company_id FROM invoice_batches AS b WHERE f.company_id IS NULL AND b.id = f.batch_id",
 
         # ── invoice_rows ─────────────────────────────────────────────────────
@@ -171,7 +173,12 @@ def ensure_runtime_schema() -> None:
             template_id BIGINT,
             exported_by UUID REFERENCES users(id),
             exported_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            file_path TEXT, row_count INTEGER)""",
+            file_path TEXT,
+            file_bytes BYTEA,
+            storage_backend VARCHAR(30) NOT NULL DEFAULT 'database+local',
+            row_count INTEGER)""",
+        "ALTER TABLE batch_export_events ADD COLUMN IF NOT EXISTS file_bytes BYTEA",
+        "ALTER TABLE batch_export_events ADD COLUMN IF NOT EXISTS storage_backend VARCHAR(30) NOT NULL DEFAULT 'database+local'",
         "CREATE INDEX IF NOT EXISTS ix_export_events_batch ON batch_export_events(batch_id)",
         # <<< REVIEW_PACK startup_alters
 

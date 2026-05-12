@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, date
 from sqlalchemy import (
-    Boolean, DateTime, Date, ForeignKey, Integer, BigInteger, Numeric, String, Text,
+    Boolean, DateTime, Date, ForeignKey, Integer, BigInteger, Numeric, String, Text, LargeBinary,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.models import Base, InvoiceBatch  # noqa: F401
@@ -115,6 +115,10 @@ class BatchExportEvent(Base):
     exported_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     exported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     file_path: Mapped[str | None] = mapped_column(Text)
+    # Durable copy of generated exports. The file_path remains a local cache path,
+    # but the bytes survive Koyeb redeploys when stored in Postgres.
+    file_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    storage_backend: Mapped[str] = mapped_column(String(30), default="database+local", nullable=False)
     row_count: Mapped[int | None] = mapped_column(Integer)
 
 
