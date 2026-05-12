@@ -210,7 +210,7 @@ class InvoiceRow(Base):
     total_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     currency: Mapped[str | None] = mapped_column(String(20), nullable=True)
     tax_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    method_used: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    method_used: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence_score: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
     validation_status: Mapped[str | None] = mapped_column(String(100), nullable=True)
     review_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

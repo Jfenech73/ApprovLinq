@@ -30,6 +30,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from app.services.totals_reconciliation import reconcile_invoice_totals
+
 
 @dataclass
 class InvoiceValidation:
@@ -95,25 +97,18 @@ def _is_discount_amount(diff: float) -> bool:
 def validate_invoice(extracted: dict) -> InvoiceValidation:
     """Validate the financial fields of an extracted invoice.
 
-    Args:
-        extracted: dict from process_pdf_page (or any stage of the pipeline).
-
-    Returns:
-        InvoiceValidation with reconciliation status and reason codes.
+    This compatibility wrapper now delegates totals arithmetic to
+    totals_reconciliation.reconcile_invoice_totals while preserving the historic
+    InvoiceValidation return shape used by extractor/review code.
     """
-    net   = _safe_float(extracted.get("net_amount"))
-    vat   = _safe_float(extracted.get("vat_amount"))
-    total = _safe_float(extracted.get("total_amount"))
+    net = _safe_float(extracted.get("source_invoice_net_amount") or extracted.get("net_amount"))
+    vat = _safe_float(extracted.get("source_invoice_vat_amount") or extracted.get("vat_amount"))
+    total = _safe_float(extracted.get("source_invoice_total_amount") or extracted.get("total_amount"))
 
-    result = InvoiceValidation(
-        net_amount=net,
-        vat_amount=vat,
-        total_amount=total,
-    )
-
+    result = InvoiceValidation(net_amount=net, vat_amount=vat, total_amount=total)
     reasons: list[str] = []
 
-    # ── VAT rate check ────────────────────────────────────────────────────────
+    # VAT rate plausibility remains here for backward-compatible reason codes.
     if net is not None and net > 0:
         if vat is not None:
             vat_rate = round(vat / net, 4)
@@ -137,62 +132,45 @@ def validate_invoice(extracted: dict) -> InvoiceValidation:
                 "Total exceeds net by >2% but no VAT amount was extracted"
             )
 
-    # ── Total reconciliation ──────────────────────────────────────────────────
-    if net is not None and total is not None:
-        vat_val = vat or 0.0
-        expected = _round2(net + vat_val)
-        diff = _round2(total - expected)
-        tolerance = 0.10
+    rec = reconcile_invoice_totals(extracted, extracted, line_items=extracted.get("line_items") or extracted.get("items"))
+    result.deposit_amount = rec.bcrs_amount
+    result.discount_amount = rec.discount_amount
+    result.total_amount = rec.total_amount
+    result.net_amount = rec.net_amount
+    result.vat_amount = rec.vat_amount
 
-        if abs(diff) <= tolerance:
-            # Within tolerance — reconciled
-            if result.totals_reconciliation_status == "ok":
-                result.totals_reconciliation_status = "ok"
-                result.totals_reconciliation_reason = (
-                    f"Reconciled: net({net:.2f}) + vat({vat_val:.2f}) = total({total:.2f})"
-                )
-        elif diff > tolerance:
-            # Total is higher than expected
-            if _is_deposit_amount(diff, net=net):
-                result.deposit_amount = diff
-                result.totals_reconciliation_status = "ok_with_deposit"
-                result.totals_reconciliation_reason = (
-                    f"Difference of {diff:.2f} attributed to deposit/BCRS surcharge"
-                )
-                # NOTE: deposit_component_detected is purely advisory metadata.
-                # It is intentionally NOT used as the basis for an automatic split in
-                # batches.py — that requires confirmed label+region evidence.
-                # Here it only flags the row for review so a human can verify.
-                reasons.append(f"deposit_component_detected:{diff:.2f}")
-                reasons.append("totals_mismatch_advisory")
-            else:
-                result.other_charges_amount = diff
-                result.totals_reconciliation_status = "totals_mismatch"
-                result.totals_reconciliation_reason = (
-                    f"Total({total:.2f}) exceeds net+vat({expected:.2f}) "
-                    f"by {diff:.2f} — unexplained surcharge"
-                )
-                reasons.append("totals_mismatch")
-        else:
-            # Total is lower than expected
-            if _is_discount_amount(diff):
-                result.discount_amount = abs(diff)
-                result.totals_reconciliation_status = "ok_with_discount"
-                result.totals_reconciliation_reason = (
-                    f"Difference of {abs(diff):.2f} attributed to discount"
-                )
-            else:
-                result.totals_reconciliation_status = "totals_mismatch"
-                result.totals_reconciliation_reason = (
-                    f"Total({total:.2f}) is less than net+vat({expected:.2f}) "
-                    f"by {abs(diff):.2f} — possible extraction error"
-                )
-                reasons.append("totals_mismatch")
+    status_map = {
+        "reconciled": "ok",
+        "line_items_reconciled": "ok",
+        "reconciled_with_bcrs": "ok_with_deposit",
+        "reconciled_with_discount": "ok_with_discount",
+        "reconciled_with_bcrs_and_discount": "ok_with_deposit_and_discount",
+        "line_items_mismatch": "line_sum_mismatch",
+        "mismatch_requires_review": "totals_mismatch",
+        "subtotal_not_found": "subtotal_not_found",
+        "insufficient_data": "subtotal_not_found",
+    }
+    # Preserve VAT anomaly/missing status if already raised; otherwise use totals status.
+    if result.totals_reconciliation_status == "ok":
+        result.totals_reconciliation_status = status_map.get(rec.status, rec.status)
+        result.totals_reconciliation_reason = rec.review_reason or "; ".join(rec.evidence) or rec.status
+    elif rec.review_required and "totals_mismatch" not in reasons:
+        # VAT anomaly plus totals mismatch should still surface both conditions.
+        reasons.append("totals_mismatch")
 
-    elif total is None and net is None:
+    if rec.bcrs_amount:
+        # Advisory only.  batches.py still requires label/region evidence before split.
+        reasons.append(f"deposit_component_detected:{rec.bcrs_amount:.2f}")
+        if rec.status not in {"reconciled_with_bcrs", "reconciled_with_bcrs_and_discount"}:
+            reasons.append("totals_mismatch_advisory")
+    if rec.discount_amount:
+        result.discount_amount = rec.discount_amount
+    if rec.status in {"mismatch_requires_review", "line_items_mismatch"}:
+        reasons.append("line_sum_mismatch" if rec.status == "line_items_mismatch" else "totals_mismatch")
+    if rec.status in {"subtotal_not_found", "insufficient_data"} and net is None and total is None:
         reasons.append("subtotal_not_found")
-        result.totals_reconciliation_status = "subtotal_not_found"
-        result.totals_reconciliation_reason = "Neither net nor total amount could be extracted"
 
-    result.review_reasons = reasons
+    # de-duplicate while preserving order
+    seen = set()
+    result.review_reasons = [r for r in reasons if not (r in seen or seen.add(r))]
     return result

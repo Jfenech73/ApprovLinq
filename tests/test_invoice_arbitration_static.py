@@ -39,3 +39,21 @@ def test_arbitration_writes_review_and_audit_markers():
     assert 'row.review_fields' in src
     assert 'row.review_reasons' in src
     assert 'arbitrated:' in src
+
+
+def test_arbitration_does_not_audit_noop_conflict_when_winner_confirms_current_value():
+    src = Path('app/services/invoice_arbitration.py').read_text()
+    assert '``total_amount arbitration_conflict 9.44 -> 9.44``' in src
+    same_idx = src.index('if same:\n            decision.conflict = False')
+    conflict_idx = src.index('if conflict:', same_idx)
+    assert same_idx < conflict_idx
+    assert 'db, batch, row, field_name, current, winner.value,' in src
+
+
+def test_method_used_is_text_not_varchar_200_to_avoid_koyeb_runtime_truncation():
+    model_src = Path('app/db/models.py').read_text()
+    main_src = Path('app/main.py').read_text()
+    batch_src = Path('app/routers/batches.py').read_text()
+    assert 'method_used: Mapped[str | None] = mapped_column(Text, nullable=True)' in model_src
+    assert 'ALTER TABLE invoice_rows ALTER COLUMN method_used TYPE TEXT' in main_src
+    assert 'row.method_used = "+".join(parts)[:255]' not in batch_src

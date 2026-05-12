@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import InvoiceBatch, InvoiceRow, TenantNominalAccount, TenantSupplier
 from app.db.review_models import CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
-from app.services.validate_invoice import validate_invoice
+from app.services.totals_reconciliation import reconcile_invoice_totals
 from app.services.supplier_history import get_supplier_history_profile
 
 ARBITRATION_FIELDS: tuple[str, ...] = (
@@ -162,7 +162,7 @@ def _append_method(row: InvoiceRow, tag: str) -> None:
     parts = [p.strip() for p in re.split(r"[+|,]", row.method_used or "") if p.strip()]
     if tag not in parts:
         parts.append(tag)
-    row.method_used = "+".join(parts)[:200]
+    row.method_used = "+".join(parts)[:2000]
 
 
 def _parse_date(value: Any) -> date | None:
@@ -487,41 +487,49 @@ def _history_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> li
 
 def _totals_candidates(row: InvoiceRow, extraction_payload: dict[str, Any] | None) -> list[Candidate]:
     out: list[Candidate] = []
-    net, vat, total = _money(row.net_amount), _money(row.vat_amount), _money(row.total_amount)
-    if net is not None and vat is not None:
-        expected = (net + vat).quantize(Decimal("0.01"))
-        if total is None:
-            out.append(Candidate(
-                field_name="total_amount",
-                value=float(expected),
-                source_type="totals_reconciliation",
-                confidence=0.72,
-                evidence="net + vat calculated total",
-                reason="Total was blank but net and VAT were available.",
-            ))
-        elif abs(expected - total) <= Decimal("0.03"):
-            for field_name, value in (("net_amount", net), ("vat_amount", vat), ("total_amount", total)):
+    rec = reconcile_invoice_totals(row, extraction_payload, line_items=(extraction_payload or {}).get("line_items") or (extraction_payload or {}).get("items"))
+
+    if rec.status:
+        row.totals_reconciliation_status = rec.status
+    if rec.review_required:
+        row.review_required = True
+        row.review_fields = _append_unique(row.review_fields, "total_amount")
+        row.review_reasons = _append_unique(row.review_reasons, f"totals_reconciliation:{rec.status}")
+        if rec.review_reason:
+            row.review_reasons = _append_unique(row.review_reasons, rec.review_reason[:120])
+
+    evidence = "; ".join(rec.evidence) or rec.review_reason or rec.status
+    if rec.status in {
+        "reconciled", "line_items_reconciled", "reconciled_with_bcrs",
+        "reconciled_with_discount", "reconciled_with_bcrs_and_discount",
+    }:
+        for field_name, value in (
+            ("net_amount", rec.net_amount),
+            ("vat_amount", rec.vat_amount),
+            ("total_amount", rec.total_amount),
+        ):
+            if value is not None and _value_valid_for_field(field_name, value, row):
                 out.append(Candidate(
                     field_name=field_name,
-                    value=float(value),
+                    value=_normalise_field_value(field_name, value),
                     source_type="totals_reconciliation",
-                    confidence=0.82,
-                    evidence="net + vat reconciles to total",
-                    reason="Amount is supported by totals reconciliation.",
+                    confidence=0.84 if rec.status.startswith("reconciled") else 0.88,
+                    evidence=evidence,
+                    reason=f"Amount supported by totals reconciliation status={rec.status}.",
                 ))
-    try:
-        validation = validate_invoice({
-            "net_amount": float(net) if net is not None else None,
-            "vat_amount": float(vat) if vat is not None else None,
-            "total_amount": float(total) if total is not None else None,
-            "raw_text": "\n".join(str((extraction_payload or {}).get(k) or "") for k in ("page_text_raw", "totals_raw", "header_raw")),
-        })
-        if getattr(validation, "status", None):
-            row.totals_reconciliation_status = row.totals_reconciliation_status or str(validation.status)
-    except Exception:
-        pass
+    elif rec.suggested_field_fixes:
+        for field_name, value in rec.suggested_field_fixes.items():
+            if field_name in AMOUNT_FIELDS and _value_valid_for_field(field_name, value, row):
+                out.append(Candidate(
+                    field_name=field_name,
+                    value=_normalise_field_value(field_name, value),
+                    source_type="totals_reconciliation",
+                    confidence=0.64,
+                    evidence=f"review-only suggested fix from totals reconciliation: {evidence}",
+                    reason="Totals mismatch produced a possible OCR amount correction; review required before trusting.",
+                    should_apply=False,
+                ))
     return out
-
 
 def _choose_candidate(field_name: str, candidates: list[Candidate]) -> tuple[Candidate | None, bool, str]:
     valid = [c for c in candidates if _value_valid_for_field(field_name, c.value)]
@@ -583,6 +591,17 @@ def arbitrate_invoice_row(
 
         weak_current = _current_value_is_weak(row, field_name)
         same = _values_equivalent(field_name, current, winner.value)
+
+        # If the winning candidate confirms the value that is already on the row,
+        # do not create an arbitration_conflict audit just because another strong
+        # candidate exists.  The previous behaviour produced noisy row history like
+        # ``total_amount arbitration_conflict 9.44 -> 9.44`` and marked stable rows
+        # for review even though the selected value was unchanged.
+        if same:
+            decision.conflict = False
+            conflict = False
+            _append_method(row, f"arbitrated:{winner.source_type}:{field_name}")
+
         if conflict:
             decision.review_required = True
             result.review_required = True
@@ -590,9 +609,9 @@ def arbitrate_invoice_row(
             result.review_reasons.append(f"arbitration_conflict:{field_name}")
             _append_method(row, f"arbitration_conflict:{field_name}")
             _audit_arbitration(
-                db, batch, row, field_name, current, current,
+                db, batch, row, field_name, current, winner.value,
                 "arbitration_conflict",
-                f"{reason}; winner_source={winner.source_type}; evidence={winner.evidence}",
+                f"{reason}; current_value={current!r}; winner_source={winner.source_type}; winner_value={winner.value!r}; evidence={winner.evidence}",
             )
             continue
 
@@ -604,7 +623,6 @@ def arbitrate_invoice_row(
         can_apply = False
         if same:
             can_apply = False
-            _append_method(row, f"arbitrated:{winner.source_type}:{field_name}")
         elif weak_current and winner.confidence >= 0.60 and (winner.source_type not in {"supplier_history", "accepted_correction"} or winner.should_apply):
             can_apply = True
         elif winner.source_type == "supplier_history" and winner.should_apply and weak_current:
@@ -616,6 +634,19 @@ def arbitrate_invoice_row(
 
         # One-off history/correction suggestions must not auto-apply.
         if winner.source_type == "accepted_correction" and winner.confidence < 0.60:
+            can_apply = False
+
+        # Supplier name is identity data.  Do not let arbitration replace one
+        # valid, non-equivalent supplier with another supplier just because a
+        # saved-region/history/master candidate has a higher source rank.  Only
+        # explicit tenant correction rules may rename a strong supplier value;
+        # all other non-equivalent supplier candidates are review suggestions.
+        if (
+            field_name == "supplier_name"
+            and not same
+            and not weak_current
+            and winner.source_type != "correction_rule"
+        ):
             can_apply = False
 
         if can_apply:

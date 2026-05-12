@@ -74,7 +74,7 @@ def _append_method_tag(row: InvoiceRow, tag: str) -> None:
     parts = [p.strip() for p in re.split(r"[+|,]", row.method_used or "") if p.strip()]
     if tag not in parts:
         parts.append(tag)
-    row.method_used = "+".join(parts)[:255]
+    row.method_used = "+".join(parts)
 
 
 def _audit_rule_application(
@@ -680,6 +680,15 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 continue
 
             old_val = getattr(row, field, None)
+            if field == "supplier_name" and str(old_val or "").strip():
+                if not _should_replace_supplier_with_region(old_val, getattr(hint, "supplier_name_snapshot", None), fresh_text):
+                    _append_review_marker(row, field, f"saved_region_conflict:{field}")
+                    _append_method_tag(row, f"rule_remap_conflict:{field}")
+                    _audit_rule_application(
+                        db, batch, row, field, old_val, fresh_text, rule,
+                        f"Skipped saved-region supplier overwrite because the region did not match the existing supplier relationship; remap_hint_id={hint.id}"
+                    )
+                    continue
             setattr(row, field, fresh_text)
             _append_method_tag(row, f"rule:remap_field_value:{field}")
             _audit_rule_application(
@@ -886,14 +895,35 @@ def _saved_region_supplier_matches_row(row: object, hint: RemapHint, row_norm: s
     return False
 
 def _should_replace_supplier_with_region(existing: object, hint_snapshot: object, region_text: object) -> bool:
-    """Final guard before overwriting an existing supplier with a saved-region read."""
-    if _supplier_name_needs_saved_region_confirmation(existing, hint_snapshot):
-        return True
+    """Final guard before overwriting an existing supplier with a saved-region read.
+
+    Supplier-name regions are allowed to *confirm or complete* the same supplier
+    (for example adding a legal suffix), but they must not change one valid
+    supplier into a different supplier simply because the row or OCR confidence is
+    low.  Page-independent replay increases the number of candidate regions, so
+    this final relationship check is deliberately stricter than other fields.
+    """
+    existing_text = str(existing or "").strip()
+    region_text = str(region_text or "").strip()
+    snapshot_text = str(hint_snapshot or "").strip()
+
+    if not existing_text or _is_suspect_field_value("supplier_name", existing_text):
+        return bool(region_text or snapshot_text)
     if not region_text:
         return False
-    return _supplier_snapshot_matches_current(existing, region_text) and (
-        _supplier_name_display_norm(existing) != _supplier_name_display_norm(region_text)
-    )
+
+    # A saved supplier region may only replace an existing supplier when the
+    # existing supplier already matches the saved snapshot or the freshly-read
+    # region text at supplier-name level.  This prevents wrong-supplier changes
+    # such as "Br Supply Co. Brannam Ltd" -> "rimex Ltd".
+    matches_snapshot = bool(snapshot_text and _supplier_snapshot_matches_current(existing_text, snapshot_text))
+    matches_region = _supplier_snapshot_matches_current(existing_text, region_text)
+    if not (matches_snapshot or matches_region):
+        return False
+
+    if _supplier_name_needs_saved_region_confirmation(existing_text, snapshot_text or region_text):
+        return True
+    return _supplier_name_display_norm(existing_text) != _supplier_name_display_norm(region_text)
 
 
 def _row_should_arbitrate_with_saved_regions(row: object) -> bool:
@@ -1159,6 +1189,32 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                     continue
 
                 existing = getattr(row, hint.field_name, None)
+
+                # Supplier-name is identity data.  Even when the row came from a
+                # low-confidence OCR/DI route, never replace one valid supplier
+                # with another unrelated supplier.  Saved supplier regions may
+                # only fill blanks, clean suspect values, or confirm/complete the
+                # same supplier relationship.
+                if hint.field_name == "supplier_name" and str(existing or "").strip():
+                    if not _should_replace_supplier_with_region(existing, hint.supplier_name_snapshot, text):
+                        if str(existing or "").strip().lower() == str(text or "").strip().lower():
+                            _audit_saved_region_action(
+                                db, batch, row, hint.field_name, existing, text, hint,
+                                "saved_region_checked",
+                                "Saved supplier region matched existing value; no change required",
+                            )
+                            target_fields.discard(hint.field_name)
+                        else:
+                            reason = f"saved_region_conflict:{hint.field_name}"
+                            _append_review_marker(row, hint.field_name, reason)
+                            _append_method_tag(row, f"remap_hint_conflict:{hint.field_name}")
+                            _audit_saved_region_action(
+                                db, batch, row, hint.field_name, existing, text, hint,
+                                "saved_region_conflict",
+                                "Saved supplier region did not match the existing supplier relationship; field left unchanged",
+                            )
+                        continue
+
                 strong_existing = _is_strong_existing_saved_region_value(
                     row, hint.field_name, existing, _review_fields, _low_confidence
                 )
