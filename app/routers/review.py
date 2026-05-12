@@ -1006,6 +1006,12 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         RemapHint.field_name == payload.field_name,
         RemapHint.page_no == payload.page_no,
     )
+    if batch.company_id:
+        hint_stmt = hint_stmt.where(
+            (RemapHint.company_id == batch.company_id) | (RemapHint.company_id.is_(None))
+        )
+    else:
+        hint_stmt = hint_stmt.where(RemapHint.company_id.is_(None))
     if supplier:
         hint_stmt = hint_stmt.where(RemapHint.supplier_id == supplier.id)
     else:
@@ -1023,6 +1029,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         existing_hint.source_batch_id = batch.id
         existing_hint.source_file_id  = payload.file_id or row.source_file_id
         existing_hint.source_row_id   = row.id
+        existing_hint.company_id      = batch.company_id
         if supplier:
             existing_hint.supplier_id = supplier.id
         if _snapshot_supplier_name:
@@ -1510,6 +1517,30 @@ def _user_default_tenant_id(db: Session, user) -> UUID:
     return ut.tenant_id
 
 
+def _active_tenant_id_for_user(db: Session, user, x_tenant_id: str | None = None) -> UUID:
+    """Resolve the tenant selected by the UI and verify user access."""
+    if getattr(user, "role", None) == "admin" and x_tenant_id:
+        try:
+            return UUID(x_tenant_id)
+        except ValueError:
+            raise HTTPException(400, "Invalid X-Tenant-Id header")
+    if x_tenant_id:
+        try:
+            selected = UUID(x_tenant_id)
+        except ValueError:
+            raise HTTPException(400, "Invalid X-Tenant-Id header")
+        link = db.execute(
+            select(M.UserTenant).where(
+                M.UserTenant.user_id == user.id,
+                M.UserTenant.tenant_id == selected,
+            ).limit(1)
+        ).scalar_one_or_none()
+        if not link and getattr(user, "role", None) != "admin":
+            raise HTTPException(403, "Forbidden for selected tenant")
+        return selected
+    return _user_default_tenant_id(db, user)
+
+
 @router.post("/batches/{batch_id}/rows/{row_id}/apply-saved-regions")
 def apply_saved_regions_to_row(
     batch_id: UUID,
@@ -1587,12 +1618,20 @@ def list_remap_hints(
     active: bool | None = Query(default=None),
     include_inactive: bool = Query(default=False),
     field_name: str | None = Query(default=None),
+    company_id: str | None = Query(default=None),
+    x_tenant_id: str | None = Header(default=None),
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
     """List saved remap regions for maintenance/de-duplication."""
-    tenant_id = _user_default_tenant_id(db, user)
+    tenant_id = _active_tenant_id_for_user(db, user, x_tenant_id)
     q = select(RemapHint).where(RemapHint.tenant_id == tenant_id)
+    if company_id:
+        try:
+            cid = UUID(company_id)
+        except ValueError:
+            raise HTTPException(400, "company_id is not a valid UUID")
+        q = q.where((RemapHint.company_id == cid) | (RemapHint.company_id.is_(None)))
     if not include_inactive:
         if active is None:
             active = True
@@ -1621,20 +1660,30 @@ def list_remap_hints(
             round(float(h.x or 0), 3), round(float(h.y or 0), 3),
             round(float(h.w or 0), 3), round(float(h.h or 0), 3),
         )
+        x = float(h.x) if h.x is not None else None
+        y = float(h.y) if h.y is not None else None
+        w = float(h.w) if h.w is not None else None
+        hh = float(h.h) if h.h is not None else None
         items.append({
             "id": h.id,
+            "tenant_id": str(h.tenant_id),
+            "company_id": str(h.company_id) if h.company_id else None,
             "field_name": h.field_name,
+            "supplier_id": h.supplier_id,
             "supplier_name_snapshot": h.supplier_name_snapshot,
             "page_no": h.page_no,
-            "x": float(h.x) if h.x is not None else None,
-            "y": float(h.y) if h.y is not None else None,
-            "w": float(h.w) if h.w is not None else None,
-            "h": float(h.h) if h.h is not None else None,
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": hh,
+            "coordinates": f"x={x:.3f}, y={y:.3f}, w={w:.3f}, h={hh:.3f}" if None not in (x, y, w, hh) else None,
             "active": h.active,
             "source_batch_id": str(h.source_batch_id) if h.source_batch_id else None,
             "source_file_id": h.source_file_id,
             "source_row_id": h.source_row_id,
             "created_at": h.created_at.isoformat() if h.created_at else None,
+            "last_used_at": None,
+            "last_result": None,
             "duplicate_count": keys.get(key, 1),
         })
     return {"items": items, "count": len(items)}
@@ -1643,10 +1692,11 @@ def list_remap_hints(
 @router.post("/remap-hints/{hint_id}/disable")
 def disable_remap_hint(
     hint_id: int,
+    x_tenant_id: str | None = Header(default=None),
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
-    tenant_id = _user_default_tenant_id(db, user)
+    tenant_id = _active_tenant_id_for_user(db, user, x_tenant_id)
     hint = db.get(RemapHint, hint_id)
     if not hint or hint.tenant_id != tenant_id:
         raise HTTPException(404, "Remap hint not found")
@@ -1658,10 +1708,11 @@ def disable_remap_hint(
 @router.post("/remap-hints/{hint_id}/enable")
 def enable_remap_hint(
     hint_id: int,
+    x_tenant_id: str | None = Header(default=None),
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
-    tenant_id = _user_default_tenant_id(db, user)
+    tenant_id = _active_tenant_id_for_user(db, user, x_tenant_id)
     hint = db.get(RemapHint, hint_id)
     if not hint or hint.tenant_id != tenant_id:
         raise HTTPException(404, "Remap hint not found")
@@ -1673,10 +1724,11 @@ def enable_remap_hint(
 @router.delete("/remap-hints/{hint_id}")
 def delete_remap_hint(
     hint_id: int,
+    x_tenant_id: str | None = Header(default=None),
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
-    tenant_id = _user_default_tenant_id(db, user)
+    tenant_id = _active_tenant_id_for_user(db, user, x_tenant_id)
     hint = db.get(RemapHint, hint_id)
     if not hint or hint.tenant_id != tenant_id:
         raise HTTPException(404, "Remap hint not found")

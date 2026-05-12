@@ -109,6 +109,137 @@ def _audit_rule_application(
     ))
 
 
+
+
+def _audit_saved_region_action(
+    db: Session,
+    batch: InvoiceBatch,
+    row: InvoiceRow,
+    field_name: str,
+    old_value: object,
+    new_value: object,
+    hint: RemapHint,
+    action: str,
+    note: str,
+) -> None:
+    """Record saved-region replay decisions in the review audit table.
+
+    Rows created during scanning can still be transient when saved regions run.
+    Flushing here keeps automatic saved-region activity visible without changing
+    the wider processing pipeline.
+    """
+    if row.id is None:
+        db.add(row)
+        db.flush()
+    db.add(InvoiceRowFieldAudit(
+        batch_id=batch.id,
+        row_id=row.id,
+        field_name=field_name,
+        old_value=str(old_value) if old_value is not None else None,
+        new_value=str(new_value) if new_value is not None else None,
+        action=action[:40],
+        note=(f"{note}; remap_hint_id={hint.id}; source=saved_region")[:1000],
+        rule_created=False,
+        user_id=None,
+        username="system",
+    ))
+
+
+def _append_review_marker(row: InvoiceRow, field_name: str, reason: str) -> None:
+    """Mark a row/field for review without duplicating markers."""
+    row.review_required = True
+    fields = [f.strip() for f in re.split(r"[|,]", row.review_fields or "") if f.strip()]
+    if field_name and field_name not in fields:
+        fields.append(field_name)
+    row.review_fields = "|".join(fields)[:500] if fields else row.review_fields
+    reasons = [r.strip() for r in re.split(r"[|]", row.review_reasons or "") if r.strip()]
+    if reason and reason not in reasons:
+        reasons.append(reason)
+    row.review_reasons = "|".join(reasons)[:500] if reasons else row.review_reasons
+
+
+def _parse_region_money(value: object) -> float | None:
+    """Conservative money parser for validating saved-region amount reads."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    cleaned = re.sub(r"[^0-9,\.\-]", "", text)
+    if not cleaned or cleaned in {"-", ".", ","}:
+        return None
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    else:
+        # If comma is the only separator and has 1-2 trailing digits, treat as decimal.
+        if "," in cleaned and re.search(r",\d{1,2}$", cleaned):
+            cleaned = cleaned.replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    try:
+        return float(cleaned)
+    except Exception:
+        return None
+
+
+def _normalise_saved_region_value(field_name: str, value: object) -> str:
+    """Normalise a saved-region read before field validation/application."""
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    if field_name in {"net_amount", "vat_amount", "total_amount"}:
+        money = _parse_region_money(text)
+        if money is None:
+            return ""
+        return f"{money:.2f}"
+    return text
+
+
+def _saved_region_value_is_valid(field_name: str, value: object) -> bool:
+    """Return True when a saved-region read matches the expected field type."""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if field_name in {"net_amount", "vat_amount", "total_amount"}:
+        return _parse_region_money(text) is not None
+    if field_name == "invoice_date":
+        # Accept common invoice date formats; detailed locale parsing remains in extractor.
+        return bool(re.search(r"\b\d{1,4}[\-/\.]\d{1,2}[\-/\.]\d{1,4}\b", text))
+    if field_name == "invoice_number":
+        if len(text) < 2 or len(text) > 60:
+            return False
+        if re.fullmatch(r"\d{1,2}[\-/\.]\d{1,2}[\-/\.]\d{2,4}", text):
+            return False
+        if re.search(r"\b(?:vat|tel|phone|mobile|email|total|subtotal)\b", text, re.I):
+            return False
+        return True
+    if field_name == "supplier_name":
+        if len(text) < 3:
+            return False
+        digits = sum(1 for c in text if c.isdigit())
+        if digits and digits / max(len(text), 1) > 0.4 and " " not in text:
+            return False
+        if re.search(r"\b(?:invoice|total|subtotal|vat no|vat number|page)\b", text, re.I):
+            return False
+        return True
+    if field_name == "nominal_account_code":
+        return len(text) <= 100
+    return len(text) <= 500
+
+
+def _is_strong_existing_saved_region_value(row: InvoiceRow, field_name: str, value: object, review_fields: set[str], low_confidence: bool) -> bool:
+    """Return True when an existing value should not be overwritten silently."""
+    if value is None or str(value).strip() == "":
+        return False
+    if field_name in review_fields:
+        return False
+    if _is_suspect_field_value(field_name, value):
+        return False
+    if low_confidence:
+        return False
+    return _saved_region_value_is_valid(field_name, value)
+
 def _normalize_rule_value(value: str | None) -> str:
     """Normalise a rule source_pattern or supplier name for comparison.
 
@@ -722,6 +853,14 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         RemapHint.page_no == row.page_no,
         RemapHint.x.isnot(None),
     )
+    # Keep saved-region candidates tenant-safe and company-aware.  Legacy hints
+    # may have company_id=NULL, so include those as tenant-wide fallbacks.
+    if batch.company_id:
+        hints_q = hints_q.filter(
+            (RemapHint.company_id == batch.company_id) | (RemapHint.company_id.is_(None))
+        )
+    else:
+        hints_q = hints_q.filter(RemapHint.company_id.is_(None))
     all_hints = hints_q.all()
     if not all_hints:
         return
@@ -832,6 +971,15 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 pdf_path, hint.page_no or row.page_no,
                 float(hint.x), float(hint.y), float(hint.w), float(hint.h),
             )
+            if not text and hint.field_name != "supplier_name":
+                _audit_saved_region_action(
+                    db, batch, row, hint.field_name,
+                    getattr(row, hint.field_name, None), None, hint,
+                    "saved_region_blank",
+                    "Saved region checked but crop/text-layer read was blank; field left unchanged",
+                )
+                continue
+
             if text or hint.field_name == "supplier_name":
                 if hint.field_name == "supplier_name":
                     try:
@@ -853,31 +1001,68 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                         if snap and _supplier_hint_candidate_matches_row(row, hint):
                             text = snap
                         else:
+                            _audit_saved_region_action(
+                                db, batch, row, hint.field_name,
+                                getattr(row, hint.field_name, None), None, hint,
+                                "saved_region_blank",
+                                "Saved supplier region was checked but no reliable text/snapshot matched; field left unchanged",
+                            )
                             continue
-                    _v = text.strip()
-                    _digits = sum(1 for c in _v if c.isdigit())
-                    _is_inv_like = (
-                        (len(_v) <= 15 and _digits > 0 and (_digits / max(len(_v), 1)) > 0.4 and " " not in _v)
-                        or (re.match(r"^[A-Z0-9\-\/]{2,15}$", _v, re.I) and " " not in _v)
+
+                text = _normalise_saved_region_value(hint.field_name, text)
+                if not _saved_region_value_is_valid(hint.field_name, text):
+                    _audit_saved_region_action(
+                        db, batch, row, hint.field_name,
+                        getattr(row, hint.field_name, None), text, hint,
+                        "saved_region_invalid",
+                        "Saved region read did not match expected field type; field left unchanged",
                     )
-                    if _is_inv_like:
-                        logger.debug("RemapHint: rejected invoice-like value %r for supplier_name supplier=%r", text[:40], row.supplier_name)
-                        continue
+                    logger.debug(
+                        "RemapHint: rejected invalid saved-region value %r for field=%s supplier=%r",
+                        str(text)[:40], hint.field_name, row.supplier_name,
+                    )
+                    continue
 
                 existing = getattr(row, hint.field_name, None)
-                if (
-                    existing and str(existing).strip()
-                    and hint.field_name not in _review_fields
-                    and not _is_suspect_field_value(hint.field_name, existing)
-                    and not _low_confidence
-                ):
+                strong_existing = _is_strong_existing_saved_region_value(
+                    row, hint.field_name, existing, _review_fields, _low_confidence
+                )
+                if strong_existing:
                     if hint.field_name == "supplier_name" and _should_replace_supplier_with_region(existing, hint.supplier_name_snapshot, text):
                         pass
+                    elif str(existing or "").strip() == str(text or "").strip():
+                        _audit_saved_region_action(
+                            db, batch, row, hint.field_name, existing, text, hint,
+                            "saved_region_checked",
+                            "Saved region matched existing strong value; no change required",
+                        )
+                        target_fields.discard(hint.field_name)
+                        continue
                     else:
-                        logger.debug("RemapHint: strong existing value %r for field=%s — skipping hint (hint_id=%d supplier=%r)", str(existing)[:40], hint.field_name, hint.id, row.supplier_name)
+                        reason = f"saved_region_conflict:{hint.field_name}"
+                        _append_review_marker(row, hint.field_name, reason)
+                        _append_method_tag(row, f"remap_hint_conflict:{hint.field_name}")
+                        _audit_saved_region_action(
+                            db, batch, row, hint.field_name, existing, text, hint,
+                            "saved_region_conflict",
+                            "Saved region conflicted with a strong existing value; review required and field left unchanged",
+                        )
+                        logger.debug(
+                            "RemapHint: conflict for field=%s existing=%r saved_region=%r hint_id=%d supplier=%r",
+                            hint.field_name, str(existing)[:40], str(text)[:40], hint.id, row.supplier_name,
+                        )
                         continue
 
                 old_val = getattr(row, hint.field_name, None)
+                if str(old_val or "").strip() == str(text or "").strip():
+                    _audit_saved_region_action(
+                        db, batch, row, hint.field_name, old_val, text, hint,
+                        "saved_region_checked",
+                        "Saved region matched current value; no change required",
+                    )
+                    target_fields.discard(hint.field_name)
+                    continue
+
                 setattr(row, hint.field_name, text)
                 if hint.field_name == "supplier_name" and text:
                     # Keep the maintenance table useful: once a saved region reads
@@ -889,15 +1074,17 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                             hint.supplier_name_snapshot = text
                     except Exception:
                         pass
-                current_method = (getattr(row, 'method_used', '') or '')
-                tag = f'remap_hint:{hint.field_name}'
-                if tag not in current_method:
-                    row.method_used = (current_method + '+' + tag).strip('+')
+                _append_method_tag(row, f"remap_hint:{hint.field_name}")
+                _audit_saved_region_action(
+                    db, batch, row, hint.field_name, old_val, text, hint,
+                    "saved_region_apply",
+                    "Applied saved region during scan; confidence=medium; reason=blank_or_low_confidence_or_review_field",
+                )
                 target_fields.discard(hint.field_name)
                 logger.debug(
                     "RemapHint applied: supplier=%r field=%s %r→%r (hint_id=%d source=remap_hint)",
                     row.supplier_name, hint.field_name,
-                    str(old_val)[:30] if old_val else None, text[:40], hint.id,
+                    str(old_val)[:30] if old_val else None, str(text)[:40], hint.id,
                 )
         except Exception as exc:
             logger.debug("RemapHint apply failed for field %s: %s", hint.field_name, exc)

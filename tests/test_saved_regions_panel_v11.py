@@ -37,3 +37,23 @@ def test_manage_saved_regions_loads_all_regions_and_supports_enable_disable_dele
     assert 'include_inactive: bool = Query(default=False)' in review
     assert 'if not include_inactive' in review
     assert '@router.post("/remap-hints/{hint_id}/enable")' in review
+
+
+def test_saved_region_maintenance_api_returns_coordinates_and_source_metadata():
+    review = _read("app/routers/review.py")
+    js = _read("app/static/js/review.js")
+    assert '"coordinates"' in review
+    assert '"source_batch_id"' in review
+    assert '"source_row_id"' in review
+    assert '"company_id"' in review
+    assert "h.coordinates" in js
+    assert "h.source_row_id" in js
+    assert "h.source_batch_id" in js
+
+
+def test_saved_region_maintenance_respects_active_tenant_header():
+    review = _read("app/routers/review.py")
+    assert "def _active_tenant_id_for_user" in review
+    assert "x_tenant_id: str | None = Header(default=None)" in review
+    fn = review[review.find("def list_remap_hints"):review.find("def disable_remap_hint")]
+    assert "_active_tenant_id_for_user(db, user, x_tenant_id)" in fn

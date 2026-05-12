@@ -792,6 +792,8 @@ async function loadSavedRegions() {
           <span class="pill ${h.active ? '' : 'warning'}">${h.active ? 'active' : 'disabled'}</span>
           ${h.duplicate_count > 1 ? `<span class="pill warning">dup ${h.duplicate_count}</span>` : ""}
           <br><span class="muted">${esc((h.supplier_name_snapshot || 'no supplier snapshot').slice(0, 52))}</span>
+          <br><span class="muted">${esc(h.coordinates || '')}${h.source_row_id ? ` · row ${esc(h.source_row_id)}` : ''}${h.source_batch_id ? ` · batch ${esc(String(h.source_batch_id).slice(0, 8))}` : ''}</span>
+          ${h.last_used_at ? `<br><span class="muted">last used ${esc(h.last_used_at)}${h.last_result ? ` · ${esc(h.last_result)}` : ''}</span>` : ''}
         </span>
         <span class="row gap-sm">
           ${h.active
