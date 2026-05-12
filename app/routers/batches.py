@@ -31,6 +31,7 @@ from app.services.exporter import workbook_from_rows
 from app.services.corrected_exporter import export_batch_corrected
 # <<< REVIEW_PACK corrected_export_import
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
+from app.services.invoice_arbitration import arbitrate_invoice_row
 from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
 from app.services.template_render_service import render_template_sheet, resolve_effective_template
 from app.utils.storage import batch_upload_folder, batch_export_folder, resolve_upload_path
@@ -2548,6 +2549,10 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                     supplier_vat=supplier_vat,
                                 )
                             _apply_saved_rules(db, batch, row)
+                            # Deterministic post-extraction arbitration: compare raw extraction,
+                            # rules, saved-region activity, supplier history/master data and
+                            # totals evidence before final review/BCRS decisions.
+                            arbitrate_invoice_row(db, batch, row, r, context={"scan_mode": batch.scan_mode or "summary"})
                             db.add(row)
                             inserted_rows += 1
                             total_rows += 1
