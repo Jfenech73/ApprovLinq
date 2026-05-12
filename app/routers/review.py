@@ -30,6 +30,165 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/review", tags=["review"])
 
 
+EXPLAINABLE_ACTION_SOURCES = {
+    "rule_apply": "correction_rule",
+    "saved_region_apply": "saved_region",
+    "saved_region_checked": "saved_region",
+    "saved_region_conflict": "saved_region",
+    "saved_region_invalid": "saved_region",
+    "saved_region_blank": "saved_region",
+    "arbitration_apply": "arbitration",
+    "arbitration_conflict": "arbitration",
+    "arbitration_suggest": "arbitration",
+    "bcrs_split_source": "bcrs",
+}
+
+SOURCE_LABELS = {
+    "raw_extraction": "Raw extraction",
+    "correction_rule": "Correction rule",
+    "saved_region": "Saved region",
+    "supplier_history": "Supplier history",
+    "accepted_correction": "Accepted correction",
+    "supplier_master": "Supplier master",
+    "nominal_master": "Nominal master",
+    "totals_reconciliation": "Totals reconciliation",
+    "arbitration": "Arbitration",
+    "bcrs": "BCRS split",
+    "manual": "Manual correction",
+}
+
+def _split_tokens(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [p.strip() for p in re.split(r"[|,+]", value or "") if p.strip()]
+
+def _source_from_action(action: str | None, note: str | None = None) -> str:
+    a = (action or "").lower()
+    n = (note or "").lower()
+    if "saved_region" in a or "remap" in a or "saved region" in n or "remap_hint" in n:
+        return "saved_region"
+    if "rule" in a or "rule_id" in n:
+        return "correction_rule"
+    if "history" in a or "previous accepted" in n:
+        return "supplier_history"
+    if "total" in a or "totals" in n or "reconciliation" in a:
+        return "totals_reconciliation"
+    if "bcrs" in a or "deposit" in n:
+        return "bcrs"
+    if "manual" in a or "correction" in a:
+        return "manual"
+    if "arbitration" in a:
+        return "arbitration"
+    return EXPLAINABLE_ACTION_SOURCES.get(a, "raw_extraction")
+
+def _human_reason(text: str | None) -> str:
+    if not text:
+        return ""
+    return re.sub(r"[_]+", " ", str(text)).strip()
+
+def _build_row_explainability(row: M.InvoiceRow, correction: InvoiceRowCorrection | None, audits: list[InvoiceRowFieldAudit], current_values: dict[str, Any]) -> dict[str, Any]:
+    """Return safe, compact explainability for review UI.
+
+    This does not try to recalculate arbitration. It explains the evidence already
+    recorded by extraction, rules, saved-region replay, totals checks and audit
+    entries.
+    """
+    review_reasons = _split_tokens(row.review_reasons)
+    review_fields = _split_tokens(row.review_fields)
+    method_tags = _split_tokens(row.method_used)
+    field_map: dict[str, dict[str, Any]] = {}
+    audits_by_field: dict[str, list[InvoiceRowFieldAudit]] = {}
+    for a in audits:
+        audits_by_field.setdefault(a.field_name or "_row", []).append(a)
+
+    for field in (
+        "supplier_name", "supplier_posting_account", "nominal_account_code",
+        "invoice_number", "invoice_date", "description",
+        "net_amount", "vat_amount", "total_amount", "currency", "tax_code",
+    ):
+        original = getattr(row, field, None)
+        selected = current_values.get(field)
+        fa = audits_by_field.get(field, [])
+        latest = fa[0] if fa else None
+        source = "manual" if correction and getattr(correction, field, None) is not None else "raw_extraction"
+        reason = "Raw extracted value retained."
+        confidence = float(row.confidence_score) if row.confidence_score is not None else None
+        candidates = []
+        if original not in (None, ""):
+            candidates.append({
+                "source": "raw_extraction",
+                "label": SOURCE_LABELS["raw_extraction"],
+                "value": str(original),
+                "confidence": confidence,
+                "reason": "Original value from extraction pipeline.",
+                "applied": str(original) == str(selected),
+            })
+        for a in reversed(fa[-8:]):
+            src = _source_from_action(a.action, a.note)
+            candidates.append({
+                "source": src,
+                "label": SOURCE_LABELS.get(src, src.replace("_", " ").title()),
+                "value": a.new_value,
+                "old_value": a.old_value,
+                "confidence": _extract_confidence(a.note),
+                "reason": a.note or _human_reason(a.action),
+                "action": a.action,
+                "applied": a.action in {"arbitration_apply", "rule_apply", "saved_region_apply", "bcrs_split_source"},
+                "at": a.created_at.isoformat() if a.created_at else None,
+            })
+        if latest:
+            source = _source_from_action(latest.action, latest.note)
+            reason = latest.note or _human_reason(latest.action)
+        field_reason_bits = []
+        for rr in review_reasons:
+            if rr.endswith(f":{field}") or rr == field or field in rr:
+                field_reason_bits.append(_human_reason(rr))
+        if field in review_fields and not field_reason_bits:
+            field_reason_bits.append("Field flagged for review.")
+        field_map[field] = {
+            "field": field,
+            "selected_value": None if selected is None else str(selected),
+            "original_value": None if original is None else str(original),
+            "selected_source": source,
+            "selected_source_label": SOURCE_LABELS.get(source, source.replace("_", " ").title()),
+            "confidence": confidence,
+            "reason": reason,
+            "review_required": field in review_fields,
+            "review_reasons": field_reason_bits,
+            "candidates": candidates,
+        }
+    row_level = {
+        "confidence_score": float(row.confidence_score) if row.confidence_score is not None else None,
+        "review_required": bool(row.review_required),
+        "review_fields": review_fields,
+        "review_reasons": [_human_reason(r) for r in review_reasons],
+        "method_used": row.method_used or "",
+        "method_tags": method_tags,
+        "totals_reconciliation_status": getattr(row, "totals_reconciliation_status", None),
+        "bcrs_or_discount": _detect_bcrs_discount_status(row, audits, review_reasons),
+    }
+    return {"row": row_level, "fields": field_map}
+
+def _extract_confidence(note: str | None) -> float | None:
+    if not note:
+        return None
+    m = re.search(r"confidence\s*=\s*([0-9]+(?:\.[0-9]+)?)", note, re.I)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except Exception:
+        return None
+
+def _detect_bcrs_discount_status(row: M.InvoiceRow, audits: list[InvoiceRowFieldAudit], reasons: list[str]) -> dict[str, Any]:
+    text = " ".join([row.review_reasons or "", row.method_used or "", row.description or ""] + [a.note or "" for a in audits]).lower()
+    return {
+        "bcrs_detected": "bcrs" in text or "deposit" in text,
+        "discount_detected": "discount" in text or "rebate" in text,
+        "details": [r for r in reasons if "bcrs" in r.lower() or "deposit" in r.lower() or "discount" in r.lower()],
+    }
+
+
 def current_user_flexible(
     token: str | None = Query(default=None),
     authorization: str | None = Header(default=None),
@@ -110,6 +269,16 @@ def get_review_workspace(batch_id: UUID, db: Session = Depends(get_db), user=Dep
     rows = db.execute(select(M.InvoiceRow).where(M.InvoiceRow.batch_id == batch_id)
                       .order_by(M.InvoiceRow.source_file_id, M.InvoiceRow.page_no, M.InvoiceRow.id)).scalars().all()
     cmap = cs.load_correction_map(db, batch_id)
+    row_audits: dict[int, list[InvoiceRowFieldAudit]] = {}
+    row_ids = [r.id for r in rows]
+    if row_ids:
+        all_audits = db.execute(
+            select(InvoiceRowFieldAudit)
+            .where(InvoiceRowFieldAudit.batch_id == batch_id, InvoiceRowFieldAudit.row_id.in_(row_ids))
+            .order_by(desc(InvoiceRowFieldAudit.created_at))
+        ).scalars().all()
+        for a in all_audits:
+            row_audits.setdefault(a.row_id, []).append(a)
     out_rows = []
     corrected = 0
     flagged = 0
@@ -124,6 +293,7 @@ def get_review_workspace(batch_id: UUID, db: Session = Depends(get_db), user=Dep
             corrected += 1
         if r.review_required:
             flagged += 1
+        explanation = _build_row_explainability(r, c, row_audits.get(r.id, []), eff)
         out_rows.append({
             "id": r.id,
             "source_filename": r.source_filename,
@@ -132,14 +302,17 @@ def get_review_workspace(batch_id: UUID, db: Session = Depends(get_db), user=Dep
             "confidence_score": float(r.confidence_score) if r.confidence_score is not None else None,
             "review_required": r.review_required,
             "review_priority": r.review_priority,
-            "review_fields": (r.review_fields or "").split(",") if r.review_fields else [],
-            "review_reasons": (r.review_reasons or "").split("|") if r.review_reasons else [],
+            "review_fields": _split_tokens(r.review_fields),
+            "review_reasons": _split_tokens(r.review_reasons),
             "method_used": r.method_used or "",
+            "totals_reconciliation_status": getattr(r, "totals_reconciliation_status", None),
             "row_reviewed": bool(c.row_reviewed) if c else False,
             "reviewed_fields": (c.reviewed_fields or "").split(",") if c and c.reviewed_fields else [],
             "is_corrected": was_corrected,
             "original": {f: getattr(r, f) for f in eff},
             "current": eff,
+            "explainability": explanation,
+            "field_evidence": explanation.get("fields", {}),
         })
     return {
         "batch": {
@@ -420,7 +593,11 @@ def row_audit(batch_id: UUID, row_id: int, db: Session = Depends(get_db), user=D
     ).scalars().all()
     return [{
         "id": a.id, "field": a.field_name, "old": a.old_value, "new": a.new_value,
-        "action": a.action, "note": a.note, "rule_created": a.rule_created,
+        "action": a.action, "note": a.note, "source": _source_from_action(a.action, a.note),
+        "source_label": SOURCE_LABELS.get(_source_from_action(a.action, a.note), _source_from_action(a.action, a.note).replace("_", " ").title()),
+        "confidence": _extract_confidence(a.note),
+        "explanation": a.note or _human_reason(a.action),
+        "rule_created": a.rule_created,
         "force_added": a.force_added, "user_id": str(a.user_id) if a.user_id else None,
         "username": a.username, "at": a.created_at.isoformat(),
     } for a in audits]

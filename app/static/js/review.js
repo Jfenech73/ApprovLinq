@@ -34,6 +34,65 @@ function msg(text, kind) {
   }
 }
 
+
+function sourceBadge(source, label) {
+  const src = String(source || "raw_extraction").replace(/[^a-z0-9_-]/gi, "_");
+  return `<span class="evidence-badge evidence-${esc(src)}">${esc(label || source || "Raw extraction")}</span>`;
+}
+
+function pct(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? `${Math.round(n * 100)}%` : "";
+}
+
+function compactReason(text, maxLen = 180) {
+  const t = String(text || "").replace(/_/g, " ").replace(/\s+/g, " ").trim();
+  return t.length > maxLen ? t.slice(0, maxLen - 1) + "…" : t;
+}
+
+function renderRowExplainability(r) {
+  const ex = r.explainability || {};
+  const row = ex.row || {};
+  const reasons = row.review_reasons || r.review_reasons || [];
+  const tags = row.method_tags || (r.method_used || "").split(/[+|,]/).filter(Boolean);
+  const totals = row.totals_reconciliation_status || r.totals_reconciliation_status || "";
+  const bcrs = row.bcrs_or_discount || {};
+  const parts = [];
+  parts.push(`<div><strong>Confidence:</strong> ${r.confidence_score != null ? esc(pct(r.confidence_score)) : "—"}</div>`);
+  parts.push(`<div><strong>Review:</strong> ${r.review_required ? "Required" : "Not required"}</div>`);
+  if (totals) parts.push(`<div><strong>Totals:</strong> ${esc(totals)}</div>`);
+  if (bcrs.bcrs_detected || bcrs.discount_detected) {
+    parts.push(`<div><strong>BCRS/Discount:</strong> ${bcrs.bcrs_detected ? "BCRS/deposit evidence" : ""}${bcrs.bcrs_detected && bcrs.discount_detected ? " · " : ""}${bcrs.discount_detected ? "discount evidence" : ""}</div>`);
+  }
+  if (r.method_used) parts.push(`<div><strong>Method:</strong> <code>${esc(r.method_used)}</code></div>`);
+  if (reasons.length) parts.push(`<div class="review-explain-reasons"><strong>Why review:</strong> ${reasons.map(x => esc(compactReason(x))).join(" · ")}</div>`);
+  if (tags.length) {
+    const tagHtml = tags.slice(0, 12).map(t => `<span class="evidence-tag">${esc(t)}</span>`).join(" ");
+    parts.push(`<div class="evidence-tags"><strong>Evidence tags:</strong> ${tagHtml}</div>`);
+  }
+  return `<div class="review-explain-card">${parts.join("")}</div>`;
+}
+
+function renderFieldEvidence(r, field) {
+  const fieldMap = r.field_evidence || (r.explainability && r.explainability.fields) || {};
+  const ev = fieldMap[field];
+  if (!ev) return "";
+  const source = sourceBadge(ev.selected_source, ev.selected_source_label);
+  const reason = compactReason(ev.reason || (ev.review_reasons || []).join(" · "));
+  const candidates = Array.isArray(ev.candidates) ? ev.candidates : [];
+  const candHtml = candidates.length ? candidates.slice(-4).map(c => {
+    const conf = c.confidence != null ? ` <span class="muted">${esc(pct(c.confidence))}</span>` : "";
+    const applied = c.applied ? " selected" : "";
+    return `<div class="field-candidate${applied}">${sourceBadge(c.source, c.label)} <span>${esc(c.value ?? "—")}</span>${conf}<div class="muted">${esc(compactReason(c.reason, 120))}</div></div>`;
+  }).join("") : "";
+  const reviewReason = (ev.review_reasons || []).length ? `<div class="field-reason">⚠ ${ev.review_reasons.map(x => esc(compactReason(x))).join(" · ")}</div>` : "";
+  return `<details class="field-evidence" ${ev.review_required ? "open" : ""}>
+    <summary>${source} ${ev.confidence != null ? `<span class="muted">${esc(pct(ev.confidence))}</span>` : ""} ${reason ? `<span class="muted">— ${esc(reason)}</span>` : ""}</summary>
+    ${reviewReason}
+    ${candHtml || '<div class="muted">No extra candidate evidence recorded for this field.</div>'}
+  </details>`;
+}
+
 async function load() {
   if (!batchId) { msg("Missing batch_id in URL", "error"); return; }
   // Clear any stale non-error banner when refreshing data
@@ -155,7 +214,28 @@ function render() {
   updateRemapUI();
 }
 
+
+function ensureExplainabilityStyles() {
+  if (document.getElementById("reviewExplainabilityStyles")) return;
+  const st = document.createElement("style");
+  st.id = "reviewExplainabilityStyles";
+  st.textContent = `
+    .review-explain-card{border:1px solid var(--ap-border,#d7e0ea);background:var(--ap-surface,#fff);border-radius:10px;padding:10px;margin-bottom:10px;font-size:12px;line-height:1.45}
+    .review-explain-reasons{color:var(--ap-warning-text,#7a4b00)}
+    .evidence-badge{display:inline-block;border:1px solid var(--ap-border,#d7e0ea);border-radius:999px;padding:1px 6px;font-size:11px;background:var(--ap-surface-muted,#f5f7fa);margin-right:4px}
+    .evidence-tag{display:inline-block;border-radius:999px;padding:1px 6px;font-size:11px;background:var(--ap-surface-muted,#eef3f8);margin:2px 2px 0 0}
+    .field-evidence{grid-column:1 / -1;margin:-4px 0 6px 0;padding:6px 8px;border-left:3px solid var(--ap-border,#d7e0ea);background:rgba(90,120,160,.06);border-radius:6px;font-size:12px}
+    .field-evidence summary{cursor:pointer;list-style:none}
+    .field-candidate{margin-top:6px;padding:5px 6px;border-radius:6px;background:rgba(255,255,255,.65);border:1px solid rgba(140,160,180,.25)}
+    .field-candidate.selected{border-color:var(--ap-accent,#315a8c);background:rgba(49,90,140,.08)}
+    .audit-source{font-size:11px;margin-left:4px}
+    code{white-space:normal}
+  `;
+  document.head.appendChild(st);
+}
+
 function renderEditor() {
+  ensureExplainabilityStyles();
   const r = state.rows.find(x => x.id === state.selected);
   const ed = $("rowEditor");
   if (!r) { ed.innerHTML = '<div class="muted">Select a row from the left.</div>'; return; }
@@ -201,6 +281,7 @@ function renderEditor() {
   if (r.review_required && globalReasons.length) {
     header += `<div class="review-reasons-banner">&#9888; ${globalReasons.map(esc).join(" &middot; ")}</div>`;
   }
+  header += renderRowExplainability(r);
 
   // ── Field grid ────────────────────────────────────────────────────────────
   let html = '<div class="field-grid">';
@@ -269,13 +350,17 @@ async function loadAudit(rowId) {
   try {
     const r = await fetch(`/review/batches/${batchId}/rows/${rowId}/audit`, { headers: hdrs() });
     const list = await r.json();
-    $("auditList").innerHTML = list.map(a =>
-      `<div class="audit-entry">
-        <strong>${esc(a.field)}</strong> ${esc(a.action)}: ${esc(a.old) || "∅"} → ${esc(a.new) || "∅"}
-        <span class="muted">(${esc(a.username) || "?"})</span>
+    $("auditList").innerHTML = list.map(a => {
+      const conf = a.confidence != null ? ` · ${esc(pct(a.confidence))}` : "";
+      const note = a.explanation || a.note || "";
+      return `<div class="audit-entry">
+        <strong>${esc(a.field)}</strong> ${sourceBadge(a.source, a.source_label)} ${esc(a.action)}: ${esc(a.old) || "∅"} → ${esc(a.new) || "∅"}
+        <span class="muted">(${esc(a.username) || "?"}${conf})</span>
         ${a.rule_created ? '<span class="badge rule">+rule</span>' : ""}
         ${a.force_added ? '<span class="badge force">+force</span>' : ""}
-      </div>`).join("") || '<div class="muted">No history yet.</div>';
+        ${note ? `<div class="muted">${esc(compactReason(note, 220))}</div>` : ""}
+      </div>`;
+    }).join("") || '<div class="muted">No history yet.</div>';
   } catch (e) { /* ignore */ }
 }
 
