@@ -599,7 +599,7 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             # Do not pick the newest tenant-level hint blindly, because that can
             # belong to another supplier and make this supplier's region appear
             # broken.
-            from sqlalchemy import or_, select as _sel2
+            from sqlalchemy import select as _sel2
             hint_stmt = _sel2(RemapHint).where(
                 RemapHint.tenant_id == batch.tenant_id,
                 RemapHint.field_name == field,
