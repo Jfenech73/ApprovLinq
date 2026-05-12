@@ -8,29 +8,33 @@ def _src() -> str:
     return EXTRACTOR.read_text(encoding="utf-8")
 
 
-def test_native_text_is_scored_by_invoice_signals_not_length_only():
+def test_native_text_is_not_primary_extraction_route():
     src = _src()
-    assert "def _invoice_text_signal_score" in src
-    assert "def _native_text_looks_usable" in src
-    assert "count_meaningful_chars(text or \"\") >= 80" in src
-    assert "_invoice_text_signal_score(text) >= 3" in src
+    assert "Native PDF text is intentionally NOT used as the primary extraction text" in src
+    assert "method = \"ocr_primary\"" in src
+    assert "method = \"native_text\"" not in src
 
 
-def test_weak_native_text_triggers_ocr_before_extraction():
+def test_ocr_is_attempted_before_simple_extract_baseline():
     src = _src()
-    assert "native_text_rejected" in src
-    assert "_get_fallback_ocr_text(pdf_path, page_index, native_text)" in src
-    assert "not _native_text_looks_usable(native_text)" in src
+    ocr_pos = src.index("ocr_text, ocr_method = _get_fallback_ocr_text(pdf_path, page_index, native_text)")
+    simple_pos = src.index("extracted = simple_extract(", ocr_pos)
+    assert ocr_pos < simple_pos
 
 
-def test_blank_or_weak_native_result_gets_second_chance_ocr():
+def test_native_text_is_not_used_as_text_only_ai_fallback():
     src = _src()
-    assert "native_text_weak_result" in src
-    assert "not _extraction_has_minimum_invoice_fields(extracted)" in src
-    assert "ocr_extracted = simple_extract" in src
+    assert '_text_for_ai = final_text if count_meaningful_chars(final_text) >= 20 else ""' in src
+    assert "else native_text" not in src
 
 
-def test_vision_and_validation_receive_best_available_text():
+def test_validation_receives_final_text_not_native_text_fallback():
     src = _src()
-    assert "openai_extract_invoice_vision(\n                jpeg_b64,\n                final_text," in src
-    assert "openai_validate_extraction(\n                final_text or native_text," in src
+    assert "openai_validate_extraction(\n                final_text,\n                extracted," in src
+    assert "final_text or native_text" not in src
+
+
+def test_ocr_unavailable_drives_image_based_fallbacks_not_native_extraction():
+    src = _src()
+    assert "ocr_unavailable_native_text_ignored" in src
+    assert "Do not fall back to native text for field extraction" in src

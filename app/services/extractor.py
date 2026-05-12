@@ -2924,36 +2924,26 @@ def process_pdf_page(
     # ─────────────────────────────────────────────────────────────────────────
     logger.debug("Stage 1: acquiring page %d from %s", page_index, pdf_path.name)
 
+    # Native PDF text is intentionally NOT used as the primary extraction text.
+    # In production testing it was too often a misleading/partial text layer,
+    # especially on multi-page supplier PDFs.  Keep it only as auxiliary context
+    # for diagnostics or provider fallbacks; the stable route is OCR first, then
+    # image-based DI/vision, then text-only AI only when OCR produced usable text.
     native_text = extract_native_pdf_page(pdf_path, page_index)
-    method = "native_text"
+    method = "ocr_primary"
     page_quality_score: float = 0.5  # default until we render the image
 
     use_vision = bool(settings.use_openai and openai_api_key)
-    final_text = native_text
-    native_text_score = _invoice_text_signal_score(native_text)
-
-    # Native PDF text is fast, but some PDFs expose a misleading text layer that
-    # contains enough characters to pass a raw length check while still being
-    # useless for invoice extraction.  Treat native text as a candidate, not a
-    # final source: if it lacks invoice signals, immediately try OCR so scanned
-    # or hybrid PDFs do not return blank rows labelled as "native_text".
-    if not _native_text_looks_usable(native_text):
-        ocr_text, ocr_method = _get_fallback_ocr_text(pdf_path, page_index, native_text)
-        if ocr_text and (
-            _invoice_text_signal_score(ocr_text) > native_text_score
-            or count_meaningful_chars(ocr_text) > count_meaningful_chars(native_text)
-        ):
-            final_text = ocr_text
-            method = f"{ocr_method}+native_text_rejected"
-        elif count_meaningful_chars(native_text) < 20:
-            # Keep the text explicitly unavailable so downstream review reasons
-            # are clear and AI/DI/image fallbacks are preferred where configured.
-            final_text = "(page text unavailable)"
-            method = "native_text_empty"
-
-    if count_meaningful_chars(final_text) == 0:
-        final_text = "(page text unavailable)"
-        method = f"{method}_empty"
+    final_text = "(page text unavailable)"
+    ocr_text, ocr_method = _get_fallback_ocr_text(pdf_path, page_index, native_text)
+    if ocr_text and count_meaningful_chars(ocr_text) >= 10:
+        final_text = ocr_text
+        method = ocr_method or "ocr_primary"
+    else:
+        # Do not fall back to native text for field extraction.  A blank OCR read
+        # should drive the pipeline to image-based Azure DI/OpenAI vision rather
+        # than producing empty rows labelled as native text.
+        method = "ocr_unavailable_native_text_ignored"
 
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 2 — Field extraction
@@ -2967,26 +2957,9 @@ def process_pdf_page(
         account_company_name=account_company_name,
     )
 
-    # Second-chance OCR gate: if native text looked invoice-like enough to try
-    # first but the deterministic extractor still found almost nothing, do not
-    # keep a blank/weak native result.  Re-read with OCR and use it when it gives
-    # a stronger invoice extraction.  This directly protects multi-page PDFs
-    # with poor or partial text layers.
-    if method == "native_text" and not _extraction_has_minimum_invoice_fields(extracted):
-        ocr_text, ocr_method = _get_fallback_ocr_text(pdf_path, page_index, native_text)
-        if ocr_text and _invoice_text_signal_score(ocr_text) >= max(2, native_text_score):
-            try:
-                ocr_extracted = simple_extract(
-                    ocr_text,
-                    openai_api_key=openai_api_key,
-                    account_company_name=account_company_name,
-                )
-                if _extraction_has_minimum_invoice_fields(ocr_extracted):
-                    final_text = ocr_text
-                    extracted = ocr_extracted
-                    method = f"{ocr_method}+native_text_weak_result"
-            except Exception as _ocr_rec_exc:
-                logger.debug("OCR second-pass extraction failed p%d: %s", page_index, _ocr_rec_exc)
+    # Native text fallback has been deliberately removed. If OCR did not produce
+    # enough field evidence, continue to image-based Azure DI/OpenAI vision below
+    # instead of retrying or accepting the PDF text layer.
 
     _di_ok, _di_reason = azure_di_available()
     use_azure_di = _di_ok
@@ -3068,7 +3041,7 @@ def process_pdf_page(
         # 2d — Text-only AI (second fallback when image unavailable)
         if ai_fields is None and use_vision:
             logger.info("Image unavailable p%d — text-only AI fallback", page_index)
-            _text_for_ai = final_text if count_meaningful_chars(final_text) >= 20 else native_text
+            _text_for_ai = final_text if count_meaningful_chars(final_text) >= 20 else ""
             if count_meaningful_chars(_text_for_ai) >= 20:
                 ai_fields = openai_extract_invoice_fields(
                     _text_for_ai, openai_api_key,
@@ -3082,7 +3055,7 @@ def process_pdf_page(
         # 2e — OpenAI validation pass (cross-checks the merged result)
         if use_vision and openai_api_key:
             validation_result = openai_validate_extraction(
-                final_text or native_text,
+                final_text,
                 extracted,
                 openai_api_key,
                 model=settings.openai_model,
