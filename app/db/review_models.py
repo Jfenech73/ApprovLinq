@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, date
 from sqlalchemy import (
-    Boolean, DateTime, Date, ForeignKey, Integer, BigInteger, Numeric, String, Text, LargeBinary,
+    Boolean, DateTime, Date, ForeignKey, Integer, BigInteger, Numeric, String, Text, LargeBinary, Index,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.models import Base, InvoiceBatch  # noqa: F401
@@ -61,6 +61,43 @@ class InvoiceRowFieldAudit(Base):
     force_added: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     username: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class InvoiceFieldCandidate(Base):
+    """Persistent field-candidate evidence for future ML/ranking.
+
+    Phase 8A only creates the table.  Candidates are not written yet; later
+    phases will persist arbitration candidates and user outcome labels.
+    """
+    __tablename__ = "invoice_field_candidates"
+    __table_args__ = (
+        Index("ix_field_candidates_tenant_company", "tenant_id", "company_id"),
+        Index("ix_field_candidates_batch_row", "batch_id", "row_id"),
+        Index("ix_field_candidates_field_name", "field_name"),
+        Index("ix_field_candidates_source_type", "source_type"),
+        Index("ix_field_candidates_selected", "selected"),
+        Index("ix_field_candidates_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    company_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
+    batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
+    row_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("invoice_rows.id", ondelete="CASCADE"), nullable=False)
+    source_file_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("invoice_files.id", ondelete="SET NULL"), nullable=True)
+    field_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    candidate_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    normalised_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    source_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True)
+    evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    applied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    rejected_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    conflict: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
