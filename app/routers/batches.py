@@ -1542,7 +1542,7 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     # Accepted BCRS/deposit labels only.  "surcharge" alone is intentionally
     # excluded — it is too generic and fires on delivery/fuel surcharges.
     label_re = re.compile(
-        r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit|deposit\s+summary|deposits?|returnables?|surcharge)\b",
+        r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit|deposit\s+summary|deposits?|returnables?)\b",
         re.I,
     )
     # Rejected contexts: any line whose primary identity is a VAT/tax field.
@@ -1601,8 +1601,7 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
         re.compile(r"(?is)\bdeposit\s+summary(?:\s*\([^\n)]{1,12}\))?\b[^\d\n€-]{0,40}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
         re.compile(r"(?is)\bdeposits?\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
         re.compile(r"(?is)\breturnables?\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
-        re.compile(r"(?is)\bsurcharge\b[^\d\n€-]{0,24}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
-    ]
+            ]
     for pidx, pattern in enumerate(patterns):
         for match in pattern.finditer(summary_text):
             # Identify which collected line this match falls on
@@ -1765,8 +1764,6 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
                         score += 5
                     if 'deposit' in low:
                         score += 6
-                    if 'surcharge' in low:
-                        score += 5
                     if _is_summary_context(line):
                         score += 4
                     if total_amount is not None and net_amount is not None and vat_amount is not None:
@@ -1830,7 +1827,7 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     )
     _DEPOSIT_LABEL_RE = re.compile(
         r'\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit'
-        r'|deposit\s+summary|returnables?|deposits?|deposit|surcharge)\b',
+        r'|deposit\s+summary|returnables?|deposits?|deposit)\b',
         re.I,
     )
     has_label_line = False
@@ -1890,9 +1887,9 @@ def _decide_bcrs_split(db: Session, batch: InvoiceBatch, row: InvoiceRow, payloa
                 score += 5
         except Exception:
             pass
-    if re.search(r"\b(bcrs|refundable\s+deposit|deposit\s+summary|returnables?|deposits?|surcharge)\b", totals_text, re.I):
+    if re.search(r"\b(bcrs|refundable\s+deposit|deposit\s+summary|returnables?|deposits?)\b", totals_text, re.I):
         score += 8
-    if re.search(r"\b(bcrs|deposit|returnable|surcharge)\b", lines_text, re.I):
+    if re.search(r"\b(bcrs|deposit|returnable)\b", lines_text, re.I):
         score += 3
     try:
         inv_net = payload.get("source_invoice_net_amount", payload.get("net_amount"))
@@ -1918,7 +1915,7 @@ def _decide_bcrs_split(db: Session, batch: InvoiceBatch, row: InvoiceRow, payloa
         mismatch = inv_total is not None and inv_net is not None and abs(float(inv_total) - (float(inv_net) + float(inv_vat or 0))) > 0.10
     except Exception:
         mismatch = False
-    if mismatch and (amount or re.search(r"\b(bcrs|deposit|returnable|surcharge)\b", totals_text, re.I)):
+    if mismatch and (amount or re.search(r"\b(bcrs|deposit|returnable)\b", totals_text, re.I)):
         return ("review_suggest_split", amount, "Possible deposit/BCRS adjustment not safely resolved")
     return ("no_split", None, None)
 
@@ -1949,7 +1946,7 @@ def _build_bcrs_row(row: InvoiceRow, amount: float) -> InvoiceRow:
 def _page_has_existing_bcrs_row(rows: list[InvoiceRow], amount: float, tolerance: float = 0.06) -> bool:
     for row in rows:
         text = f"{row.description or ''} {row.line_items_raw or ''}".lower()
-        if not re.search(r"\b(bcrs|deposit|returnable|returnables|refund(?:able)?|surcharge)\b", text):
+        if not re.search(r"\b(bcrs|deposit|returnable|returnables|refund(?:able)?)\b", text):
             continue
         for candidate in (row.total_amount, row.net_amount):
             try:

@@ -284,6 +284,7 @@ def _extract_labeled_financial_bundle(text: str) -> dict[str, float]:
             r"\btotal\s+amount\b", r"\btotal\s+amount\s+in\s+eur\b",
             r"\btotal\s+due\b", r"\bamount\s+due\b", r"\bbalance\s+due\b",
             r"\btotal\s+incl", r"^\s*total\s*[:\-]?$", r"^\s*total\s+[€a-z]*\s*[:\-]?",
+            r"^\s*due\s*[:\-]?$", r"^\s*balance\s*[:\-]?$",
         ],
         reject_patterns=[r"\bsub\s*total\b", r"\bsubtotal\b", r"\btotal\s+net\b", r"\btotal\s+vat\b", r"\bvat\b", r"\btax\b", r"\bbcrs\b", r"\bdeposit\b"],
     )
@@ -312,7 +313,7 @@ def _extract_labeled_financial_bundle(text: str) -> dict[str, float]:
         if v is not None and (k not in out or out.get(k) in (None, 0.0)):
             out[k] = v
 
-    return _repair_financial_bundle(out)
+    return _repair_financial_bundle(out, text)
 
 
 def _extract_vertical_summary_amounts(text: str) -> dict[str, float]:
@@ -359,30 +360,83 @@ def _extract_vertical_summary_amounts(text: str) -> dict[str, float]:
     return out
 
 
-def _repair_financial_bundle(values: dict[str, float]) -> dict[str, float]:
+def _repair_financial_bundle(values: dict[str, float], text: str | None = None) -> dict[str, float]:
     """Apply small finance-safe repairs to labelled totals.
 
     Repairs are limited to obvious OCR/DI errors:
     - net and total are almost identical on a zero-VAT invoice but net lost a
       cent digit (67.9 vs 67.98) -> use the two-decimal total;
-    - VAT equals the net/total on a zero-rated layout -> set VAT to 0.00.
+    - VAT equals the net/total on a zero-rated layout -> set VAT to 0.00;
+    - when VAT and total are present but net is missing/duplicated from total,
+      derive net = total - VAT if the implied VAT rate is plausible;
+    - when an 18% VAT invoice has a bad VAT candidate from a table/body value,
+      derive the summary net/VAT from the trusted invoice total.
     """
     out = dict(values or {})
+
+    def _has_vat_rate(rate: int) -> bool:
+        return bool(re.search(rf"\b(?:vat|tax)\s*{rate}\s*%|\b{rate}\s*%", text or "", re.I))
+
+    def _derive_from_total_and_rate(total_f: float, rate: float) -> tuple[float, float]:
+        net_f = round(total_f / (1.0 + rate), 2)
+        vat_f = round(total_f - net_f, 2)
+        return net_f, vat_f
+
     try:
         net = out.get("net_amount")
         vat = out.get("vat_amount")
         total = out.get("total_amount")
-        if net is not None and total is not None:
-            net_f = round(float(net), 2)
-            total_f = round(float(total), 2)
-            vat_f = round(float(vat or 0.0), 2)
+        net_f = round(float(net), 2) if net is not None else None
+        vat_f = round(float(vat or 0.0), 2) if vat is not None else None
+        total_f = round(float(total), 2) if total is not None else None
+
+        if net_f is not None and total_f is not None:
             # If total and net are within a few cents on a zero VAT invoice, the
             # higher-confidence total line should repair a truncated net.
-            if abs(vat_f) <= 0.001 and 0 < abs(total_f - net_f) <= 0.11:
+            if vat_f is not None and abs(vat_f) <= 0.001 and 0 < abs(total_f - net_f) <= 0.11:
                 out["net_amount"] = total_f
+                net_f = total_f
             # Nectar-style OCR: VAT summary line picks the net again as VAT.
             if vat is not None and abs(net_f - total_f) <= 0.05 and abs(float(vat) - total_f) <= 0.05:
                 out["vat_amount"] = 0.0
+                vat_f = 0.0
+
+        # If VAT and total exist but net is absent or duplicated from the total
+        # line, derive the commercial net. This fixes common PBL/Biocare OCR
+        # summaries where the "Before Tax" value is missed.
+        if total_f is not None and vat_f is not None and total_f > vat_f > 0:
+            implied_net = round(total_f - vat_f, 2)
+            implied_rate = vat_f / implied_net if implied_net > 0 else 0
+            if 0.03 <= implied_rate <= 0.30 and (net_f is None or abs(net_f - total_f) <= 0.11):
+                out["net_amount"] = implied_net
+                net_f = implied_net
+
+        # If the visible document carries an 18% VAT marker and the current
+        # net/VAT/total bundle is missing or mismatched, derive VAT from the
+        # trusted total. This is safer than accepting random body-table numbers
+        # such as quantities, unit prices, or OCR-fragmented VAT values.
+        if total_f is not None and total_f > 0 and _has_vat_rate(18):
+            current_diff = None
+            if net_f is not None and vat_f is not None:
+                current_diff = abs(round((net_f + vat_f) - total_f, 2))
+            if current_diff is None or current_diff > 0.10:
+                rate_net, rate_vat = _derive_from_total_and_rate(total_f, 0.18)
+                # Only apply when the derived values look like a normal 18% VAT
+                # invoice and materially improve reconciliation.
+                if rate_net > 0 and abs(round((rate_net + rate_vat) - total_f, 2)) <= 0.02:
+                    out["net_amount"] = rate_net
+                    out["vat_amount"] = rate_vat
+                    net_f, vat_f = rate_net, rate_vat
+
+        # If net and VAT exist but total is absent, fill total. If the current
+        # total is clearly impossible (lower than net/VAT) and the expected total
+        # appears in the OCR text, use the expected value as a guarded repair.
+        if net_f is not None and vat_f is not None:
+            expected_total = round(net_f + vat_f, 2)
+            if total_f is None:
+                out["total_amount"] = expected_total
+            elif total_f < max(net_f, vat_f) and re.search(rf"(?<!\d){expected_total:.2f}(?!\d)", (text or "").replace(",", ".")):
+                out["total_amount"] = expected_total
     except Exception:
         pass
     return out
