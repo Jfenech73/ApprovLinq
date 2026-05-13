@@ -148,6 +148,40 @@
         </div>
       </section>
 
+
+      <section class="card full-width">
+        <div class="section-head">
+          <h2>Candidate Analytics</h2>
+          <span class="muted">Shows where extraction candidates are accepted, corrected or conflicted for the selected tenant.</span>
+          <button id="refreshCandidateAnalyticsBtn" class="btn btn-secondary" type="button">Refresh</button>
+        </div>
+        <div class="row gap-sm wrap align-center" style="margin-bottom: var(--ap-s-3);">
+          <label class="muted" for="candidateFieldFilter">Field</label>
+          <select id="candidateFieldFilter"><option value="">All fields</option></select>
+          <label class="muted" for="candidateSourceFilter">Source</label>
+          <select id="candidateSourceFilter"><option value="">All sources</option></select>
+        </div>
+        <div id="candidateAnalyticsSummary" class="muted small-text">No candidate analytics loaded yet.</div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Source</th><th>Candidates</th><th>Selected</th><th>Applied</th><th>Accepted</th><th>Corrected</th><th>Conflicts</th><th>Accuracy</th></tr></thead>
+            <tbody id="candidateSourceTableBody"></tbody>
+          </table>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Field</th><th>Candidates</th><th>Selected</th><th>Accepted</th><th>Corrected</th><th>Conflicts</th><th>Accuracy</th></tr></thead>
+            <tbody id="candidateFieldTableBody"></tbody>
+          </table>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Top corrected supplier</th><th>Candidates</th><th>Accepted</th><th>Corrected</th><th>Conflicts</th><th>Correction rate</th></tr></thead>
+            <tbody id="candidateSupplierTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="card full-width">
         <div class="section-head">
           <h2>Report Support Issue</h2>

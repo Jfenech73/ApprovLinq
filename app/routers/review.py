@@ -798,6 +798,162 @@ def _open_pdf_page_count(path: str) -> int:
         return 1
 
 
+
+
+def _analytics_percent(part: int, whole: int) -> float:
+    return round((float(part) / float(whole) * 100.0), 2) if whole else 0.0
+
+
+def _candidate_analytics_row(label: str, rows: list[InvoiceFieldCandidate]) -> dict[str, Any]:
+    candidate_count = len(rows)
+    selected_count = sum(1 for r in rows if bool(r.selected))
+    applied_count = sum(1 for r in rows if bool(r.applied))
+    accepted_count = sum(1 for r in rows if bool(getattr(r, "user_accepted", False)))
+    corrected_count = sum(1 for r in rows if bool(getattr(r, "user_corrected", False)))
+    conflict_count = sum(1 for r in rows if bool(r.conflict))
+    labelled_count = accepted_count + corrected_count
+    return {
+        "label": label or "-",
+        "candidate_count": candidate_count,
+        "selected_count": selected_count,
+        "applied_count": applied_count,
+        "accepted_count": accepted_count,
+        "corrected_count": corrected_count,
+        "conflict_count": conflict_count,
+        "labelled_count": labelled_count,
+        "accuracy": _analytics_percent(accepted_count, labelled_count),
+        "correction_rate": _analytics_percent(corrected_count, labelled_count),
+        "selection_rate": _analytics_percent(selected_count, candidate_count),
+        "conflict_rate": _analytics_percent(conflict_count, candidate_count),
+    }
+
+
+def _group_candidate_rows(rows: list[InvoiceFieldCandidate], key_fn) -> list[dict[str, Any]]:
+    groups: dict[str, list[InvoiceFieldCandidate]] = {}
+    for row in rows:
+        groups.setdefault(str(key_fn(row) or "-"), []).append(row)
+    return sorted(
+        (_candidate_analytics_row(label, grouped) for label, grouped in groups.items()),
+        key=lambda item: (item.get("corrected_count", 0), item.get("candidate_count", 0)),
+        reverse=True,
+    )
+
+
+@router.get("/candidate-analytics")
+def candidate_analytics(
+    tenant_id: UUID | None = Query(default=None),
+    company_id: UUID | None = Query(default=None),
+    supplier: str | None = Query(default=None),
+    field_name: str | None = Query(default=None),
+    source_type: str | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    x_tenant_id: str | None = Header(default=None),
+    user: M.User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Candidate analytics for ML-readiness and extraction quality.
+
+    Tenant users are always restricted to their active/default tenant.  Admins may
+    query all tenants or filter to one tenant.  Supplier filtering is applied via
+    invoice_rows.supplier_name, not candidate text, so it reflects the invoice row
+    context used during review/export.
+    """
+    allowed_tenant_id: UUID | None = None
+    if user.role == "admin":
+        if tenant_id:
+            allowed_tenant_id = tenant_id
+        elif x_tenant_id:
+            try:
+                allowed_tenant_id = UUID(str(x_tenant_id))
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail="Invalid X-Tenant-Id header") from exc
+            if not db.get(M.Tenant, allowed_tenant_id):
+                raise HTTPException(status_code=404, detail="Tenant not found")
+    else:
+        if tenant_id:
+            requested = tenant_id
+        elif x_tenant_id:
+            try:
+                requested = UUID(str(x_tenant_id))
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail="Invalid X-Tenant-Id header") from exc
+        else:
+            link = db.query(M.UserTenant).filter(M.UserTenant.user_id == user.id).order_by(M.UserTenant.is_default.desc(), M.UserTenant.id.asc()).first()
+            if not link:
+                raise HTTPException(status_code=403, detail="No tenant access assigned")
+            requested = link.tenant_id
+        link = db.query(M.UserTenant).filter(M.UserTenant.user_id == user.id, M.UserTenant.tenant_id == requested).first()
+        if not link:
+            raise HTTPException(status_code=403, detail="Forbidden for selected tenant")
+        allowed_tenant_id = requested
+
+    q = (
+        db.query(InvoiceFieldCandidate, M.InvoiceRow, M.Tenant, M.Company)
+        .join(M.InvoiceRow, InvoiceFieldCandidate.row_id == M.InvoiceRow.id)
+        .join(M.Tenant, InvoiceFieldCandidate.tenant_id == M.Tenant.id)
+        .outerjoin(M.Company, InvoiceFieldCandidate.company_id == M.Company.id)
+    )
+    if allowed_tenant_id:
+        q = q.filter(InvoiceFieldCandidate.tenant_id == allowed_tenant_id)
+    if company_id:
+        q = q.filter(InvoiceFieldCandidate.company_id == company_id)
+    if field_name:
+        q = q.filter(InvoiceFieldCandidate.field_name == field_name)
+    if source_type:
+        q = q.filter(InvoiceFieldCandidate.source_type == source_type)
+    if date_from:
+        q = q.filter(InvoiceFieldCandidate.created_at >= date_from)
+    if date_to:
+        q = q.filter(InvoiceFieldCandidate.created_at <= date_to)
+    if supplier:
+        pattern = f"%{supplier.strip()}%"
+        q = q.filter(M.InvoiceRow.supplier_name.ilike(pattern))
+
+    records = q.limit(20000).all()
+    candidates = [rec[0] for rec in records]
+    row_by_candidate_id = {rec[0].id: rec[1] for rec in records}
+    tenant_by_candidate_id = {rec[0].id: rec[2] for rec in records}
+    company_by_candidate_id = {rec[0].id: rec[3] for rec in records}
+
+    summary = _candidate_analytics_row("summary", candidates)
+    by_source_type = _group_candidate_rows(candidates, lambda c: c.source_type)
+    by_field = _group_candidate_rows(candidates, lambda c: c.field_name)
+
+    supplier_groups: dict[str, list[InvoiceFieldCandidate]] = {}
+    for c in candidates:
+        row = row_by_candidate_id.get(c.id)
+        supplier_name = (getattr(row, "supplier_name", None) or "Unknown supplier").strip() or "Unknown supplier"
+        supplier_groups.setdefault(supplier_name, []).append(c)
+    top_corrected_suppliers = sorted(
+        (_candidate_analytics_row(label, grouped) for label, grouped in supplier_groups.items()),
+        key=lambda item: (item.get("corrected_count", 0), item.get("candidate_count", 0)),
+        reverse=True,
+    )[:10]
+
+    tenant_rows = _group_candidate_rows(candidates, lambda c: getattr(tenant_by_candidate_id.get(c.id), "tenant_name", str(c.tenant_id)))
+    company_rows = _group_candidate_rows(candidates, lambda c: getattr(company_by_candidate_id.get(c.id), "company_name", None) or "No company")
+
+    return {
+        "filters": {
+            "tenant_id": str(allowed_tenant_id) if allowed_tenant_id else (str(tenant_id) if tenant_id else None),
+            "company_id": str(company_id) if company_id else None,
+            "supplier": supplier,
+            "field_name": field_name,
+            "source_type": source_type,
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
+        },
+        "summary": summary,
+        "by_source_type": by_source_type,
+        "by_field": by_field,
+        "by_tenant": tenant_rows,
+        "by_company": company_rows,
+        "top_corrected_suppliers": top_corrected_suppliers,
+        "row_limit_applied": len(records) >= 20000,
+    }
+
+
 @router.get("/files/{file_id}/info")
 def file_info(
     file_id: int,

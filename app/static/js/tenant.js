@@ -345,3 +345,98 @@ initPageHelp({
   ],
   quickChecks: ["Create at least one company before using the Scanning Tool.", "Select the correct company before importing supplier or nominal CSV files.", "Raise issues with enough detail for support to reproduce the problem."]
 });
+
+function candidateFieldLabel(field) {
+  return ({
+    supplier_name: "Supplier name",
+    supplier_posting_account: "Posting account",
+    nominal_account_code: "Nominal code",
+    invoice_number: "Invoice number",
+    invoice_date: "Invoice date",
+    description: "Description",
+    net_amount: "Net",
+    vat_amount: "VAT",
+    total_amount: "Total",
+    tax_code: "Tax code",
+    currency: "Currency",
+  })[field] || field || "-";
+}
+
+function candidateSourceLabel(source) {
+  return ({
+    raw_extraction: "Raw extraction",
+    correction_rule: "Correction rule",
+    saved_region: "Saved region",
+    supplier_history: "Supplier history",
+    accepted_correction: "Accepted correction",
+    supplier_master: "Supplier master",
+    nominal_master: "Nominal master",
+    totals_reconciliation: "Totals reconciliation",
+    admin_global_rule: "Admin global rule",
+  })[source] || source || "-";
+}
+
+function populateCandidateAnalyticsFilters(data) {
+  const fieldSelect = document.getElementById("candidateFieldFilter");
+  const sourceSelect = document.getElementById("candidateSourceFilter");
+  if (fieldSelect && fieldSelect.options.length <= 1) {
+    const fields = (data.by_field || []).map((row) => row.label).filter(Boolean).sort();
+    fieldSelect.insertAdjacentHTML("beforeend", fields.map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(candidateFieldLabel(f))}</option>`).join(""));
+  }
+  if (sourceSelect && sourceSelect.options.length <= 1) {
+    const sources = (data.by_source_type || []).map((row) => row.label).filter(Boolean).sort();
+    sourceSelect.insertAdjacentHTML("beforeend", sources.map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(candidateSourceLabel(s))}</option>`).join(""));
+  }
+}
+
+function renderAnalyticsRows(rows, type) {
+  if (!rows || !rows.length) {
+    const span = type === "source" ? 8 : type === "field" ? 7 : 6;
+    return `<tr><td colspan="${span}" class="muted">No analytics data found.</td></tr>`;
+  }
+  return rows.map((row) => {
+    if (type === "source") {
+      return `<tr><td>${escapeHtml(candidateSourceLabel(row.label))}</td><td>${row.candidate_count}</td><td>${row.selected_count}</td><td>${row.applied_count}</td><td>${row.accepted_count}</td><td>${row.corrected_count}</td><td>${row.conflict_count}</td><td>${row.accuracy}%</td></tr>`;
+    }
+    if (type === "field") {
+      return `<tr><td>${escapeHtml(candidateFieldLabel(row.label))}</td><td>${row.candidate_count}</td><td>${row.selected_count}</td><td>${row.accepted_count}</td><td>${row.corrected_count}</td><td>${row.conflict_count}</td><td>${row.accuracy}%</td></tr>`;
+    }
+    return `<tr><td>${escapeHtml(row.label)}</td><td>${row.candidate_count}</td><td>${row.accepted_count}</td><td>${row.corrected_count}</td><td>${row.conflict_count}</td><td>${row.correction_rate}%</td></tr>`;
+  }).join("");
+}
+
+async function loadCandidateAnalytics() {
+  const summaryEl = document.getElementById("candidateAnalyticsSummary");
+  const sourceBody = document.getElementById("candidateSourceTableBody");
+  const fieldBody = document.getElementById("candidateFieldTableBody");
+  const supplierBody = document.getElementById("candidateSupplierTableBody");
+  if (!summaryEl || !sourceBody || !fieldBody || !supplierBody) return;
+  summaryEl.textContent = "Loading candidate analytics…";
+  try {
+    const params = new URLSearchParams();
+    const fieldFilter = document.getElementById("candidateFieldFilter")?.value || "";
+    const sourceFilter = document.getElementById("candidateSourceFilter")?.value || "";
+    if (fieldFilter) params.set("field_name", fieldFilter);
+    if (sourceFilter) params.set("source_type", sourceFilter);
+    const data = await apiFetch(`/review/candidate-analytics${params.toString() ? "?" + params.toString() : ""}`);
+    populateCandidateAnalyticsFilters(data);
+    const s = data.summary || {};
+    summaryEl.textContent = `Candidates: ${s.candidate_count || 0}. Selected: ${s.selected_count || 0}. Accepted: ${s.accepted_count || 0}. Corrected: ${s.corrected_count || 0}. Conflicts: ${s.conflict_count || 0}. Accuracy on labelled candidates: ${s.accuracy || 0}%.`;
+    sourceBody.innerHTML = renderAnalyticsRows(data.by_source_type || [], "source");
+    fieldBody.innerHTML = renderAnalyticsRows(data.by_field || [], "field");
+    supplierBody.innerHTML = renderAnalyticsRows(data.top_corrected_suppliers || [], "supplier");
+  } catch (error) {
+    summaryEl.textContent = "Failed to load candidate analytics.";
+    setMessage("pageMessage", error.message);
+  }
+}
+
+(function wireCandidateAnalytics() {
+  const refresh = document.getElementById("refreshCandidateAnalyticsBtn");
+  if (refresh) refresh.addEventListener("click", loadCandidateAnalytics);
+  const fieldFilter = document.getElementById("candidateFieldFilter");
+  if (fieldFilter) fieldFilter.addEventListener("change", loadCandidateAnalytics);
+  const sourceFilter = document.getElementById("candidateSourceFilter");
+  if (sourceFilter) sourceFilter.addEventListener("change", loadCandidateAnalytics);
+})();
+setTimeout(loadCandidateAnalytics, 0);
