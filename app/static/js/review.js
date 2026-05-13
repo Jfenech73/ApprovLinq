@@ -907,11 +907,27 @@ async function loadSavedRegions() {
 }
 
 
-const applySavedRegionsBtn = $("applySavedRegionsBtn");
-if (applySavedRegionsBtn) {
-  applySavedRegionsBtn.addEventListener("click", async () => {
-    const row = state.rows.find(x => x.id === state.selected);
-    if (!row) { msg("Select a row first.", "error"); return; }
+async function handleApplySavedRegionsClick(evt) {
+  if (evt) { evt.preventDefault(); evt.stopPropagation(); }
+  const btn = $("applySavedRegionsBtn");
+  if (btn && btn.dataset.busy === "1") return;
+  if (btn) { btn.dataset.busy = "1"; btn.disabled = true; }
+  try {
+    let row = state.rows.find(x => x.id === state.selected);
+    // A common reviewer flow is to open Review and press this button before
+    // explicitly selecting a row.  Make the action useful by selecting the
+    // first visible row instead of silently doing nothing.
+    if (!row && state.rows.length) {
+      row = state.rows[0];
+      state.selected = row.id;
+      state.fileId = row.source_file_id;
+      state.page = row.page_no || 1;
+      render();
+      loadAudit(row.id);
+    }
+    if (!row) { msg("No extracted row is available for saved-region replay.", "error"); return; }
+    if (!batchId) { msg("Missing batch_id in review URL; cannot apply saved regions.", "error"); return; }
+
     msg("Applying saved regions to selected row…", "");
     const r = await fetch(`/review/batches/${batchId}/rows/${row.id}/apply-saved-regions`, {
       method: "POST",
@@ -925,20 +941,39 @@ if (applySavedRegionsBtn) {
       await load();
     } else {
       msg("Saved regions checked — no field changed on the selected row.", "warning");
+      await loadAudit(row.id);
     }
-  });
+  } catch (e) {
+    msg(`Apply saved regions failed: ${e && e.message ? e.message : e}`, "error");
+  } finally {
+    if (btn) { btn.dataset.busy = "0"; btn.disabled = false; }
+  }
 }
 
-const savedRegionsBtn = $("savedRegionsBtn");
-if (savedRegionsBtn) {
-  savedRegionsBtn.addEventListener("click", async () => {
-    const panel = $("savedRegionsPanel");
-    if (!panel) return;
-    const open = panel.style.display === "none" || panel.classList.contains("ap-hidden") || panel.hidden;
-    setSavedRegionsPanelOpen(open);
-    if (open) await loadSavedRegions();
-  });
+async function handleSavedRegionsToggleClick(evt) {
+  if (evt) { evt.preventDefault(); evt.stopPropagation(); }
+  const panel = $("savedRegionsPanel");
+  if (!panel) { msg("Saved regions panel is not available on this page.", "error"); return; }
+  const isClosed = panel.hidden || panel.classList.contains("ap-hidden") || getComputedStyle(panel).display === "none";
+  setSavedRegionsPanelOpen(isClosed);
+  if (isClosed) await loadSavedRegions();
 }
+
+const applySavedRegionsBtn = $("applySavedRegionsBtn");
+if (applySavedRegionsBtn) applySavedRegionsBtn.addEventListener("click", handleApplySavedRegionsClick);
+
+const savedRegionsBtn = $("savedRegionsBtn");
+if (savedRegionsBtn) savedRegionsBtn.addEventListener("click", handleSavedRegionsToggleClick);
+
+// Extra delegated fallback: if a later render or browser extension replaces the
+// buttons, the actions still trigger.  This also makes failures visible instead
+// of looking like a dead button.
+document.addEventListener("click", async (e) => {
+  const savedBtn = e.target.closest && e.target.closest("#savedRegionsBtn");
+  const applyBtn = e.target.closest && e.target.closest("#applySavedRegionsBtn");
+  if (savedBtn) await handleSavedRegionsToggleClick(e);
+  if (applyBtn) await handleApplySavedRegionsClick(e);
+}, true);
 
 document.addEventListener("click", async (e) => {
   const targets = [

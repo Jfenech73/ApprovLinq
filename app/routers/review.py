@@ -2038,6 +2038,7 @@ def _active_tenant_id_for_user(db: Session, user, x_tenant_id: str | None = None
 def apply_saved_regions_to_row(
     batch_id: UUID,
     row_id: int,
+    x_tenant_id: str | None = Header(default=None),
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
@@ -2052,8 +2053,8 @@ def apply_saved_regions_to_row(
     if not row or row.batch_id != batch.id:
         raise HTTPException(404, "Row not found")
 
-    tenant_id = _user_default_tenant_id(db, user)
-    if batch.tenant_id != tenant_id:
+    tenant_id = _active_tenant_id_for_user(db, user, x_tenant_id)
+    if batch.tenant_id != tenant_id and getattr(user, "role", None) != "admin":
         raise HTTPException(403, "Batch is not in your tenant")
 
     tracked = (
