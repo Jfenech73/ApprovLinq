@@ -98,6 +98,13 @@ class InvoiceFieldCandidate(Base):
     applied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     rejected_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     conflict: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Phase 8D outcome labels: populated only after explicit review/acceptance/export.
+    user_accepted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    user_corrected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    final_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    finalised_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finalised_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    outcome_source: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 

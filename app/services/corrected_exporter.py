@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.db import models as M
 from app.db.review_models import InvoiceRowFieldAudit, BatchExportEvent
 from app.services import correction_service as cs
+from app.services.candidate_outcomes import label_batch_candidates
 from app.services.exporter import workbook_from_rows
 from app.utils.storage import batch_export_folder
 
@@ -105,6 +106,9 @@ def export_batch_corrected(
         "export completed batch=%s version=%d rows=%d audit_rows=%d bytes=%d",
         batch.id, next_version, len(rows), len(audits), len(export_bytes),
     )
+
+    labelled_candidates = label_batch_candidates(db, batch=batch, user=user, outcome_source="export")
+    logger.info("candidate outcomes labelled batch=%s labels=%d source=export", batch.id, labelled_candidates)
 
     ev = BatchExportEvent(
         batch_id=batch.id, export_version=next_version,

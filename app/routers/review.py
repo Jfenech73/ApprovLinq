@@ -21,6 +21,7 @@ from app.db.session import get_db
 from app.routers.auth import current_user
 from app.utils.security import session_token_hash, utcnow
 from app.services import correction_service as cs
+from app.services.candidate_outcomes import label_row_candidates
 from app.utils.storage import resolve_upload_path
 from app.utils.persistent_files import materialize_invoice_file
 from app.config import settings
@@ -388,8 +389,11 @@ def save_corrections(batch_id: UUID, row_id: int, payload: RowCorrectionIn,
         raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(422, str(e))
+    labelled = 0
+    if audits:
+        labelled = label_row_candidates(db, batch=batch, row=row, user=user, outcome_source="manual_review")
     db.commit()
-    return {"audited": len(audits)}
+    return {"audited": len(audits), "candidate_labels": labelled}
 
 
 @router.post("/batches/{batch_id}/rows/{row_id}/duplicate")
@@ -694,6 +698,12 @@ def row_field_candidates(
             "applied": bool(c.applied),
             "conflict": bool(c.conflict),
             "rejected_reason": c.rejected_reason,
+            "user_accepted": bool(getattr(c, "user_accepted", False)),
+            "user_corrected": bool(getattr(c, "user_corrected", False)),
+            "final_value": getattr(c, "final_value", None),
+            "finalised_at": c.finalised_at.isoformat() if getattr(c, "finalised_at", None) else None,
+            "finalised_by": str(c.finalised_by) if getattr(c, "finalised_by", None) else None,
+            "outcome_source": getattr(c, "outcome_source", None),
             "created_at": c.created_at.isoformat() if c.created_at else None,
         })
     return {"batch_id": str(batch.id), "row_id": row.id, "fields": grouped}
@@ -759,8 +769,11 @@ def mark_file_reviewed(batch_id: UUID, file_id: int,
             action="mark_reviewed", user_id=user.id, note=None,
         ))
         created += 1
+    labelled = 0
+    for r in flagged:
+        labelled += label_row_candidates(db, batch=batch, row=r, user=user, outcome_source="mark_reviewed")
     db.commit()
-    return {"file_id": file_id, "marked_rows": created, "already_reviewed": len(flagged) - created}
+    return {"file_id": file_id, "marked_rows": created, "already_reviewed": len(flagged) - created, "candidate_labels": labelled}
 
 
 # ── PDF file info (page count) ────────────────────────────────────────────────
