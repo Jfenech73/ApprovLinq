@@ -50,6 +50,12 @@ SOURCE_RANK = {
 }
 
 AMOUNT_FIELDS = {"net_amount", "vat_amount", "total_amount"}
+# These fields are invoice-specific and should not be auto-learned as concrete
+# values from supplier history. Reusing a previous invoice number/date/amount or
+# product description creates false conflicts and wrong suggestions across
+# different invoices from the same supplier. Keep history for stable defaults
+# only (supplier, tax/nominal/currency).
+VOLATILE_HISTORY_VALUE_FIELDS = {"invoice_number", "invoice_date", "net_amount", "vat_amount", "total_amount", "description"}
 
 
 @dataclass
@@ -567,6 +573,12 @@ def _history_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> li
         if signal.value == "__saved_region_available__":
             continue
         if signal.field_name not in ARBITRATION_FIELDS:
+            continue
+        if signal.field_name in VOLATILE_HISTORY_VALUE_FIELDS:
+            # Supplier history is useful for stable defaults, but concrete values
+            # such as invoice numbers, dates, amounts and product descriptions
+            # vary invoice-by-invoice. Persisting/using them as arbitration
+            # candidates caused noisy false conflicts and incorrect suggestions.
             continue
         if not _value_valid_for_field(signal.field_name, signal.value, row):
             continue

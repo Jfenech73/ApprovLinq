@@ -1517,6 +1517,28 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
             return
         ranked.append((score, f))
 
+    # Safe arithmetic fallback: if the summary region explicitly mentions BCRS
+    # or refundable deposit but OCR separated the label from the amount, derive
+    # the BCRS value from invoice arithmetic.  This restores valid cases such as
+    # J. Sultana where Total = Net + VAT + BCRS, while avoiding the older false
+    # positive by requiring an explicit BCRS/refundable-deposit label.
+    if total_amount is not None and net_amount is not None:
+        try:
+            diff = round(float(total_amount) - float(net_amount) - float(vat_amount or 0), 2)
+        except Exception:
+            diff = 0.0
+        explicit_bcrs_label = bool(re.search(
+            r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit)\b",
+            summary_text,
+            re.I,
+        ))
+        if explicit_bcrs_label and diff > 0.02:
+            # Do not promote ordinary VAT or invoice total values.  A valid BCRS
+            # component should be positive, smaller than the invoice total, and
+            # not effectively equal to VAT.
+            if (not vat_amount or abs(diff - float(vat_amount)) > 0.06) and diff < float(total_amount):
+                _add_candidate(34, diff)
+
     # Pass 1: regex extraction over the whole summary text, useful when OCR collapses rows.
     patterns = [
         re.compile(r"(?is)\bbcrs(?:\s+refundable)?(?:\s+deposit)?(?:\s*\([^\n)]{1,12}\))?\b[^\d\n€-]{0,40}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
