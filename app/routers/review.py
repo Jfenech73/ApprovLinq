@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.db import models as M
 from app.db.review_models import (
-    InvoiceRowCorrection, InvoiceRowFieldAudit, CorrectionRule, RemapHint, BatchExportEvent,
+    InvoiceRowCorrection, InvoiceRowFieldAudit, CorrectionRule, RemapHint, BatchExportEvent, InvoiceFieldCandidate,
 )
 from app.db.session import get_db
 from app.routers.auth import current_user
@@ -255,6 +255,46 @@ def _get_batch(db: Session, batch_id: UUID) -> M.InvoiceBatch:
     if not b:
         raise HTTPException(404, "Batch not found")
     return b
+
+
+def _require_batch_access(
+    db: Session,
+    user: M.User,
+    batch: M.InvoiceBatch,
+    x_tenant_id: str | None = None,
+):
+    """Enforce tenant access for row-level review evidence endpoints.
+
+    Admin users may access any batch. Tenant users must be linked to the
+    batch tenant. If the UI provides X-Tenant-Id, it must match the batch tenant
+    so candidate evidence cannot be fetched across the wrong active tenant.
+    """
+    if getattr(user, "role", None) == "admin":
+        if x_tenant_id:
+            try:
+                selected = UUID(x_tenant_id)
+            except ValueError:
+                raise HTTPException(400, "Invalid X-Tenant-Id header")
+            if batch.tenant_id and selected != batch.tenant_id:
+                raise HTTPException(403, "Batch does not belong to selected tenant")
+        return
+    if not batch.tenant_id:
+        raise HTTPException(403, "Batch is not tenant-scoped")
+    if x_tenant_id:
+        try:
+            selected = UUID(x_tenant_id)
+        except ValueError:
+            raise HTTPException(400, "Invalid X-Tenant-Id header")
+        if selected != batch.tenant_id:
+            raise HTTPException(403, "Batch does not belong to selected tenant")
+    link = db.execute(
+        select(M.UserTenant).where(
+            M.UserTenant.user_id == user.id,
+            M.UserTenant.tenant_id == batch.tenant_id,
+        ).limit(1)
+    ).scalar_one_or_none()
+    if not link:
+        raise HTTPException(403, "Not authorised for this batch")
 
 
 def _require_admin(user: M.User):
@@ -601,6 +641,62 @@ def row_audit(batch_id: UUID, row_id: int, db: Session = Depends(get_db), user=D
         "force_added": a.force_added, "user_id": str(a.user_id) if a.user_id else None,
         "username": a.username, "at": a.created_at.isoformat(),
     } for a in audits]
+
+
+@router.get("/batches/{batch_id}/rows/{row_id}/candidates")
+def row_field_candidates(
+    batch_id: UUID,
+    row_id: int,
+    x_tenant_id: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    """Return persisted arbitration candidates grouped by field.
+
+    This endpoint is read-only evidence for Review. It does not recalculate
+    arbitration and does not alter selected values.
+    """
+    batch = _get_batch(db, batch_id)
+    _require_batch_access(db, user, batch, x_tenant_id)
+    row = db.get(M.InvoiceRow, row_id)
+    if not row or row.batch_id != batch.id:
+        raise HTTPException(404, "Row not found in batch")
+
+    q = (
+        select(InvoiceFieldCandidate)
+        .where(
+            InvoiceFieldCandidate.batch_id == batch.id,
+            InvoiceFieldCandidate.row_id == row.id,
+        )
+        .order_by(
+            InvoiceFieldCandidate.field_name.asc(),
+            InvoiceFieldCandidate.selected.desc(),
+            InvoiceFieldCandidate.applied.desc(),
+            InvoiceFieldCandidate.confidence.desc().nullslast(),
+            InvoiceFieldCandidate.created_at.desc(),
+        )
+    )
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for c in db.execute(q).scalars().all():
+        source = c.source_type or "unknown"
+        grouped.setdefault(c.field_name, []).append({
+            "id": c.id,
+            "field_name": c.field_name,
+            "candidate_value": c.candidate_value,
+            "normalised_value": c.normalised_value,
+            "source_type": source,
+            "source_label": SOURCE_LABELS.get(source, source.replace("_", " ").title()),
+            "source_id": c.source_id,
+            "confidence": float(c.confidence) if c.confidence is not None else None,
+            "evidence": c.evidence,
+            "reason": c.reason,
+            "selected": bool(c.selected),
+            "applied": bool(c.applied),
+            "conflict": bool(c.conflict),
+            "rejected_reason": c.rejected_reason,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+        })
+    return {"batch_id": str(batch.id), "row_id": row.id, "fields": grouped}
 
 
 # ── Status transitions / reopen ───────────────────────────────────────────────

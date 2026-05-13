@@ -9,7 +9,7 @@ const FIELDS = [
 const params = new URLSearchParams(location.search);
 const batchId = params.get("batch_id");
 const fileFilterId = params.get("file") ? parseInt(params.get("file"), 10) : null;
-let state = { batch: null, rows: [], filter: "all", selected: null, page: 1, fileId: null, pageCount: 1 };
+let state = { batch: null, rows: [], filter: "all", selected: null, page: 1, fileId: null, pageCount: 1, candidatesByRow: {} };
 
 const $ = (id) => document.getElementById(id);
 // Use the existing app's auth helpers from common.js — token key is "approvlinq_token"
@@ -50,6 +50,29 @@ function compactReason(text, maxLen = 180) {
   return t.length > maxLen ? t.slice(0, maxLen - 1) + "…" : t;
 }
 
+function candidateBadges(c) {
+  const badges = [];
+  if (c.selected) badges.push('<span class="candidate-badge selected">Selected</span>');
+  if (c.applied) badges.push('<span class="candidate-badge applied">Applied</span>');
+  if (c.conflict) badges.push('<span class="candidate-badge conflict">Conflict</span>');
+  if (!c.selected && !c.applied && !c.conflict) {
+    badges.push(c.rejected_reason ? '<span class="candidate-badge rejected">Rejected</span>' : '<span class="candidate-badge suggested">Suggested</span>');
+  }
+  return badges.join(' ');
+}
+
+function renderPersistedCandidate(c) {
+  const source = sourceBadge(c.source_type, c.source_label || c.source_type);
+  const conf = c.confidence != null ? ` <span class="muted">${esc(pct(c.confidence))}</span>` : "";
+  const statusClass = c.conflict ? " conflict" : c.applied ? " applied" : c.selected ? " selected" : c.rejected_reason ? " rejected" : " suggested";
+  const note = c.rejected_reason || c.reason || c.evidence || "";
+  return `<div class="field-candidate persisted${statusClass}">
+    <div>${source} <strong>${esc(c.candidate_value ?? "—")}</strong>${conf} ${candidateBadges(c)}</div>
+    ${c.evidence ? `<div class="muted">Evidence: ${esc(compactReason(c.evidence, 180))}</div>` : ""}
+    ${note ? `<div class="muted">${esc(compactReason(note, 180))}</div>` : ""}
+  </div>`;
+}
+
 function renderRowExplainability(r) {
   const ex = r.explainability || {};
   const row = ex.row || {};
@@ -79,17 +102,22 @@ function renderFieldEvidence(r, field) {
   if (!ev) return "";
   const source = sourceBadge(ev.selected_source, ev.selected_source_label);
   const reason = compactReason(ev.reason || (ev.review_reasons || []).join(" · "));
-  const candidates = Array.isArray(ev.candidates) ? ev.candidates : [];
-  const candHtml = candidates.length ? candidates.slice(-4).map(c => {
+  const auditCandidates = Array.isArray(ev.candidates) ? ev.candidates : [];
+  const persisted = (r.persisted_candidates && Array.isArray(r.persisted_candidates[field])) ? r.persisted_candidates[field] : [];
+  const persistedHtml = persisted.length ? persisted.map(renderPersistedCandidate).join("") : "";
+  const auditHtml = auditCandidates.length ? auditCandidates.slice(-4).map(c => {
     const conf = c.confidence != null ? ` <span class="muted">${esc(pct(c.confidence))}</span>` : "";
     const applied = c.applied ? " selected" : "";
     return `<div class="field-candidate${applied}">${sourceBadge(c.source, c.label)} <span>${esc(c.value ?? "—")}</span>${conf}<div class="muted">${esc(compactReason(c.reason, 120))}</div></div>`;
   }).join("") : "";
   const reviewReason = (ev.review_reasons || []).length ? `<div class="field-reason">⚠ ${ev.review_reasons.map(x => esc(compactReason(x))).join(" · ")}</div>` : "";
-  return `<details class="field-evidence" ${ev.review_required ? "open" : ""}>
+  const open = ev.review_required || persisted.some(c => c.conflict || c.selected || c.applied);
+  return `<details class="field-evidence" ${open ? "open" : ""}>
     <summary>${source} ${ev.confidence != null ? `<span class="muted">${esc(pct(ev.confidence))}</span>` : ""} ${reason ? `<span class="muted">— ${esc(reason)}</span>` : ""}</summary>
     ${reviewReason}
-    ${candHtml || '<div class="muted">No extra candidate evidence recorded for this field.</div>'}
+    ${persistedHtml ? `<div class="candidate-section-title">Persisted arbitration candidates</div>${persistedHtml}` : ""}
+    ${auditHtml ? `<div class="candidate-section-title">Audit evidence</div>${auditHtml}` : ""}
+    ${(!persistedHtml && !auditHtml) ? '<div class="muted">No extra candidate evidence recorded for this field.</div>' : ""}
   </details>`;
 }
 
@@ -106,6 +134,7 @@ async function load() {
     const d = await r.json();
     state.batch = d.batch;
     state.rows = d.rows;
+    state.rows.forEach(row => { if (state.candidatesByRow[row.id]) row.persisted_candidates = state.candidatesByRow[row.id]; });
     // If we arrived with ?file=... pre-select the first flagged row of that
     // file so the editor and preview land on the spot that needs attention.
     let initial = null;
@@ -125,6 +154,7 @@ async function load() {
     render();
     if (state.selected != null) {
       loadAudit(state.selected);
+      await loadCandidateEvidence(state.selected);
       await ensurePageCount();
       refreshPreview(); // load preview on initial selection
     }
@@ -200,7 +230,7 @@ function render() {
 
     d.onclick = async () => {
       state.selected = r.id; state.fileId = r.source_file_id; state.page = r.page_no || 1;
-      render(); loadAudit(r.id); await ensurePageCount();
+      render(); loadAudit(r.id); await loadCandidateEvidence(r.id); await ensurePageCount();
       refreshPreview(); // always load preview in 3-col layout
     };
     list.appendChild(d);
@@ -227,7 +257,15 @@ function ensureExplainabilityStyles() {
     .field-evidence{grid-column:1 / -1;margin:-4px 0 6px 0;padding:6px 8px;border-left:3px solid var(--ap-border,#d7e0ea);background:rgba(90,120,160,.06);border-radius:6px;font-size:12px}
     .field-evidence summary{cursor:pointer;list-style:none}
     .field-candidate{margin-top:6px;padding:5px 6px;border-radius:6px;background:rgba(255,255,255,.65);border:1px solid rgba(140,160,180,.25)}
-    .field-candidate.selected{border-color:var(--ap-accent,#315a8c);background:rgba(49,90,140,.08)}
+    .field-candidate.selected,.field-candidate.applied{border-color:var(--ap-accent,#315a8c);background:rgba(49,90,140,.08)}
+    .field-candidate.conflict{border-color:#b42318;background:rgba(180,35,24,.08)}
+    .field-candidate.rejected{opacity:.82}
+    .candidate-section-title{font-weight:700;margin-top:8px;margin-bottom:4px;color:var(--ap-muted,#536476)}
+    .candidate-badge{display:inline-block;border-radius:999px;padding:1px 6px;font-size:10px;margin-left:4px;background:#eef3f8}
+    .candidate-badge.selected,.candidate-badge.applied{background:#dbeafe}
+    .candidate-badge.conflict{background:#fee2e2;color:#7f1d1d}
+    .candidate-badge.rejected{background:#f3f4f6;color:#4b5563}
+    .candidate-badge.suggested{background:#ecfdf5;color:#065f46}
     .audit-source{font-size:11px;margin-left:4px}
     code{white-space:normal}
   `;
@@ -362,6 +400,23 @@ async function loadAudit(rowId) {
       </div>`;
     }).join("") || '<div class="muted">No history yet.</div>';
   } catch (e) { /* ignore */ }
+}
+
+async function loadCandidateEvidence(rowId) {
+  if (!rowId || !batchId) return;
+  try {
+    const r = await fetch(`/review/batches/${batchId}/rows/${rowId}/candidates`, { headers: hdrs() });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    const grouped = data.fields || {};
+    state.candidatesByRow[rowId] = grouped;
+    const row = state.rows.find(x => x.id === rowId);
+    if (row) row.persisted_candidates = grouped;
+    if (state.selected === rowId) renderEditor();
+  } catch (e) {
+    // Candidate evidence is supplementary. Keep the existing review workflow usable.
+    console.warn("Candidate evidence unavailable", e);
+  }
 }
 
 async function fetchPageCount() {
