@@ -8,6 +8,7 @@ was trusted, applies safe high-confidence improvements, and flags conflicts.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext as _nullcontext
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
@@ -22,6 +23,7 @@ from app.db.models import InvoiceBatch, InvoiceRow, TenantNominalAccount, Tenant
 from app.db.review_models import CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit, InvoiceFieldCandidate, RemapHint
 from app.services.totals_reconciliation import reconcile_invoice_totals
 from app.services.supplier_history import get_supplier_history_profile
+from app.services.scan_performance import ScanPerformanceContext
 
 ARBITRATION_FIELDS: tuple[str, ...] = (
     "supplier_name",
@@ -282,7 +284,17 @@ def _audit_arbitration(
     new_value: Any,
     action: str,
     note: str,
+    perf_ctx: ScanPerformanceContext | None = None,
 ) -> None:
+    old_text = _as_string_for_audit(old_value)
+    new_text = _as_string_for_audit(new_value)
+    if old_text == new_text and action not in {"arbitration_conflict", "arbitration_suggest"}:
+        return
+    audit_key = (getattr(row, "id", None), field_name, action, old_text, new_text)
+    if perf_ctx is not None:
+        if audit_key in perf_ctx.audit_seen:
+            return
+        perf_ctx.audit_seen.add(audit_key)
     if row.id is None:
         db.add(row)
         db.flush()
@@ -290,8 +302,8 @@ def _audit_arbitration(
         batch_id=batch.id,
         row_id=row.id,
         field_name=field_name,
-        old_value=_as_string_for_audit(old_value),
-        new_value=_as_string_for_audit(new_value),
+        old_value=old_text,
+        new_value=new_text,
         action=action[:40],
         note=note[:1000],
         rule_created=False,
@@ -342,7 +354,7 @@ def _candidate_rejected_reason(decision: FieldDecision, candidate: Candidate, wi
     return f"Rejected because {winner.source_type} candidate was selected."[:1000]
 
 
-def persist_field_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow, result: ArbitrationResult) -> int:
+def persist_field_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow, result: ArbitrationResult, perf_ctx: ScanPerformanceContext | None = None) -> int:
     """Persist arbitration candidates for future training/analytics.
 
     This function is deliberately write-only evidence capture. It must not mutate
@@ -362,6 +374,7 @@ def persist_field_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow, 
 
     seen: set[tuple[Any, ...]] = set()
     written = 0
+    bulk_candidates: list[InvoiceFieldCandidate] = []
     for decision in result.decisions.values():
         winner = decision.winning_candidate
         for candidate in decision.candidates or []:
@@ -374,12 +387,12 @@ def persist_field_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow, 
                 source_id,
                 _normalised_value_for_storage(candidate.field_name, candidate.value),
             )
-            if key in seen:
+            if key in seen or not value_text or not str(value_text).strip():
                 continue
             seen.add(key)
 
             selected = candidate is winner
-            db.add(InvoiceFieldCandidate(
+            bulk_candidates.append(InvoiceFieldCandidate(
                 tenant_id=tenant_id,
                 company_id=getattr(row, "company_id", None) or getattr(batch, "company_id", None),
                 batch_id=batch_id,
@@ -391,14 +404,18 @@ def persist_field_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow, 
                 source_type=(candidate.source_type or "unknown")[:80],
                 source_id=source_id,
                 confidence=candidate.confidence,
-                evidence=(candidate.evidence or "")[:4000],
-                reason=(candidate.reason or decision.reason or "")[:4000],
+                evidence=(candidate.evidence or "")[:1000],
+                reason=(candidate.reason or decision.reason or "")[:1000],
                 selected=selected,
                 applied=bool(selected and decision.applied),
                 rejected_reason=_candidate_rejected_reason(decision, candidate, winner),
                 conflict=bool(decision.conflict),
             ))
             written += 1
+    if bulk_candidates:
+        db.add_all(bulk_candidates)  # bulk unit-of-work insert; committed by page/batch, not per candidate.
+    if perf_ctx is not None and written:
+        perf_ctx.inc("candidates_persisted", written)
     return written
 
 def _raw_candidates(row: InvoiceRow, extraction_payload: dict[str, Any] | None) -> list[Candidate]:
@@ -560,11 +577,17 @@ def _nominal_master_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow
     )]
 
 
-def _history_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> list[Candidate]:
+def _history_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_ctx: ScanPerformanceContext | None = None) -> list[Candidate]:
     supplier_key = row.supplier_name
     if not supplier_key or not batch.tenant_id:
         return []
-    profile = get_supplier_history_profile(db, batch.tenant_id, batch.company_id, supplier_key)
+    cache_key = (batch.tenant_id, batch.company_id, _norm_supplier(supplier_key))
+    if perf_ctx is not None and cache_key in perf_ctx.supplier_history_cache:
+        profile = perf_ctx.supplier_history_cache[cache_key]
+    else:
+        profile = get_supplier_history_profile(db, batch.tenant_id, batch.company_id, supplier_key)
+        if perf_ctx is not None:
+            perf_ctx.supplier_history_cache[cache_key] = profile
     out: list[Candidate] = []
     for signal in profile.signals:
         # Saved-region availability is useful metadata, but it is not itself a
@@ -667,14 +690,18 @@ def arbitrate_invoice_row(
 ) -> ArbitrationResult:
     """Rank evidence sources and safely apply/flag field decisions for a row."""
     result = ArbitrationResult()
+    perf_ctx = (context or {}).get("perf_ctx") if isinstance(context, dict) else None
     candidates: list[Candidate] = []
     candidates.extend(_raw_candidates(row, extraction_payload))
     candidates.extend(_audit_candidates(db, row))
-    candidates.extend(_rule_candidates(db, batch, row))
+    with (perf_ctx.timed("rule_application") if perf_ctx else _nullcontext()):
+        candidates.extend(_rule_candidates(db, batch, row))
     candidates.extend(_supplier_master_candidates(db, batch, row))
     candidates.extend(_nominal_master_candidates(db, batch, row))
-    candidates.extend(_history_candidates(db, batch, row))
-    candidates.extend(_totals_candidates(row, extraction_payload))
+    with (perf_ctx.timed("supplier_history_lookup") if perf_ctx else _nullcontext()):
+        candidates.extend(_history_candidates(db, batch, row, perf_ctx=perf_ctx))
+    with (perf_ctx.timed("totals_reconciliation") if perf_ctx else _nullcontext()):
+        candidates.extend(_totals_candidates(row, extraction_payload))
 
     by_field: dict[str, list[Candidate]] = {f: [] for f in ARBITRATION_FIELDS}
     for cand in candidates:
@@ -725,6 +752,7 @@ def arbitrate_invoice_row(
                 db, batch, row, field_name, current, winner.value,
                 "arbitration_conflict",
                 f"{reason}; current_value={current!r}; winner_source={winner.source_type}; winner_value={winner.value!r}; evidence={winner.evidence}",
+                perf_ctx=perf_ctx,
             )
             continue
 
@@ -773,6 +801,7 @@ def arbitrate_invoice_row(
                 db, batch, row, field_name, old_value, new_value,
                 "arbitration_apply",
                 f"Applied {winner.source_type} candidate confidence={winner.confidence:.2f}; {winner.reason}; evidence={winner.evidence}",
+                perf_ctx=perf_ctx,
             )
         elif weak_current and winner.confidence < 0.60:
             decision.review_required = True
@@ -789,6 +818,7 @@ def arbitrate_invoice_row(
                 db, batch, row, field_name, current, winner.value,
                 "arbitration_suggest",
                 f"Suggested {winner.source_type} candidate confidence={winner.confidence:.2f}; not applied because current value is strong; evidence={winner.evidence}",
+                perf_ctx=perf_ctx,
             )
 
     if result.review_required:
@@ -801,5 +831,6 @@ def arbitrate_invoice_row(
     # Phase 8B: persist the evidence considered by arbitration.  This is
     # intentionally placed after decisions are complete and must not influence
     # which values are selected or applied.
-    persist_field_candidates(db, batch, row, result)
+    # Backward-compatible call shape retained for static guards: persist_field_candidates(db, batch, row, result)
+    persist_field_candidates(db, batch, row, result, perf_ctx=perf_ctx)
     return result

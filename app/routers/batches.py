@@ -32,6 +32,7 @@ from app.services.corrected_exporter import export_batch_corrected
 # <<< REVIEW_PACK corrected_export_import
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
 from app.services.invoice_arbitration import arbitrate_invoice_row
+from app.services.scan_performance import ScanPerformanceContext
 from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
 from app.services.template_render_service import render_template_sheet, resolve_effective_template
 from app.utils.storage import batch_upload_folder, batch_export_folder, resolve_upload_path
@@ -116,8 +117,8 @@ def _audit_rule_application(
         batch_id=batch.id,
         row_id=row.id,
         field_name=field_name,
-        old_value=str(old_value) if old_value is not None else None,
-        new_value=str(new_value) if new_value is not None else None,
+        old_value=old_text,
+        new_value=new_text,
         action="rule_apply",
         note=f"{note}; rule_id={rule.id}; rule_type={rule.rule_type}; scope={'global' if getattr(rule, 'is_global', False) else 'tenant'}",
         rule_created=False,
@@ -138,6 +139,7 @@ def _audit_saved_region_action(
     hint: RemapHint,
     action: str,
     note: str,
+    perf_ctx: ScanPerformanceContext | None = None,
 ) -> None:
     """Record saved-region replay decisions and governance telemetry.
 
@@ -146,6 +148,15 @@ def _audit_saved_region_action(
     is also updated so the UI can show which supplier/field region was used,
     whether it applied, failed, or conflicted, and which page was actually read.
     """
+    old_text = str(old_value) if old_value is not None else None
+    new_text = str(new_value) if new_value is not None else None
+    if old_text == new_text and action in {"saved_region_checked"}:
+        return
+    audit_key = (getattr(row, "id", None), field_name, action, old_text, new_text, getattr(hint, "id", None))
+    if perf_ctx is not None:
+        if audit_key in perf_ctx.audit_seen:
+            return
+        perf_ctx.audit_seen.add(audit_key)
     if row.id is None:
         db.add(row)
         db.flush()
@@ -178,8 +189,8 @@ def _audit_saved_region_action(
         batch_id=batch.id,
         row_id=row.id,
         field_name=field_name,
-        old_value=str(old_value) if old_value is not None else None,
-        new_value=str(new_value) if new_value is not None else None,
+        old_value=old_text,
+        new_value=new_text,
         action=action[:40],
         note=(f"{note}; remap_hint_id={hint.id}; source=saved_region")[:1000],
         rule_created=False,
@@ -347,6 +358,7 @@ def _read_saved_region_on_candidate_pages(
     hint: RemapHint,
     row_page_no: int | None,
     field_name: str,
+    perf_ctx: ScanPerformanceContext | None = None,
 ) -> tuple[str, int | None, list[int]]:
     """Read a saved region using flexible page replay.
 
@@ -356,7 +368,10 @@ def _read_saved_region_on_candidate_pages(
     """
     from app.routers.review import _read_region_text
 
-    pages = _candidate_pages_for_saved_region(pdf_path, row_page_no, hint.page_no)
+    pages = _candidate_pages_for_saved_region(pdf_path, row_page_no, hint.page_no)[:5]  # cap page search safely; page_no is reference only.
+    cache_key = (pdf_path, tuple(pages), float(hint.x), float(hint.y), float(hint.w), float(hint.h), field_name)
+    if perf_ctx is not None and cache_key in perf_ctx.saved_region_read_cache:
+        return perf_ctx.saved_region_read_cache[cache_key]
     best_raw = ""
     best_page: int | None = None
     for page_no in pages:
@@ -377,8 +392,14 @@ def _read_saved_region_on_candidate_pages(
             best_page = page_no
         normalised = _normalise_saved_region_value(field_name, raw)
         if normalised and _saved_region_value_is_valid(field_name, normalised):
-            return normalised, page_no, pages
-    return best_raw, best_page, pages
+            result = (normalised, page_no, pages)
+            if perf_ctx is not None:
+                perf_ctx.saved_region_read_cache[cache_key] = result
+            return result
+    result = (best_raw, best_page, pages)
+    if perf_ctx is not None:
+        perf_ctx.saved_region_read_cache[cache_key] = result
+    return result
 
 def _normalize_rule_value(value: str | None) -> str:
     """Normalise a rule source_pattern or supplier name for comparison.
@@ -1004,7 +1025,42 @@ def _hint_matches_value_or_signature(row: object, hint: RemapHint, row_norm: str
     return False
 
 
-def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
+def _saved_region_should_skip_for_performance(hint: RemapHint) -> bool:
+    """Skip inactive/archived/deleted/disabled and historically dead fallback regions."""
+    if not getattr(hint, "active", False):
+        return True
+    if getattr(hint, "archived", False) or getattr(hint, "deleted_at", None) is not None:
+        return True
+    if getattr(hint, "is_primary", False):
+        return False
+    success_count = int(getattr(hint, "success_count", 0) or 0)
+    failure_count = int(getattr(hint, "failure_count", 0) or 0)
+    return success_count == 0 and failure_count >= 5
+
+
+def _get_active_saved_regions_for_batch(db: Session, batch: InvoiceBatch, perf_ctx: ScanPerformanceContext | None = None) -> list[RemapHint]:
+    """Cache active saved regions per tenant/company during a batch."""
+    cache_key = (batch.tenant_id, batch.company_id)
+    if perf_ctx is not None and cache_key in perf_ctx.saved_region_cache:
+        return perf_ctx.saved_region_cache[cache_key]
+    hints_q = db.query(RemapHint).filter(
+        RemapHint.tenant_id == batch.tenant_id,
+        RemapHint.active.is_(True),
+        RemapHint.archived.is_(False),
+        RemapHint.deleted_at.is_(None),
+        RemapHint.x.isnot(None),
+    )
+    if batch.company_id:
+        hints_q = hints_q.filter((RemapHint.company_id == batch.company_id) | (RemapHint.company_id.is_(None)))
+    else:
+        hints_q = hints_q.filter(RemapHint.company_id.is_(None))
+    hints = [h for h in hints_q.all() if not _saved_region_should_skip_for_performance(h)]
+    if perf_ctx is not None:
+        perf_ctx.saved_region_cache[cache_key] = hints
+    return hints
+
+
+def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_ctx: ScanPerformanceContext | None = None) -> None:
     """Apply saved RemapHints as extraction guidance.
 
     Fills a field when:
@@ -1047,25 +1103,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         or _low_confidence
     }
 
-    hints_q = db.query(RemapHint).filter(
-        RemapHint.tenant_id == batch.tenant_id,
-        RemapHint.active.is_(True),
-        RemapHint.archived.is_(False),
-        RemapHint.deleted_at.is_(None),
-        RemapHint.x.isnot(None),
-    )
-    # Page number is a reference from the source invoice, not a hard match.
-    # The same supplier summary/header region may shift page between batches.
-    # Candidate page ranking is handled later when the PDF is available.
-    # Keep saved-region candidates tenant-safe and company-aware.  Legacy hints
-    # may have company_id=NULL, so include those as tenant-wide fallbacks.
-    if batch.company_id:
-        hints_q = hints_q.filter(
-            (RemapHint.company_id == batch.company_id) | (RemapHint.company_id.is_(None))
-        )
-    else:
-        hints_q = hints_q.filter(RemapHint.company_id.is_(None))
-    all_hints = hints_q.all()
+    all_hints = _get_active_saved_regions_for_batch(db, batch, perf_ctx=perf_ctx)
     if not all_hints:
         return
 
@@ -1191,8 +1229,10 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             continue
         try:
             text, used_page_no, tried_pages = _read_saved_region_on_candidate_pages(
-                pdf_path, hint, row.page_no, hint.field_name
+                pdf_path, hint, row.page_no, hint.field_name, perf_ctx=perf_ctx
             )
+            if perf_ctx is not None:
+                perf_ctx.inc("saved_regions_tested")
             if used_page_no and used_page_no != (hint.page_no or row.page_no):
                 logger.debug(
                     "RemapHint flexible-page replay: hint_id=%d field=%s saved_page=%s used_page=%s tried=%s",
@@ -1204,6 +1244,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                     getattr(row, hint.field_name, None), None, hint,
                     "saved_region_blank",
                     f"Saved region checked on candidate pages but crop/text-layer read was blank; saved_page={hint.page_no}; tried_pages={tried_pages}; field left unchanged",
+                    perf_ctx=perf_ctx,
                 )
                 continue
 
@@ -1233,6 +1274,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                                 getattr(row, hint.field_name, None), None, hint,
                                 "saved_region_blank",
                                 "Saved supplier region was checked but no reliable text/snapshot matched; field left unchanged",
+                                perf_ctx=perf_ctx,
                             )
                             continue
 
@@ -1243,6 +1285,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                         getattr(row, hint.field_name, None), text, hint,
                         "saved_region_invalid",
                         f"Saved region read did not match expected field type; saved_page={hint.page_no}; used_page={used_page_no}; tried_pages={tried_pages}; field left unchanged",
+                        perf_ctx=perf_ctx,
                     )
                     logger.debug(
                         "RemapHint: rejected invalid saved-region value %r for field=%s supplier=%r",
@@ -1264,16 +1307,20 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                                 db, batch, row, hint.field_name, existing, text, hint,
                                 "saved_region_checked",
                                 "Saved supplier region matched existing value; no change required",
+                                perf_ctx=perf_ctx,
                             )
                             target_fields.discard(hint.field_name)
                         else:
                             reason = f"saved_region_conflict:{hint.field_name}"
                             _append_review_marker(row, hint.field_name, reason)
                             _append_method_tag(row, f"remap_hint_conflict:{hint.field_name}")
+                        if perf_ctx is not None:
+                            perf_ctx.inc("saved_regions_conflicted")
                             _audit_saved_region_action(
                                 db, batch, row, hint.field_name, existing, text, hint,
                                 "saved_region_conflict",
                                 "Saved supplier region did not match the existing supplier relationship; field left unchanged",
+                                perf_ctx=perf_ctx,
                             )
                         continue
 
@@ -1288,6 +1335,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                             db, batch, row, hint.field_name, existing, text, hint,
                             "saved_region_checked",
                             "Saved region matched existing strong value; no change required",
+                            perf_ctx=perf_ctx,
                         )
                         target_fields.discard(hint.field_name)
                         continue
@@ -1295,10 +1343,13 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                         reason = f"saved_region_conflict:{hint.field_name}"
                         _append_review_marker(row, hint.field_name, reason)
                         _append_method_tag(row, f"remap_hint_conflict:{hint.field_name}")
+                        if perf_ctx is not None:
+                            perf_ctx.inc("saved_regions_conflicted")
                         _audit_saved_region_action(
                             db, batch, row, hint.field_name, existing, text, hint,
                             "saved_region_conflict",
                             f"Saved region conflicted with a strong existing value; saved_page={hint.page_no}; used_page={used_page_no}; review required and field left unchanged",
+                            perf_ctx=perf_ctx,
                         )
                         logger.debug(
                             "RemapHint: conflict for field=%s existing=%r saved_region=%r hint_id=%d supplier=%r",
@@ -1312,6 +1363,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                         db, batch, row, hint.field_name, old_val, text, hint,
                         "saved_region_checked",
                         "Saved region matched current value; no change required",
+                        perf_ctx=perf_ctx,
                     )
                     target_fields.discard(hint.field_name)
                     continue
@@ -1328,10 +1380,13 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                     except Exception:
                         pass
                 _append_method_tag(row, f"remap_hint:{hint.field_name}")
+                if perf_ctx is not None:
+                    perf_ctx.inc("saved_regions_applied")
                 _audit_saved_region_action(
                     db, batch, row, hint.field_name, old_val, text, hint,
                     "saved_region_apply",
                     f"Applied supplier-linked saved region during scan; confidence=medium; saved_page={hint.page_no}; used_page={used_page_no}; reason=supplier_match_page_independent_region",
+                    perf_ctx=perf_ctx,
                 )
                 target_fields.discard(hint.field_name)
                 logger.debug(
@@ -2611,6 +2666,8 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         review_required_count = 0
         totals_status_counts: dict[str, int] = {}
         extraction_method_counts: dict[str, int] = {}
+        perf_ctx = ScanPerformanceContext(batch_id=batch_id)
+        _batch_perf_start = __import__("time").perf_counter()
         for file_index, invoice_file in enumerate(files, start=1):
             inserted_rows = 0
             page_failures = 0
@@ -2621,16 +2678,19 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 page_count = invoice_file.page_count or 0
                 for page_index in range(page_count):
                     try:
-                        row_payloads = process_pdf_page_rows(
-                            str(materialize_invoice_file(invoice_file)),
-                            page_index=page_index,
-                            scan_mode=batch.scan_mode or "summary",
-                            openai_api_key=settings.openai_api_key if settings.use_openai else None,
-                            account_company_name=account_company_name,
-                        )
+                        _page_perf_start = __import__("time").perf_counter()
+                        with perf_ctx.timed("extraction_provider"):
+                            row_payloads = process_pdf_page_rows(
+                                str(materialize_invoice_file(invoice_file)),
+                                page_index=page_index,
+                                scan_mode=batch.scan_mode or "summary",
+                                openai_api_key=settings.openai_api_key if settings.use_openai else None,
+                                account_company_name=account_company_name,
+                            )
                         page_methods = sorted({str(_r.get("method_used") or "unknown").split("+")[0] for _r in row_payloads}) or ["no_rows"]
                         for _m in page_methods:
                             extraction_method_counts[_m] = extraction_method_counts.get(_m, 0) + 1
+                            perf_ctx.inc_method(_m)
                         logger.info(
                             "scan page completed batch=%s file_index=%d page=%d rows=%d methods=%s",
                             batch_id, file_index, page_index + 1, len(row_payloads), ",".join(page_methods),
@@ -2688,25 +2748,30 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 totals_raw=r.get("totals_raw"),
                                 page_text_raw=r.get("page_text_raw"),
                             )
-                            _apply_account_suggestions(
-                                db, tenant_id, batch.company_id, row,
-                                supplier_vat=supplier_vat,
-                            )
-                            _supplier_before_remap = row.supplier_name
-                            _apply_remap_hints(db, batch, row)
-                            # Supplier-name saved regions are allowed to confirm/fix a supplier
-                            # after the first master-data suggestion pass.  Re-run suggestions
-                            # so posting account / supplier match data follow the corrected name.
-                            if row.supplier_name != _supplier_before_remap:
+                            with perf_ctx.timed("supplier_history_lookup"):
                                 _apply_account_suggestions(
                                     db, tenant_id, batch.company_id, row,
                                     supplier_vat=supplier_vat,
                                 )
-                            _apply_saved_rules(db, batch, row)
+                            _supplier_before_remap = row.supplier_name
+                            with perf_ctx.timed("saved_region_replay"):
+                                _apply_remap_hints(db, batch, row, perf_ctx=perf_ctx)
+                            # Supplier-name saved regions are allowed to confirm/fix a supplier
+                            # after the first master-data suggestion pass.  Re-run suggestions
+                            # so posting account / supplier match data follow the corrected name.
+                            if row.supplier_name != _supplier_before_remap:
+                                with perf_ctx.timed("supplier_history_lookup"):
+                                    _apply_account_suggestions(
+                                        db, tenant_id, batch.company_id, row,
+                                        supplier_vat=supplier_vat,
+                                    )
+                            with perf_ctx.timed("rule_application"):
+                                _apply_saved_rules(db, batch, row)
                             # Deterministic post-extraction arbitration: compare raw extraction,
                             # rules, saved-region activity, supplier history/master data and
                             # totals evidence before final review/BCRS decisions.
-                            arbitrate_invoice_row(db, batch, row, r, context={"scan_mode": batch.scan_mode or "summary"})
+                            with perf_ctx.timed("arbitration"):
+                                arbitrate_invoice_row(db, batch, row, r, context={"scan_mode": batch.scan_mode or "summary", "perf_ctx": perf_ctx})
 
                             _method_text = row.method_used or ""
                             if "rule:" in _method_text or "arbitrated:correction_rule" in _method_text or "arbitrated:admin_global_rule" in _method_text:
@@ -2788,8 +2853,12 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             .values(page_count=processed_pages, notes=_note)
                             .execution_options(synchronize_session=False)
                         )
-                        db.commit()
+                        perf_ctx.timings["total_page_processing"] = perf_ctx.timings.get("total_page_processing", 0.0) + (__import__("time").perf_counter() - _page_perf_start)
+                        with perf_ctx.timed("db_commit"):
+                            db.commit()
                     except Exception as page_error:
+                        if "_page_perf_start" in locals():
+                            perf_ctx.timings["total_page_processing"] = perf_ctx.timings.get("total_page_processing", 0.0) + (__import__("time").perf_counter() - _page_perf_start)
                         db.rollback()
                         page_failures += 1
                         processed_pages += 1
@@ -2829,7 +2898,8 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             .values(page_count=processed_pages, notes=_note_err)
                             .execution_options(synchronize_session=False)
                         )
-                        db.commit()
+                        with perf_ctx.timed("db_commit"):
+                            db.commit()
                         total_rows += 1
                         inserted_rows += 1
                 if inserted_rows == 0:
@@ -2845,7 +2915,8 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                     invoice_file.status = "processed"
                     processed_files += 1
                 invoice_file.processed_at = datetime.utcnow()
-                db.commit()
+                with perf_ctx.timed("db_commit"):
+                    db.commit()
             except Exception as file_error:
                 db.rollback()
                 # Direct UPDATE for file-error so a subsequent rollback only undoes
@@ -2885,7 +2956,10 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
             )
             .execution_options(synchronize_session=False)
         )
-        db.commit()
+        with perf_ctx.timed("db_commit"):
+            db.commit()
+        perf_ctx.timings["total_batch_processing"] = __import__("time").perf_counter() - _batch_perf_start
+        perf_summary = perf_ctx.summary(processed_pages, total_rows, review_required_count)
 
         logger.info(
             "scan completed batch=%s status=%s files_processed=%d files_partial=%d files_failed=%d rows=%d review_required=%d rules_applied=%d saved_regions_seen=%d saved_regions_applied=%d saved_region_conflicts=%d totals_status=%s extraction_methods=%s",
@@ -2893,6 +2967,21 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
             review_required_count, rule_apply_count, saved_region_seen_count,
             saved_region_applied_count, saved_region_conflict_count, totals_status_counts,
             extraction_method_counts,
+        )
+        logger.info(
+            "scan performance summary batch=%s pages=%d rows=%d methods=%s saved_regions_tested=%d saved_regions_applied=%d saved_regions_conflicted=%d candidates_persisted=%d review_required=%d elapsed_seconds=%.3f avg_seconds_per_page=%.3f timings=%s",
+            batch_id,
+            perf_summary["pages_processed"],
+            perf_summary["rows_created"],
+            perf_summary["method_counts"],
+            perf_summary["saved_regions_tested"],
+            perf_summary["saved_regions_applied"],
+            perf_summary["saved_regions_conflicted"],
+            perf_summary["candidates_persisted"],
+            perf_summary["review_required_count"],
+            perf_summary["total_elapsed_seconds"],
+            perf_summary["average_seconds_per_page"],
+            perf_summary["timings_seconds"],
         )
 
         # Learn supplier patterns from this batch's successfully matched rows
