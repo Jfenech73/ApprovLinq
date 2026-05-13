@@ -242,6 +242,222 @@ def _last_money_on_label_line(text: str, label_patterns: list[str], reject_patte
     return best[1] if best else None
 
 
+
+def _summary_money_values_from_line(line: str) -> list[float]:
+    """Money parser for summary rows, including OCR-split cents.
+
+    OCR often turns ``40.50`` into ``40 50`` or ``98.88`` into ``98 88`` in
+    summary blocks.  This helper is only used in labelled summary context; the
+    general amount parser remains deliberately stricter for body tables.
+    """
+    vals = _money_values_from_line(line)
+    occupied: list[tuple[int, int]] = []
+    for m in re.finditer(r"(?<![\d])(?:€\s*)?(-?\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}|-?\d+[.,]\d{1,2})(?!\d)", line or ""):
+        occupied.append((m.start(), m.end()))
+    for m in re.finditer(r"(?<!\d)(\d{1,4})\s+(\d{2})(?!\d)", line or ""):
+        if any(not (m.end() <= a or m.start() >= b) for a, b in occupied):
+            continue
+        # Do not turn dates/times or VAT rates into amounts.
+        left = (line or "")[max(0, m.start()-12):m.start()].lower()
+        right = (line or "")[m.end():m.end()+8].lower()
+        if "%" in right or re.search(r"\b(date|page|invoice\s*#?|no\.?|vat\s*(?:reg|no))\b", left):
+            continue
+        whole = int(m.group(1))
+        cents = int(m.group(2))
+        if whole == 0 and cents == 0:
+            vals.append(0.0)
+        elif whole > 0:
+            vals.append(round(float(f"{whole}.{cents:02d}"), 2))
+    for m in re.finditer(r"(?<!\d)(\d{1,4})\s+([0-9])(?!\d)", line or ""):
+        if any(not (m.end() <= a or m.start() >= b) for a, b in occupied):
+            continue
+        left = (line or "")[max(0, m.start()-12):m.start()].lower()
+        right = (line or "")[m.end():m.end()+8].lower()
+        if "%" in right or re.search(r"\b(date|page|invoice\s*#?|no\.?|vat\s*(?:reg|no))\b", left):
+            continue
+        whole = int(m.group(1)); tenth = int(m.group(2))
+        if whole > 0:
+            vals.append(round(float(f"{whole}.{tenth}"), 2))
+    # Preserve order but remove duplicates.
+    out: list[float] = []
+    for v in vals:
+        if not any(abs(v - x) < 0.001 for x in out):
+            out.append(v)
+    return out
+
+
+def _has_explicit_zero_vat(text: str) -> bool:
+    low = text or ""
+    # Restrict this to explicit VAT labels.  Generic "Tax 0.00" appears in
+    # additional-charge columns on normal VAT invoices and must not zero out VAT.
+    if re.search(r"\b(total\s+vat|vat\s+amt|vat\s+amount)\b[^\n]{0,20}(?:0[., ]00|0\.00|0,00)\b", low, re.I):
+        return True
+    lines = [ln.strip() for ln in low.splitlines() if ln.strip()]
+    for i, ln in enumerate(lines):
+        if re.search(r"\b(total\s+vat|vat\s+amt|vat\s+amount)\b", ln, re.I):
+            for nxt in lines[i + 1:i + 3]:
+                if re.search(r"^(?:0[., ]00|0\.00|0,00|0)$", nxt.strip(), re.I):
+                    return True
+                if re.search(r"\b(before\s+tax|total|due|amount|bank|iban|notes?)\b", nxt, re.I):
+                    break
+    return False
+
+
+def _extract_summary_grid_bundle(text: str) -> dict[str, float]:
+    """Extract invoice totals from labelled summary grids, not supplier names.
+
+    Many invoices expose a bottom summary grid where OCR splits labels and
+    amounts over several lines.  This parser only uses accounting labels and
+    reconciliation, so it is batch/supplier independent.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln and ln.strip()]
+    if not lines:
+        return {}
+
+    # Prefer bottom summary area.  Keep enough context for labels whose values
+    # are split across adjacent lines.
+    start = 0
+    markers = [
+        r"invoice\s+lines", r"additional\s+charges", r"total\s+(?:invoice|eur)",
+        r"vat\s+rate", r"ex\s*va[ti]", r"amount\s+due", r"balance\s+due",
+        r"grand\s+total", r"total\s+amount\s+to\s+pay",
+    ]
+    for i, ln in enumerate(lines):
+        if any(re.search(p, ln, re.I) for p in markers):
+            start = max(0, i - 3)
+    seg = lines[start:]
+
+    def label_values(label_re: str, *, stop_re: str | None = None, max_lookahead: int = 3) -> list[tuple[float, int, str]]:
+        vals: list[tuple[float, int, str]] = []
+        stop = re.compile(stop_re, re.I) if stop_re else None
+        for i, ln in enumerate(seg):
+            if not re.search(label_re, ln, re.I):
+                continue
+            same = _summary_money_values_from_line(ln)
+            for v in same:
+                vals.append((v, i, ln))
+            if same:
+                continue
+            for j in range(i + 1, min(len(seg), i + 1 + max_lookahead)):
+                nxt = seg[j]
+                if stop and stop.search(nxt):
+                    break
+                if re.search(r"\b(code|description|qty|quantity|unit|retail|price|iban|bank|signature|notes?)\b", nxt, re.I):
+                    continue
+                ns = _summary_money_values_from_line(nxt)
+                if ns:
+                    for v in ns:
+                        vals.append((v, i, f"{ln} -> {nxt}"))
+                    break
+        return vals
+
+    # High-confidence explicit totals.
+    explicit_total = label_values(
+        r"\b(grand\s+total|total\s+amount\s+to\s+pay|amount\s+due|balance\s+due|total\s+due)\b|^\s*(?:due|dur|der|que|out|dun)\s*$",
+        stop_re=r"\b(payment\s+options|bank|iban|notes?|signature|terms)\b",
+        max_lookahead=2,
+    )
+    generic_total = label_values(
+        r"^\s*total\s*[:\-]?$|^\s*total\s+[a-z€]*\s*[:\-]?|\btotal\s+(?:inc|incl|invoice|eur)\b",
+        stop_re=r"\b(payment\s+total|payment\s+options|bank|iban|notes?|signature|terms|before\s+tax|vat|tax)\b",
+        max_lookahead=2,
+    )
+    net_vals = label_values(
+        r"\b(before\s+tax|before\s+[\"']?ax|net\s+amount|net\s+total|untaxed\s+amount|sub\s*total|subtotal|ex\s*va[ti]|total\s+excl)\b",
+        stop_re=r"\b(tax|vat|total|payment|due|bank|iban|notes?)\b",
+        max_lookahead=3,
+    )
+    vat_vals = label_values(
+        r"\b(total\s+vat|vat\s+amt|vat\s+amount|tax\s+amount|value\s+added\s+tax)\b|^\s*(?:tax|ta[xr]|t\s*\*\*)\s*[:\-]?$",
+        stop_re=r"\b(total|payment|due|bank|iban|notes?|before\s+tax)\b",
+        max_lookahead=3,
+    )
+
+    # Filter obvious body/header values.
+    net_candidates = [(v, 18 + (4 if i > len(seg) * 0.35 else 0), src) for v, i, src in net_vals if v >= 0]
+    vat_candidates = [(v, 18 + (4 if i > len(seg) * 0.35 else 0), src) for v, i, src in vat_vals if v >= 0]
+    total_candidates = []
+    for v, i, src in explicit_total:
+        if v > 0:
+            # Full labels such as Amount Due / Balance Due are strong.  A bare
+            # OCR line like "Dun"/"Que" is weaker because it is often a
+            # distorted Due label and can carry a misread amount.
+            bare_due = bool(re.match(r"^\s*(?:due|dur|der|que|out|dun)\s*$", src.split(" -> ", 1)[0], re.I))
+            base = 12 if bare_due else 30
+            total_candidates.append((v, base + (5 if i > len(seg) * 0.35 else 0), src))
+    for v, i, src in generic_total:
+        if v > 0:
+            total_candidates.append((v, 16 + (4 if i > len(seg) * 0.35 else 0), src))
+
+    # When VAT is explicitly zero, make zero available even if the OCR line was
+    # not captured as a money value.
+    if _has_explicit_zero_vat("\n".join(seg)):
+        vat_candidates.append((0.0, 22, "explicit_zero_vat"))
+
+    def dedupe(cands: list[tuple[float, int, str]]) -> list[tuple[float, int, str]]:
+        best: dict[float, tuple[float, int, str]] = {}
+        for val, score, src in cands:
+            key = round(val, 2)
+            if key not in best or score > best[key][1]:
+                best[key] = (key, score, src)
+        return list(best.values())
+
+    net_candidates = dedupe(net_candidates)
+    vat_candidates = dedupe(vat_candidates)
+    total_candidates = dedupe(total_candidates)
+
+    # Try accounting-consistent combinations first.
+    best: tuple[int, dict[str, float]] | None = None
+    for total, tw, tsrc in total_candidates:
+        # Zero-VAT invoices: total is also net when explicit VAT amount is 0.
+        if any(abs(v) <= 0.001 for v, _, _ in vat_candidates):
+            score = tw + 60
+            cand = {"net_amount": round(total, 2), "vat_amount": 0.0, "total_amount": round(total, 2)}
+            if best is None or score > best[0]:
+                best = (score, cand)
+        for net, nw, nsrc in net_candidates or []:
+            for vat, vw, vsrc in vat_candidates or [(round(total - net, 2), 8, "derived_vat")]:
+                if net < 0 or vat < 0:
+                    continue
+                diff = abs(round((net + vat) - total, 2))
+                score = tw + nw + vw
+                if diff <= 0.03:
+                    score += 120
+                elif diff <= 0.10:
+                    score += 90
+                else:
+                    # If net and total are strong, derive VAT for normal VAT invoices.
+                    derived_vat = round(total - net, 2)
+                    if derived_vat >= 0 and abs(derived_vat) <= max(total * 0.30, 0.01):
+                        dscore = tw + nw + 125
+                        dcand = {"net_amount": round(net, 2), "vat_amount": derived_vat, "total_amount": round(total, 2)}
+                        if best is None or dscore > best[0]:
+                            best = (dscore, dcand)
+                    continue
+                cand = {"net_amount": round(net, 2), "vat_amount": round(vat, 2), "total_amount": round(total, 2)}
+                if best is None or score > best[0]:
+                    best = (score, cand)
+        # If total + VAT are known but net is missing, derive net if plausible.
+        for vat, vw, vsrc in vat_candidates:
+            if 0 <= vat < total:
+                net = round(total - vat, 2)
+                # Accept when VAT is a plausible rate or explicit zero.
+                rate = (vat / net) if net else 0
+                if abs(vat) <= 0.001 or 0.03 <= rate <= 0.30:
+                    score = tw + vw + 75
+                    has_positive_vat = any(_v > 0.001 for _v, _, _ in vat_candidates)
+                    if vat > 0.001:
+                        score += 12
+                    elif has_positive_vat:
+                        score -= 18
+                    cand = {"net_amount": net, "vat_amount": round(vat, 2), "total_amount": round(total, 2)}
+                    if best is None or score > best[0]:
+                        best = (score, cand)
+
+    if best and best[0] >= 70:
+        return best[1]
+    return {}
+
 def _extract_labeled_financial_bundle(text: str) -> dict[str, float]:
     """Extract a reconciled net/VAT/total/deposit bundle from labelled summary text.
 
@@ -270,6 +486,8 @@ def _extract_labeled_financial_bundle(text: str) -> dict[str, float]:
         ],
         reject_patterns=[
             r"\bvat\s*(?:reg|no|number)\b", r"\bvat\s*summary\b",
+            r"\b(total|amount)\s+inc(?:l|luding)?\.?\s+vat\b",
+            r"\btotal\s+incl?\.?\s+vat\b",
             # Line-table headers such as "Total VAT Cons" are not the summary
             # VAT amount.  The actual VAT summary is handled by labelled-line
             # and reconciliation remediation below.
@@ -313,6 +531,22 @@ def _extract_labeled_financial_bundle(text: str) -> dict[str, float]:
         if v is not None and (k not in out or out.get(k) in (None, 0.0)):
             out[k] = v
 
+    # Bottom summary grids are usually the most reliable source for amounts.
+    # Use them when they reconcile better than the generic labelled pass.
+    grid = _extract_summary_grid_bundle(text)
+    if grid:
+        current_score = _bundle_support_score(out)
+        grid_score = _bundle_support_score(grid)
+        if grid_score >= current_score:
+            for k, v in grid.items():
+                if v is not None:
+                    out[k] = v
+        else:
+            # Still use grid values to fill blanks.
+            for k, v in grid.items():
+                if v is not None and out.get(k) in (None, ""):
+                    out[k] = v
+
     return _repair_financial_bundle(out, text)
 
 
@@ -333,7 +567,7 @@ def _extract_vertical_summary_amounts(text: str) -> dict[str, float]:
             # together with qty/price/code context.
             if re.search(r"\b(code|description|qty|quantity|unit|price|item|retail|cost)\b", low):
                 continue
-            vals.extend(_money_values_from_line(lines[j]))
+            vals.extend(_summary_money_values_from_line(lines[j]))
             if vals and re.search(r"\b(delivered|received|payment|bank|iban|signature)\b", low, re.I):
                 break
         return vals
@@ -341,11 +575,11 @@ def _extract_vertical_summary_amounts(text: str) -> dict[str, float]:
     for i, line in enumerate(lines):
         low = line.lower()
         if re.search(r"^net\s+amount\b|^net\s+total\b|^total\s+net\b", low):
-            vals = _money_values_from_line(line) or _next_values(i, (r"^total\s+amount", r"^invoice\s+total"))
+            vals = _summary_money_values_from_line(line) or _next_values(i, (r"^total", r"^invoice\s+total", r"^grand\s+total"))
             if vals:
                 out.setdefault("net_amount", vals[0])
         elif re.search(r"^v\.?a\.?t\.?\s+amount\b|^vat\s*[:\-]?$|^total\s+vat\b", low):
-            vals = _money_values_from_line(line) or _next_values(i, (r"^total\s+amount", r"^invoice\s+total", r"^bcrs", r"^deposit"))
+            vals = _summary_money_values_from_line(line) or _next_values(i, (r"^total", r"^invoice\s+total", r"^grand\s+total", r"^bcrs", r"^deposit"))
             if vals:
                 # Prefer an explicit zero/last value in VAT summary columns;
                 # this fixes Nectar-like OCR "VAT: 93.75 0.00 E@0%".
@@ -354,7 +588,7 @@ def _extract_vertical_summary_amounts(text: str) -> dict[str, float]:
                     chosen = 0.0
                 out.setdefault("vat_amount", round(float(chosen), 2))
         elif re.search(r"^total\s+amount\b|^total\s+due\b|^total\s+incl|^invoice\s+total\b|^grand\s+total\b", low):
-            vals = _money_values_from_line(line) or _next_values(i, (r"^bank\b", r"^iban\b", r"^signature\b"))
+            vals = _summary_money_values_from_line(line) or _next_values(i, (r"^bank\b", r"^iban\b", r"^signature\b"))
             if vals:
                 out.setdefault("total_amount", vals[-1])
     return out
@@ -375,6 +609,8 @@ def _repair_financial_bundle(values: dict[str, float], text: str | None = None) 
     out = dict(values or {})
 
     def _has_vat_rate(rate: int) -> bool:
+        if rate == 18:
+            return bool(re.search(r"(?:\b(?:vat|tax)\s*)?(?:18|1[8s]|[:;lI!|]8)\s*%", text or "", re.I))
         return bool(re.search(rf"\b(?:vat|tax)\s*{rate}\s*%|\b{rate}\s*%", text or "", re.I))
 
     def _derive_from_total_and_rate(total_f: float, rate: float) -> tuple[float, float]:
@@ -401,6 +637,15 @@ def _repair_financial_bundle(values: dict[str, float], text: str | None = None) 
                 out["vat_amount"] = 0.0
                 vat_f = 0.0
 
+        # Explicit zero-VAT summary: total is the commercial net.  This
+        # repairs invoices where OCR picked line contribution/discount columns
+        # as net/VAT even though the summary says VAT is 0.00.
+        if total_f is not None and _has_explicit_zero_vat(text or ""):
+            out["vat_amount"] = 0.0
+            out["net_amount"] = total_f
+            net_f = total_f
+            vat_f = 0.0
+
         # If VAT and total exist but net is absent or duplicated from the total
         # line, derive the commercial net. This fixes common PBL/Biocare OCR
         # summaries where the "Before Tax" value is missed.
@@ -410,6 +655,17 @@ def _repair_financial_bundle(values: dict[str, float], text: str | None = None) 
             if 0.03 <= implied_rate <= 0.30 and (net_f is None or abs(net_f - total_f) <= 0.11):
                 out["net_amount"] = implied_net
                 net_f = implied_net
+
+        # Some columnar invoices expose Tax and Gross under a "Sub Total"
+        # label.  If the value currently sitting in net is a plausible VAT
+        # component and VAT is absent, reinterpret it as VAT and derive net.
+        if total_f is not None and net_f is not None and vat_f is None and total_f > net_f > 0:
+            possible_net = round(total_f - net_f, 2)
+            possible_rate = net_f / possible_net if possible_net > 0 else 0
+            if 0.05 <= possible_rate <= 0.30 and re.search(r"\b(vat|tax|18\s*%|:8\s*%)", text or "", re.I):
+                out["net_amount"] = possible_net
+                out["vat_amount"] = net_f
+                net_f, vat_f = possible_net, net_f
 
         # If the visible document carries an 18% VAT marker and the current
         # net/VAT/total bundle is missing or mismatched, derive VAT from the
@@ -427,6 +683,16 @@ def _repair_financial_bundle(values: dict[str, float], text: str | None = None) 
                     out["net_amount"] = rate_net
                     out["vat_amount"] = rate_vat
                     net_f, vat_f = rate_net, rate_vat
+
+        # If net and total exist but VAT is absent or implausible, derive VAT
+        # from the two trusted summary values.
+        if net_f is not None and total_f is not None and total_f >= net_f:
+            derived_vat = round(total_f - net_f, 2)
+            derived_rate = derived_vat / net_f if net_f > 0 else 0
+            if derived_vat >= 0 and (vat_f is None or abs(round((net_f + vat_f) - total_f, 2)) > 0.10):
+                if derived_vat == 0 or 0.03 <= derived_rate <= 0.30:
+                    out["vat_amount"] = derived_vat
+                    vat_f = derived_vat
 
         # If net and VAT exist but total is absent, fill total. If the current
         # total is clearly impossible (lower than net/VAT) and the expected total

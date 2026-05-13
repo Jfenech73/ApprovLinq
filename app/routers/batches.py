@@ -1554,6 +1554,17 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     )
 
     summary_text = "\n".join(lines)
+
+    # If the only explicit BCRS/refundable-deposit amount in the summary is
+    # zero, do not use an arithmetic mismatch as a deposit.  This prevents false
+    # splits on invoices that print a normal "Total BCRS 0.00" line.
+    _bcrs_amount_mentions = []
+    for _ln in lines:
+        if re.search(r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit)\b", _ln, re.I):
+            _bcrs_amount_mentions.extend(_parse_money_candidates(_ln))
+    _has_positive_bcrs_mention = any(float(_v) > 0.001 for _v in _bcrs_amount_mentions)
+    _has_zero_bcrs_mention = bool(_bcrs_amount_mentions) and not _has_positive_bcrs_mention
+
     ranked: list[tuple[int, float]] = []
 
     def _add_candidate(score: int, val: float | None) -> None:
@@ -1587,7 +1598,7 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
             summary_text,
             re.I,
         ))
-        if explicit_bcrs_label and diff > 0.02:
+        if explicit_bcrs_label and not _has_zero_bcrs_mention and diff > 0.02:
             # Do not promote ordinary VAT or invoice total values.  A valid BCRS
             # component should be positive, smaller than the invoice total, and
             # not effectively equal to VAT.
