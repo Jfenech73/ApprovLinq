@@ -19,7 +19,7 @@ from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import InvoiceBatch, InvoiceRow, TenantNominalAccount, TenantSupplier
-from app.db.review_models import CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
+from app.db.review_models import CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit, InvoiceFieldCandidate, RemapHint
 from app.services.totals_reconciliation import reconcile_invoice_totals
 from app.services.supplier_history import get_supplier_history_profile
 
@@ -293,6 +293,107 @@ def _audit_arbitration(
         username="system",
     ))
 
+
+
+def _candidate_source_id(candidate: Candidate) -> str | None:
+    if candidate.rule_id is not None:
+        return f"rule:{candidate.rule_id}"
+    if candidate.remap_hint_id is not None:
+        return f"remap_hint:{candidate.remap_hint_id}"
+    if candidate.source_row_id is not None:
+        return f"row:{candidate.source_row_id}"
+    return None
+
+
+def _candidate_value_for_storage(value: Any) -> str | None:
+    text = _as_string_for_audit(value)
+    if text is None:
+        return None
+    return str(text)[:4000]
+
+
+def _normalised_value_for_storage(field_name: str, value: Any) -> str | None:
+    normalised = _normalise_field_value(field_name, value)
+    text = _as_string_for_audit(normalised)
+    if text is None:
+        return None
+    return str(text)[:4000]
+
+
+def _candidate_rejected_reason(decision: FieldDecision, candidate: Candidate, winner: Candidate | None) -> str | None:
+    if winner is candidate:
+        return None
+    if winner is None:
+        return "No selected candidate for field."
+    if decision.conflict:
+        return f"Rejected because field has a strong candidate conflict; selected {winner.source_type}."[:1000]
+    if not _value_valid_for_field(candidate.field_name, candidate.value):
+        return "Rejected because value failed field validation."
+    if SOURCE_RANK.get(candidate.source_type, 0) < SOURCE_RANK.get(winner.source_type, 0):
+        return f"Rejected because selected candidate had stronger source precedence: {winner.source_type}."[:1000]
+    if candidate.confidence < winner.confidence:
+        return f"Rejected because selected candidate had higher confidence: {winner.confidence:.2f}."[:1000]
+    return f"Rejected because {winner.source_type} candidate was selected."[:1000]
+
+
+def persist_field_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow, result: ArbitrationResult) -> int:
+    """Persist arbitration candidates for future training/analytics.
+
+    This function is deliberately write-only evidence capture. It must not mutate
+    arbitration decisions or change row values. Duplicate candidates within the
+    same arbitration run are collapsed by row/field/source/value/source_id.
+    """
+    if not result or not result.decisions:
+        return 0
+    if row.id is None:
+        db.add(row)
+        db.flush()
+
+    tenant_id = getattr(row, "tenant_id", None) or getattr(batch, "tenant_id", None)
+    batch_id = getattr(row, "batch_id", None) or getattr(batch, "id", None)
+    if not tenant_id or not batch_id or row.id is None:
+        return 0
+
+    seen: set[tuple[Any, ...]] = set()
+    written = 0
+    for decision in result.decisions.values():
+        winner = decision.winning_candidate
+        for candidate in decision.candidates or []:
+            source_id = _candidate_source_id(candidate)
+            value_text = _candidate_value_for_storage(candidate.value)
+            key = (
+                row.id,
+                candidate.field_name,
+                candidate.source_type,
+                source_id,
+                _normalised_value_for_storage(candidate.field_name, candidate.value),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+
+            selected = candidate is winner
+            db.add(InvoiceFieldCandidate(
+                tenant_id=tenant_id,
+                company_id=getattr(row, "company_id", None) or getattr(batch, "company_id", None),
+                batch_id=batch_id,
+                row_id=row.id,
+                source_file_id=getattr(row, "source_file_id", None),
+                field_name=candidate.field_name[:80],
+                candidate_value=value_text,
+                normalised_value=_normalised_value_for_storage(candidate.field_name, candidate.value),
+                source_type=(candidate.source_type or "unknown")[:80],
+                source_id=source_id,
+                confidence=candidate.confidence,
+                evidence=(candidate.evidence or "")[:4000],
+                reason=(candidate.reason or decision.reason or "")[:4000],
+                selected=selected,
+                applied=bool(selected and decision.applied),
+                rejected_reason=_candidate_rejected_reason(decision, candidate, winner),
+                conflict=bool(decision.conflict),
+            ))
+            written += 1
+    return written
 
 def _raw_candidates(row: InvoiceRow, extraction_payload: dict[str, Any] | None) -> list[Candidate]:
     payload = extraction_payload or {}
@@ -684,4 +785,9 @@ def arbitrate_invoice_row(
             row.review_fields = _append_unique(row.review_fields, field_name)
         for reason in result.review_reasons:
             row.review_reasons = _append_unique(row.review_reasons, reason)
+
+    # Phase 8B: persist the evidence considered by arbitration.  This is
+    # intentionally placed after decisions are complete and must not influence
+    # which values are selected or applied.
+    persist_field_candidates(db, batch, row, result)
     return result
