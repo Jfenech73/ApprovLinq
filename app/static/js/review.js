@@ -121,6 +121,21 @@ function renderFieldEvidence(r, field) {
   </details>`;
 }
 
+
+function renderSelectedExplainPanel() {
+  const panel = $("selectedExplainPanel");
+  const body = $("selectedExplainBody");
+  if (!panel || !body) return;
+  const r = state.rows.find(x => x.id === state.selected);
+  if (!r) {
+    panel.hidden = true;
+    body.innerHTML = "";
+    return;
+  }
+  body.innerHTML = renderRowExplainability(r);
+  panel.hidden = false;
+}
+
 async function load() {
   if (!batchId) { msg("Missing batch_id in URL", "error"); return; }
   // Clear any stale non-error banner when refreshing data
@@ -234,8 +249,7 @@ function render() {
          <span>#${r.id}</span>
          ${conf}
        </div>
-       ${badges.length ? `<div class="row-badges">${badges.join("")}</div>` : ""}
-       ${r.id === state.selected ? renderRowExplainability(r) : ""}`;
+       ${badges.length ? `<div class="row-badges">${badges.join("")}</div>` : ""}`;
 
     d.onclick = async () => {
       state.selected = r.id; state.fileId = r.source_file_id; state.page = r.page_no || 1;
@@ -247,6 +261,8 @@ function render() {
     };
     list.appendChild(d);
   });
+
+  renderSelectedExplainPanel();
 
   document.querySelectorAll(".filter-chips .btn").forEach(b => {
     b.classList.toggle("active", b.dataset.filter === state.filter);
@@ -262,8 +278,12 @@ function ensureExplainabilityStyles() {
   const st = document.createElement("style");
   st.id = "reviewExplainabilityStyles";
   st.textContent = `
-    .review-explain-card{border:1px solid var(--ap-border,#d7e0ea);background:var(--ap-surface,#fff);border-radius:10px;padding:10px;margin-bottom:10px;font-size:12px;line-height:1.45}
-    .review-row .review-explain-card{margin-top:8px;margin-bottom:0;background:rgba(255,255,255,.72);font-size:11px;overflow-wrap:anywhere}
+    .review-rows-body{display:flex;flex-direction:column;gap:8px;padding:8px}
+    .row-list-scroll{min-height:180px;overflow-y:auto;overflow-x:hidden;flex:1;border-bottom:1px solid var(--ap-border,#d7e0ea);padding-bottom:8px}
+    .selected-explain-panel{flex-shrink:0;max-height:38%;overflow:auto;border-top:1px solid var(--ap-border,#d7e0ea);padding-top:8px}
+    .selected-explain-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
+    .selected-explain-head h3{margin:0;font-size:13px;font-weight:700;color:var(--ap-text-muted,#536476)}
+    .review-explain-card{border:1px solid var(--ap-border,#d7e0ea);background:var(--ap-surface,#fff);border-radius:10px;padding:10px;margin-bottom:0;font-size:12px;line-height:1.45;overflow-wrap:anywhere}
     .review-explain-reasons{color:var(--ap-warning-text,#7a4b00)}
     .evidence-badge{display:inline-block;border:1px solid var(--ap-border,#d7e0ea);border-radius:999px;padding:1px 6px;font-size:11px;background:var(--ap-surface-muted,#f5f7fa);margin-right:4px}
     .evidence-tag{display:inline-block;border-radius:999px;padding:1px 6px;font-size:11px;background:var(--ap-surface-muted,#eef3f8);margin:2px 2px 0 0}
@@ -332,8 +352,8 @@ function renderEditor() {
   if (r.review_required && globalReasons.length) {
     header += `<div class="review-reasons-banner">&#9888; ${globalReasons.map(esc).join(" &middot; ")}</div>`;
   }
-  // Row-level confidence/review/evidence details are shown in the selected
-  // card under the Rows column to preserve editor space.
+  // Row-level confidence/review/evidence details are shown in the
+  // Transaction details panel below the row list to preserve editor and row-list space.
 
   // ── Field grid ────────────────────────────────────────────────────────────
   let html = '<div class="field-grid">';

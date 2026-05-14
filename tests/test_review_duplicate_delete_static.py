@@ -3,11 +3,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_review_ui_moves_explainability_to_rows_and_has_delete_block_button():
+def test_review_ui_places_explainability_below_row_list_and_has_delete_block_button():
     js = (ROOT / "app/static/js/review.js").read_text()
     html = (ROOT / "app/static/review.html").read_text()
+    assert "selectedExplainPanel" in html
+    assert "selectedExplainBody" in html
+    assert "row-list-scroll" in html
+    assert "renderSelectedExplainPanel()" in js
     assert "renderRowExplainability(r)" in js
-    assert "review-col-edit .review-col-body" in js
+    assert "${r.id === state.selected ? renderRowExplainability(r) : \"\"}" not in js
+    assert "Transaction details panel below the row list" in js
     assert "Delete / Block Export" in html
     assert "/rows/${state.selected}" in js and "method: \"DELETE\"" in js
 
