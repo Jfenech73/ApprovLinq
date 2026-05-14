@@ -196,15 +196,12 @@ function render() {
   $("statVersion").textContent   = "v" + (b.current_export_version || 0);
 
   const list = $("rowList");
+  const rowScroll = document.querySelector(".row-list-scroll");
+  const priorRowScrollTop = rowScroll ? rowScroll.scrollTop : 0;
   list.innerHTML = "";
+  // Keep the natural scan/export order stable. Selecting a row must not move it
+  // to the top because reviewers lose their place and cannot see which row is next.
   const visibleRows = state.rows.filter(rowMatches);
-  visibleRows.sort((a, b) => {
-    // Keep the row currently being edited at the top of the rows column so
-    // its explainability panel stays visible without consuming editor space.
-    if (a.id === state.selected && b.id !== state.selected) return -1;
-    if (b.id === state.selected && a.id !== state.selected) return 1;
-    return 0;
-  });
   visibleRows.forEach(r => {
     // Determine urgency: review_required + not yet reviewed/corrected = urgent
     const isUrgent = r.review_required && !r.row_reviewed && !r.is_corrected;
@@ -263,6 +260,7 @@ function render() {
   });
 
   renderSelectedExplainPanel();
+  if (rowScroll) rowScroll.scrollTop = priorRowScrollTop;
 
   document.querySelectorAll(".filter-chips .btn").forEach(b => {
     b.classList.toggle("active", b.dataset.filter === state.filter);

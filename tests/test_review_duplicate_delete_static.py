@@ -25,3 +25,12 @@ def test_duplicate_detection_and_delete_endpoint_exist():
     assert "arbitrated:duplicate_check" in batches
     assert "@router.delete(\"/batches/{batch_id}/rows/{row_id}\")" in review
     assert "row_delete_block_export" in review
+
+
+def test_review_row_selection_preserves_natural_order_and_scroll_position():
+    js = (ROOT / "app/static/js/review.js").read_text()
+    assert "Selecting a row must not move it" in js
+    assert "priorRowScrollTop" in js
+    assert "rowScroll.scrollTop = priorRowScrollTop" in js
+    assert "visibleRows.sort" not in js
+    assert "a.id === state.selected" not in js
