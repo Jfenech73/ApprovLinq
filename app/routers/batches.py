@@ -312,46 +312,48 @@ def _get_pdf_page_count_safe(pdf_path: str) -> int:
 
 
 def _candidate_pages_for_saved_region(pdf_path: str, row_page_no: int | None, hint_page_no: int | None) -> list[int]:
-    """Return pages to try for a saved region.
+    """Return pages to try for a saved region, anchored to the current row.
 
-    The stored page is treated as a reference from the invoice where the region
-    was created, not as a hard requirement.  Supplier invoices often move the
-    same summary/header block from page 3 to page 1/2 in another batch.
+    The stored page is a reference from the invoice where the region was
+    created, not a hard identity.  But a batch PDF can contain many unrelated
+    invoices.  Searching the whole PDF, or jumping to the stored page for a
+    different transaction, can read another supplier's invoice and contaminate
+    the current row.
 
-    Preference order:
-      1. current row page,
-      2. original saved page,
-      3. neighbouring pages,
-      4. remaining pages in document order.
+    Safe replay therefore tries the current row page first and only its
+    immediate neighbours.  The stored hint page is included only if it is the
+    same page or adjacent to the current row page.  There is deliberately no
+    whole-document search.
     """
     page_count = _get_pdf_page_count_safe(pdf_path)
     max_page = page_count if page_count > 0 else max(int(row_page_no or 1), int(hint_page_no or 1), 1)
     seen: set[int] = set()
     ordered: list[int] = []
 
-    def add(page: int | None):
+    def _as_int(page: int | None) -> int | None:
         try:
             p = int(page or 0)
         except Exception:
-            return
-        if p < 1 or p > max_page or p in seen:
+            return None
+        return p if 1 <= p <= max_page else None
+
+    def add(page: int | None):
+        p = _as_int(page)
+        if p is None or p in seen:
             return
         seen.add(p)
         ordered.append(p)
 
-    add(row_page_no)
-    add(hint_page_no)
-    for base in (row_page_no, hint_page_no):
-        try:
-            b = int(base or 0)
-        except Exception:
-            continue
-        add(b - 1)
-        add(b + 1)
-    for p in range(1, min(max_page, 25) + 1):
-        add(p)
-    return ordered or [int(row_page_no or hint_page_no or 1)]
+    row_p = _as_int(row_page_no) or _as_int(hint_page_no) or 1
+    hint_p = _as_int(hint_page_no)
 
+    add(row_p)
+    add(row_p - 1)
+    add(row_p + 1)
+    if hint_p is not None and abs(hint_p - row_p) <= 1:
+        add(hint_p)
+
+    return ordered or [row_p]
 
 def _read_saved_region_on_candidate_pages(
     pdf_path: str,
@@ -1177,7 +1179,10 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
             if not src_row:
                 continue
             sig = _build_document_signature(src_row)
-            if _signature_overlap(row_signature, sig) >= 0.35:
+            if h.field_name != "supplier_name" and _signature_overlap(row_signature, sig) >= 0.35:
+                # Signature fallback is useful for amount/date/description regions
+                # on the same layout, but it is too weak for identity fields.
+                # Supplier names require supplier-token or current-page crop evidence.
                 matched.append(h)
     if _low_confidence:
         for h in all_hints:
@@ -1266,7 +1271,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
                         # still useful when current crop OCR is blank.  Only use it
                         # when it can be tied back to this row by name/signature.
                         snap = (hint.supplier_name_snapshot or "").strip()
-                        if snap and _supplier_hint_candidate_matches_row(row, hint):
+                        if snap and _supplier_snapshot_matches_current(getattr(row, "supplier_name", None), snap):
                             text = snap
                         else:
                             _audit_saved_region_action(

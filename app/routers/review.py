@@ -2361,6 +2361,8 @@ def apply_saved_regions_to_row(
     )
     before = {f: getattr(row, f, None) for f in tracked}
     supplier_before = row.supplier_name
+    reasons_before = row.review_reasons or ""
+    method_before = row.method_used or ""
 
     try:
         from app.routers.batches import _apply_remap_hints, _apply_account_suggestions
@@ -2377,6 +2379,12 @@ def apply_saved_regions_to_row(
         for f in tracked
         if str(before[f] or "") != str(after[f] or "")
     }
+
+    conflict_fields: list[str] = []
+    conflict_text = "|".join([row.review_reasons or "", row.method_used or ""])
+    for f in tracked:
+        if f"saved_region_conflict:{f}" in conflict_text or f"remap_hint_conflict:{f}" in conflict_text:
+            conflict_fields.append(f)
 
     if changed:
         row.review_required = True
@@ -2400,7 +2408,14 @@ def apply_saved_regions_to_row(
         ))
 
     db.commit()
-    return {"changed": changed, "changed_fields": list(changed.keys()), "method_used": row.method_used}
+    checked_changed = (row.review_reasons or "") != reasons_before or (row.method_used or "") != method_before or bool(changed)
+    return {
+        "changed": changed,
+        "changed_fields": list(changed.keys()),
+        "conflict_fields": conflict_fields,
+        "checked_regions": 1 if checked_changed else 0,
+        "method_used": row.method_used,
+    }
 
 
 

@@ -34,6 +34,12 @@ function msg(text, kind) {
   }
 }
 
+function setApplySavedRegionsStatus(text, kind) {
+  const el = $("applySavedRegionsStatus");
+  if (!el) return;
+  el.textContent = text || "";
+  el.className = "muted" + (kind ? " " + kind : "");
+}
 
 function sourceBadge(source, label) {
   const src = String(source || "raw_extraction").replace(/[^a-z0-9_-]/gi, "_");
@@ -1016,7 +1022,9 @@ async function handleApplySavedRegionsClick(evt) {
   if (evt) { evt.preventDefault(); evt.stopPropagation(); }
   const btn = $("applySavedRegionsBtn");
   if (btn && btn.dataset.busy === "1") return;
-  if (btn) { btn.dataset.busy = "1"; btn.disabled = true; }
+  const oldText = btn ? btn.textContent : "";
+  if (btn) { btn.dataset.busy = "1"; btn.disabled = true; btn.textContent = "Applying…"; }
+  setApplySavedRegionsStatus("Checking selected row…", "");
   try {
     let row = state.rows.find(x => x.id === state.selected);
     // A common reviewer flow is to open Review and press this button before
@@ -1030,8 +1038,8 @@ async function handleApplySavedRegionsClick(evt) {
       render();
       loadAudit(row.id);
     }
-    if (!row) { msg("No extracted row is available for saved-region replay.", "error"); return; }
-    if (!batchId) { msg("Missing batch_id in review URL; cannot apply saved regions.", "error"); return; }
+    if (!row) { msg("No extracted row is available for saved-region replay.", "error"); setApplySavedRegionsStatus("No row selected", "error"); return; }
+    if (!batchId) { msg("Missing batch_id in review URL; cannot apply saved regions.", "error"); setApplySavedRegionsStatus("Missing batch", "error"); return; }
 
     msg("Applying saved regions to selected row…", "");
     const r = await fetch(`/review/batches/${batchId}/rows/${row.id}/apply-saved-regions`, {
@@ -1041,17 +1049,35 @@ async function handleApplySavedRegionsClick(evt) {
     if (!r.ok) { msg(`Apply saved regions failed: ${await r.text()}`, "error"); return; }
     const data = await r.json().catch(() => ({}));
     const fields = data.changed_fields || [];
+    const conflicts = data.conflict_fields || [];
+    const checked = data.checked_regions || 0;
     if (fields.length) {
-      msg(`Saved regions applied: ${fields.join(", ")}. Please verify before approval.`, "success");
+      const text = `Saved regions applied: ${fields.join(", ")}. Please verify before approval.`;
+      msg(text, "success");
+      setApplySavedRegionsStatus(`Changed: ${fields.join(", ")}`, "success");
+      const keepSelected = row.id;
       await load();
-    } else {
-      msg("Saved regions checked — no field changed on the selected row.", "warning");
+      state.selected = keepSelected;
+      const updated = state.rows.find(x => x.id === keepSelected);
+      if (updated) { state.fileId = updated.source_file_id; state.page = updated.page_no || 1; render(); await loadAudit(keepSelected); await ensurePageCount(); refreshPreview(); }
+    } else if (conflicts.length) {
+      const text = `Saved regions checked ${checked ? `(${checked}) ` : ""}but conflicted with existing values: ${conflicts.join(", ")}. Field left unchanged.`;
+      msg(text, "warning");
+      setApplySavedRegionsStatus(`Conflict: ${conflicts.join(", ")}`, "warning");
       await loadAudit(row.id);
+      renderSelectedExplainPanel();
+    } else {
+      const text = `Saved regions checked${checked ? ` (${checked})` : ""} — no field changed on the selected row.`;
+      msg(text, "warning");
+      setApplySavedRegionsStatus("Checked; no change", "warning");
+      await loadAudit(row.id);
+      renderSelectedExplainPanel();
     }
   } catch (e) {
     msg(`Apply saved regions failed: ${e && e.message ? e.message : e}`, "error");
+    setApplySavedRegionsStatus("Apply failed", "error");
   } finally {
-    if (btn) { btn.dataset.busy = "0"; btn.disabled = false; }
+    if (btn) { btn.dataset.busy = "0"; btn.disabled = false; btn.textContent = oldText || "Apply saved regions to row"; }
   }
 }
 

@@ -34,3 +34,14 @@ def test_review_row_selection_preserves_natural_order_and_scroll_position():
     assert "rowScroll.scrollTop = priorRowScrollTop" in js
     assert "visibleRows.sort" not in js
     assert "a.id === state.selected" not in js
+
+
+def test_apply_saved_regions_has_visible_status_feedback():
+    js = (ROOT / "app/static/js/review.js").read_text()
+    html = (ROOT / "app/static/review.html").read_text()
+    assert "applySavedRegionsStatus" in html
+    assert "setApplySavedRegionsStatus" in js
+    assert "Checking selected row" in js
+    assert "Changed:" in js
+    assert "Checked; no change" in js
+    assert "Conflict:" in js
