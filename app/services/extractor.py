@@ -303,6 +303,61 @@ def _has_explicit_zero_vat(text: str) -> bool:
     return False
 
 
+
+def _extract_vat_summary_row_bundle(text: str) -> dict[str, float]:
+    """Parse compact VAT summary rows with net/VAT/gross columns.
+
+    Handles generic layouts such as:
+    - VAT Code Desc | Excl VAT | VAT | Total
+    - VAT @ 18% Product 466.11 83.89 550.00
+    - totals rows where OCR keeps the three accounting values on one line.
+
+    This is deliberately label-driven and only accepts three values that
+    reconcile as net + VAT = total.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln and ln.strip()]
+    if not lines:
+        return {}
+    best: tuple[int, dict[str, float]] | None = None
+
+    def _consider(vals: list[float], score: int) -> None:
+        nonlocal best
+        if len(vals) < 3:
+            return
+        # Use the right-most three money-like values.  In these summaries they
+        # are normally Net/Excl, VAT, Gross/Total.
+        net, vat, total = [round(float(x), 2) for x in vals[-3:]]
+        if net < 0 or vat < 0 or total <= 0:
+            return
+        diff = abs(round((net + vat) - total, 2))
+        if diff <= 0.03:
+            cand = {"net_amount": net, "vat_amount": vat, "total_amount": total}
+            final_score = score + 120
+            if best is None or final_score > best[0]:
+                best = (final_score, cand)
+
+    for i, ln in enumerate(lines):
+        low = ln.lower()
+        # Header followed by value row.
+        if re.search(r"\b(excl?\s*vat|ex\s*vat|excl?\.?\s*tax|before\s+tax)\b", low) and re.search(r"\b(vat|tax)\b", low) and re.search(r"\b(total|inc\s*vat|incl\s*vat|gross)\b", low):
+            same = _summary_money_values_from_line(ln)
+            _consider(same, 40 + (8 if i > len(lines) * 0.45 else 0))
+            if len(same) < 3:
+                for j in range(i + 1, min(len(lines), i + 4)):
+                    nxt = lines[j]
+                    if re.search(r"\b(bank|iban|signature|payment|client|account)\b", nxt, re.I):
+                        break
+                    vals = _summary_money_values_from_line(nxt)
+                    if len(vals) >= 3:
+                        _consider(vals, 45 + (8 if j > len(lines) * 0.45 else 0))
+                        break
+        # Compact row with VAT description and three trailing values.
+        if re.search(r"\bvat\s*@?\s*(?:\d{1,2})\s*%|\bvat\s+(?:@|at)\b|\btax\s*@?\s*(?:\d{1,2})\s*%", low):
+            vals = _summary_money_values_from_line(ln)
+            _consider(vals, 42 + (8 if i > len(lines) * 0.45 else 0))
+
+    return best[1] if best and best[0] >= 120 else {}
+
 def _extract_summary_grid_bundle(text: str) -> dict[str, float]:
     """Extract invoice totals from labelled summary grids, not supplier names.
 
@@ -319,7 +374,7 @@ def _extract_summary_grid_bundle(text: str) -> dict[str, float]:
     start = 0
     markers = [
         r"invoice\s+lines", r"additional\s+charges", r"total\s+(?:invoice|eur)",
-        r"vat\s+rate", r"ex\s*va[ti]", r"amount\s+due", r"balance\s+due",
+        r"vat\s+rate", r"vat\s+code\s+desc", r"ex\s*va[ti]", r"amount\s+due", r"balance\s+due",
         r"grand\s+total", r"total\s+amount\s+to\s+pay",
     ]
     for i, ln in enumerate(lines):
@@ -405,6 +460,23 @@ def _extract_summary_grid_bundle(text: str) -> dict[str, float]:
     net_candidates = dedupe(net_candidates)
     vat_candidates = dedupe(vat_candidates)
     total_candidates = dedupe(total_candidates)
+
+    vat_row_bundle = _extract_vat_summary_row_bundle("\n".join(seg))
+    if vat_row_bundle:
+        for field, weight in (("net_amount", 38), ("vat_amount", 38), ("total_amount", 44)):
+            val = vat_row_bundle.get(field)
+            if val is None:
+                continue
+            src = "vat_summary_row"
+            if field == "net_amount":
+                net_candidates.append((round(val, 2), weight, src))
+            elif field == "vat_amount":
+                vat_candidates.append((round(val, 2), weight, src))
+            elif field == "total_amount" and val > 0:
+                total_candidates.append((round(val, 2), weight, src))
+        net_candidates = dedupe(net_candidates)
+        vat_candidates = dedupe(vat_candidates)
+        total_candidates = dedupe(total_candidates)
 
     # Try accounting-consistent combinations first.
     best: tuple[int, dict[str, float]] | None = None
@@ -625,6 +697,19 @@ def _repair_financial_bundle(values: dict[str, float], text: str | None = None) 
         net_f = round(float(net), 2) if net is not None else None
         vat_f = round(float(vat or 0.0), 2) if vat is not None else None
         total_f = round(float(total), 2) if total is not None else None
+
+        # If the document only exposes a payable total and no VAT/tax breakdown,
+        # treat it as a zero-VAT row so accounting export remains complete.
+        # This is not supplier-specific: it applies to any total-only invoice
+        # where there is no visible VAT percentage/amount summary.
+        if total_f is not None and total_f > 0 and net_f is None and vat is None:
+            has_tax_breakdown = bool(re.search(r"\b(total\s+vat|vat\s+amt|vat\s+amount|tax\s+amount|before\s+tax|ex\s*vat|excl?\s*vat|sub\s*total)\b", text or "", re.I))
+            has_vat_rate = bool(re.search(r"\b(?:vat|tax)?\s*(?:5|7|18|19|20|21)\s*%", text or "", re.I))
+            if not has_tax_breakdown and not has_vat_rate:
+                out["net_amount"] = total_f
+                out["vat_amount"] = 0.0
+                net_f = total_f
+                vat_f = 0.0
 
         if net_f is not None and total_f is not None:
             # If total and net are within a few cents on a zero VAT invoice, the

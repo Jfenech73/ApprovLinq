@@ -2483,6 +2483,81 @@ def _learn_supplier_patterns(
             pass
 
 
+
+def _norm_duplicate_token(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "", text)
+    return text
+
+
+def _mark_duplicate_invoice_rows(db: Session, batch_id: UUID) -> int:
+    """Flag likely duplicate invoice rows for review/export blocking.
+
+    Detection is intentionally generic and conservative: invoice/credit-note
+    number plus date plus near-identical total is the strong identity. Supplier
+    text is not required because OCR may read the same supplier differently.
+    """
+    rows = (
+        db.query(InvoiceRow)
+        .filter(InvoiceRow.batch_id == batch_id)
+        .order_by(InvoiceRow.source_file_id.asc(), InvoiceRow.page_no.asc(), InvoiceRow.id.asc())
+        .all()
+    )
+    seen: dict[tuple[str, object, int], InvoiceRow] = {}
+    flagged = 0
+    for row in rows:
+        inv = _norm_duplicate_token(row.invoice_number)
+        if len(inv) < 3:
+            continue
+        total = row.total_amount
+        if total is None:
+            continue
+        try:
+            # cents-level key, tolerant of one-cent OCR/rounding differences.
+            total_cents = int(round(float(total) * 100))
+        except Exception:
+            continue
+        date_key = row.invoice_date or ""
+        # Check exact and +/- 1 cent totals for the same invoice/date.
+        duplicate_of = None
+        for cents in (total_cents, total_cents - 1, total_cents + 1):
+            prev = seen.get((inv, date_key, cents))
+            if prev is not None:
+                duplicate_of = prev
+                break
+        if duplicate_of is None:
+            seen[(inv, date_key, total_cents)] = row
+            continue
+
+        reasons = [x for x in re.split(r"[|]", row.review_reasons or "") if x]
+        reason = f"possible_duplicate_invoice:row_{duplicate_of.id}"
+        if reason not in reasons:
+            reasons.append(reason)
+        fields = [x for x in re.split(r"[|]", row.review_fields or "") if x]
+        for f in ("invoice_number", "invoice_date", "total_amount"):
+            if f not in fields:
+                fields.append(f)
+        row.review_required = True
+        row.review_priority = "high"
+        row.validation_status = "review_possible_duplicate"
+        row.review_reasons = "|".join(reasons)
+        row.review_fields = "|".join(fields)
+        _append_method_tag(row, "arbitrated:duplicate_check")
+        db.add(InvoiceRowFieldAudit(
+            batch_id=batch_id,
+            row_id=row.id or 0,
+            field_name="_row",
+            old_value=None,
+            new_value=f"possible duplicate of row {duplicate_of.id}",
+            action="duplicate_detected",
+            note="Same invoice/credit-note number, date and near-identical total found in this batch. Review and delete/block one row before export if duplicated.",
+            username="system",
+        ))
+        flagged += 1
+    if flagged:
+        db.commit()
+    return flagged
+
 def _create_batch_issue_logs(batch_id: UUID, tenant_id, db: Session) -> None:
     """Auto-create IssueLog records for rows that need human attention after processing."""
     rows = (
@@ -2941,6 +3016,11 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 )
                 db.commit()
                 failed_files += 1
+
+        duplicate_review_count = _mark_duplicate_invoice_rows(db, batch_id)
+        if duplicate_review_count:
+            review_required_count += duplicate_review_count
+            logger.info("duplicate invoice review flags batch=%s count=%d", batch_id, duplicate_review_count)
 
         # ── Final status via direct UPDATE (atomic, no ORM stale-state risk) ──
         if processed_files and not failed_files and not partial_files:

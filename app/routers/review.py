@@ -396,6 +396,38 @@ def save_corrections(batch_id: UUID, row_id: int, payload: RowCorrectionIn,
     return {"audited": len(audits), "candidate_labels": labelled}
 
 
+
+
+@router.delete("/batches/{batch_id}/rows/{row_id}")
+def delete_review_row(batch_id: UUID, row_id: int,
+                      db: Session = Depends(get_db), user=Depends(current_user)):
+    """Delete a review row so it is blocked from export.
+
+    This is intended for duplicates/false rows caught during arbitration review.
+    The immutable source PDF remains; only the extracted/export row is removed.
+    """
+    batch = _get_batch(db, batch_id)
+    if cs.normalise_status(batch.status) == "exported":
+        raise HTTPException(409, "Batch is exported; reopen before deleting rows.")
+    row = db.get(M.InvoiceRow, row_id)
+    if not row or row.batch_id != batch.id:
+        raise HTTPException(404, "Row not found in batch")
+    db.add(InvoiceRowFieldAudit(
+        batch_id=batch.id,
+        row_id=row.id,
+        field_name="_row",
+        old_value=f"{row.supplier_name or ''} | {row.invoice_number or ''} | {row.total_amount or ''}"[:500],
+        new_value="deleted_blocked_from_export",
+        action="row_delete_block_export",
+        note="Reviewer deleted this row so it is excluded from export.",
+        user_id=user.id,
+        username=getattr(user, "email", None) or getattr(user, "full_name", None),
+    ))
+    db.delete(row)
+    db.commit()
+    return {"deleted": True, "row_id": row_id, "blocked_from_export": True}
+
+
 @router.post("/batches/{batch_id}/rows/{row_id}/duplicate")
 def duplicate_row(batch_id: UUID, row_id: int,
                   db: Session = Depends(get_db), user=Depends(current_user)):

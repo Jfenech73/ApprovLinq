@@ -161,3 +161,65 @@ Grand Total
     assert out["net_amount"] == 4.53
     assert out["vat_amount"] == 0.82
     assert out["total_amount"] == 5.35
+
+
+def test_total_only_invoice_becomes_zero_vat_net_equal_total():
+    text = """
+INVOICE
+Amount Due (EUR):
+€210.70
+Total:
+€210.70
+Bank details
+"""
+    bundle = _extract_labeled_financial_bundle(text)
+    assert bundle["net_amount"] == 210.70
+    assert bundle["vat_amount"] == 0.0
+    assert bundle["total_amount"] == 210.70
+
+
+def test_vat_code_desc_summary_row_reconciles_net_vat_total():
+    text = """
+VAT Code Desc
+Excl VAT
+VAT
+Total
+VF VAT @ 18% (Product) 466.11 83.89 550.00
+Grand Total 550.00
+"""
+    bundle = _extract_labeled_financial_bundle(text)
+    assert bundle["net_amount"] == 466.11
+    assert bundle["vat_amount"] == 83.89
+    assert bundle["total_amount"] == 550.00
+
+
+def test_before_tax_tax_total_duplicate_page_layout_uses_tax_not_before_tax_as_vat():
+    text = """
+Invoice Lines
+Before Tax
+225.00
+Before Tax
+0.00
+Before Tax
+225.00
+Tax
+40 50
+Tax
+0.00
+Tax
+40.50
+Total
+265.50
+Total
+0.00
+Total
+265.50
+Payment Total
+0.00
+Due
+265.50
+"""
+    bundle = _extract_labeled_financial_bundle(text)
+    assert bundle["net_amount"] == 225.00
+    assert bundle["vat_amount"] == 40.50
+    assert bundle["total_amount"] == 265.50

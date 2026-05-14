@@ -182,7 +182,15 @@ function render() {
 
   const list = $("rowList");
   list.innerHTML = "";
-  state.rows.filter(rowMatches).forEach(r => {
+  const visibleRows = state.rows.filter(rowMatches);
+  visibleRows.sort((a, b) => {
+    // Keep the row currently being edited at the top of the rows column so
+    // its explainability panel stays visible without consuming editor space.
+    if (a.id === state.selected && b.id !== state.selected) return -1;
+    if (b.id === state.selected && a.id !== state.selected) return 1;
+    return 0;
+  });
+  visibleRows.forEach(r => {
     // Determine urgency: review_required + not yet reviewed/corrected = urgent
     const isUrgent = r.review_required && !r.row_reviewed && !r.is_corrected;
     const isHighPriority = r.review_priority === "high" || r.review_priority === "urgent";
@@ -226,11 +234,15 @@ function render() {
          <span>#${r.id}</span>
          ${conf}
        </div>
-       ${badges.length ? `<div class="row-badges">${badges.join("")}</div>` : ""}`;
+       ${badges.length ? `<div class="row-badges">${badges.join("")}</div>` : ""}
+       ${r.id === state.selected ? renderRowExplainability(r) : ""}`;
 
     d.onclick = async () => {
       state.selected = r.id; state.fileId = r.source_file_id; state.page = r.page_no || 1;
-      render(); loadAudit(r.id); await loadCandidateEvidence(r.id); await ensurePageCount();
+      render();
+      const editorBody = document.querySelector(".review-col-edit .review-col-body");
+      if (editorBody) editorBody.scrollTop = 0;
+      loadAudit(r.id); await loadCandidateEvidence(r.id); await ensurePageCount();
       refreshPreview(); // always load preview in 3-col layout
     };
     list.appendChild(d);
@@ -251,6 +263,7 @@ function ensureExplainabilityStyles() {
   st.id = "reviewExplainabilityStyles";
   st.textContent = `
     .review-explain-card{border:1px solid var(--ap-border,#d7e0ea);background:var(--ap-surface,#fff);border-radius:10px;padding:10px;margin-bottom:10px;font-size:12px;line-height:1.45}
+    .review-row .review-explain-card{margin-top:8px;margin-bottom:0;background:rgba(255,255,255,.72);font-size:11px;overflow-wrap:anywhere}
     .review-explain-reasons{color:var(--ap-warning-text,#7a4b00)}
     .evidence-badge{display:inline-block;border:1px solid var(--ap-border,#d7e0ea);border-radius:999px;padding:1px 6px;font-size:11px;background:var(--ap-surface-muted,#f5f7fa);margin-right:4px}
     .evidence-tag{display:inline-block;border-radius:999px;padding:1px 6px;font-size:11px;background:var(--ap-surface-muted,#eef3f8);margin:2px 2px 0 0}
@@ -319,7 +332,8 @@ function renderEditor() {
   if (r.review_required && globalReasons.length) {
     header += `<div class="review-reasons-banner">&#9888; ${globalReasons.map(esc).join(" &middot; ")}</div>`;
   }
-  header += renderRowExplainability(r);
+  // Row-level confidence/review/evidence details are shown in the selected
+  // card under the Rows column to preserve editor space.
 
   // ── Field grid ────────────────────────────────────────────────────────────
   let html = '<div class="field-grid">';
@@ -546,6 +560,24 @@ $("exportBtn").onclick = async () => {
     msg(String(e), "error");
   }
 };
+
+// ── Delete/block row from export ─────────────────────────────────────────────
+$("deleteRowBtn").onclick = async () => {
+  if (state.selected == null) { msg("Select a row first.", "error"); return; }
+  const row = state.rows.find(x => x.id === state.selected);
+  const label = row ? `${row.current?.supplier_name || "row"} ${row.current?.invoice_number || ""}`.trim() : "selected row";
+  if (!confirm(`Delete/block this row from export?\n\n${label}\n\nThis removes the row from the review list and it will not be exported.`)) return;
+  try {
+    const r = await fetch(`/review/batches/${batchId}/rows/${state.selected}`, {
+      method: "DELETE", headers: hdrs(),
+    });
+    if (!r.ok) { msg(await r.text(), "error"); return; }
+    msg("Row deleted and blocked from export.", "success");
+    state.selected = null;
+    await load();
+  } catch (e) { msg(String(e), "error"); }
+};
+
 // ── Duplicate row for BCRS/deposit manual entry ──────────────────────────────
 $("duplicateRowBtn").onclick = async () => {
   if (state.selected == null) { msg("Select a row first.", "error"); return; }
