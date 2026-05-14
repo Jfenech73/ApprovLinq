@@ -387,12 +387,22 @@ function updateColFormVisibility() {
   const t = document.getElementById("newColType").value;
   const sfEl = document.getElementById("newColSourceField");
   const svEl = document.getElementById("newColStaticValue");
+  const presetEl = document.getElementById("newColTransformPreset");
   const trEl = document.getElementById("newColTransformRule");
-  sfEl.style.display = (t === "mapped_field" || t === "derived_value" || t === "conditional_value") ? "" : "none";
+  sfEl.style.display = (t === "mapped_field" || t === "conditional_value") ? "" : "none";
   svEl.style.display = (t === "static_text") ? "" : "none";
-  trEl.style.display = (t !== "empty_column" && t !== "static_text" && t !== "conditional_value") ? "" : "none";
   document.getElementById("newColTransformWrap").style.display = (t === "conditional_value") ? "none" : "";
   document.getElementById("newConditionBuilder").style.display = (t === "conditional_value") ? "" : "none";
+
+  if (t === "derived_value") {
+    // Derived values are expressions, not normal mapped-field transforms.
+    presetEl.value = "custom";
+    trEl.style.display = "";
+    trEl.placeholder = 'e.g. supplier_name + " - " + description';
+  } else {
+    trEl.placeholder = "e.g. default:N/A";
+    trEl.style.display = (presetEl.value === "custom") ? "" : "none";
+  }
 }
 
 saveNewColBtn.addEventListener("click", async () => {
@@ -543,13 +553,24 @@ function updateEditColFormVisibility() {
   const t = document.getElementById("editColType").value;
   const sfEl = document.getElementById("editColSourceField");
   const svEl = document.getElementById("editColStaticValue");
+  const presetEl = document.getElementById("editColTransformPreset");
+  const customInput = document.getElementById("editColTransformRule");
   document.getElementById("editColMappedRow").style.display = "";
-  sfEl.style.display = (t === "mapped_field" || t === "derived_value" || t === "conditional_value") ? "" : "none";
+  sfEl.style.display = (t === "mapped_field" || t === "conditional_value") ? "" : "none";
   svEl.style.display = (t === "static_text") ? "" : "none";
   const isCondVal = t === "conditional_value";
   document.getElementById("editConditionBuilder").style.display = isCondVal ? "" : "none";
-  const editTransWrap = document.getElementById("editColTransformPreset")?.parentElement;
+  const editTransWrap = presetEl?.parentElement;
   if (editTransWrap) editTransWrap.style.display = isCondVal ? "none" : "";
+
+  if (t === "derived_value") {
+    presetEl.value = "custom";
+    customInput.style.display = "";
+    customInput.placeholder = 'e.g. supplier_name + " - " + description';
+  } else {
+    customInput.placeholder = "e.g. default:N/A";
+    customInput.style.display = (presetEl.value === "custom") ? "" : "none";
+  }
 }
 
 document.getElementById("editColType").addEventListener("change", updateEditColFormVisibility);

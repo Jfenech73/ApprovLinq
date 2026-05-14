@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import decimal
 import logging
 import uuid
@@ -59,6 +60,62 @@ TRANSFORM_RULES: list[str] = [
     "date_format:%Y-%m-%d",
     "default:<value>",
 ]
+
+
+class DerivedExpressionError(ValueError):
+    """Raised when a derived-value expression is unsafe or unsupported."""
+
+
+def _cell_to_text(value) -> str:
+    """Coerce a row value to safe text for derived string expressions."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, decimal.Decimal):
+        return str(value)
+    return str(value)
+
+
+def evaluate_derived_expression(expression: str | None, row: dict) -> str:
+    """
+    Safely evaluate a derived-value expression against an invoice row.
+
+    Supported syntax is intentionally small and export-safe:
+      - known field names, e.g. supplier_name, invoice_number, description
+      - quoted string literals, e.g. " - " or ' / '
+      - + concatenation only
+
+    Missing or blank fields are treated as empty strings.  No Python calls,
+    attributes, indexing, arithmetic operators, imports, or builtins are allowed.
+    """
+    expr = (expression or "").strip()
+    if not expr:
+        return ""
+
+    try:
+        parsed = ast.parse(expr, mode="eval")
+    except SyntaxError as exc:
+        raise DerivedExpressionError(f"Invalid derived expression: {exc.msg}") from exc
+
+    def _eval(node) -> str:
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return _eval(node.left) + _eval(node.right)
+        if isinstance(node, ast.Name):
+            # Restrict to the field catalogue/enrichment keys. Missing values return blank,
+            # but unknown names are rejected so typos are visible during preview/export.
+            if node.id not in AVAILABLE_FIELDS and node.id not in row:
+                raise DerivedExpressionError(f"Unsupported field in derived expression: {node.id}")
+            return _cell_to_text(row.get(node.id))
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float)):
+            return _cell_to_text(node.value)
+        raise DerivedExpressionError("Unsupported derived expression. Use field names, quoted text, and + only.")
+
+    return _eval(parsed)
 
 
 def apply_transform(value, rule: str | None):
@@ -228,10 +285,20 @@ def render_template_sheet(
             elif ctype == "empty_column":
                 out_row[heading] = None
 
-            elif ctype in ("mapped_field", "derived_value"):
+            elif ctype == "mapped_field":
                 raw = merged.get(col.source_field) if col.source_field else None
                 transformed = apply_transform(raw, col.transform_rule)
                 out_row[heading] = _coerce_cell(transformed)
+
+            elif ctype == "derived_value":
+                expression = (getattr(col, "transform_rule", None) or "").strip()
+                if expression:
+                    out_row[heading] = _coerce_cell(evaluate_derived_expression(expression, merged))
+                else:
+                    # Backwards-compatible fallback for older templates that used
+                    # derived_value exactly like mapped_field + transform.
+                    raw = merged.get(col.source_field) if col.source_field else None
+                    out_row[heading] = _coerce_cell(raw)
 
             elif ctype == "conditional_value":
                 raw = merged.get(col.source_field) if col.source_field else None

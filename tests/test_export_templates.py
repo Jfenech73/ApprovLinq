@@ -20,6 +20,8 @@ from app.services.template_render_service import (
     COLUMN_TYPES,
     apply_transform,
     render_template_sheet,
+    evaluate_derived_expression,
+    DerivedExpressionError,
     _sanitize_sheet_name,
 )
 from app.services.exporter import workbook_from_rows
@@ -238,11 +240,33 @@ class TestRenderTemplateSheet:
 # ── Derived / conditional value columns ───────────────────────────────────────
 
 class TestDerivedAndConditional:
-    def test_derived_value_uses_source_field_and_transform(self):
-        cols = [_make_column(1, "STATUS", "derived_value", source_field="validation_status", transform_rule="uppercase", col_order=0)]
+    def test_derived_value_concatenates_fields_and_literals(self):
+        cols = [_make_column(1, "Details", "derived_value", transform_rule='supplier_name + " - " + description', col_order=0)]
+        tpl = _make_template("T", cols)
+        _, rows = render_template_sheet(tpl, [_make_invoice_row(supplier_name="Biocare Group", description="Medical supplies")])
+        assert rows[0]["Details"] == "Biocare Group - Medical supplies"
+
+    def test_derived_value_supports_invoice_reference_expression(self):
+        cols = [_make_column(1, "Reference", "derived_value", transform_rule='invoice_number + " / " + invoice_date', col_order=0)]
+        tpl = _make_template("T", cols)
+        _, rows = render_template_sheet(tpl, [_make_invoice_row(invoice_number="INV-001", invoice_date=date(2024, 3, 15))])
+        assert rows[0]["Reference"] == "INV-001 / 2024-03-15"
+
+    def test_derived_value_missing_field_value_becomes_blank(self):
+        cols = [_make_column(1, "Details", "derived_value", transform_rule='supplier_name + " - " + description', col_order=0)]
+        tpl = _make_template("T", cols)
+        _, rows = render_template_sheet(tpl, [_make_invoice_row(supplier_name="Biocare Group", description=None)])
+        assert rows[0]["Details"] == "Biocare Group - "
+
+    def test_derived_value_rejects_unsupported_expression(self):
+        with pytest.raises(DerivedExpressionError):
+            evaluate_derived_expression('supplier_name.upper()', _make_invoice_row())
+
+    def test_derived_value_without_expression_keeps_legacy_source_field_fallback(self):
+        cols = [_make_column(1, "STATUS", "derived_value", source_field="validation_status", col_order=0)]
         tpl = _make_template("T", cols)
         _, rows = render_template_sheet(tpl, [_make_invoice_row(validation_status="ok")])
-        assert rows[0]["STATUS"] == "OK"
+        assert rows[0]["STATUS"] == "ok"
 
     def test_conditional_value_with_default_fallback(self):
         cols = [_make_column(1, "Tax Code", "conditional_value", source_field="tax_code", transform_rule="default:T1", col_order=0)]

@@ -34,6 +34,8 @@ from app.schemas import (
 from app.services.template_render_service import (
     AVAILABLE_FIELDS,
     COLUMN_TYPES,
+    DerivedExpressionError,
+    evaluate_derived_expression,
     render_template_sheet,
     resolve_effective_template,
 )
@@ -72,6 +74,15 @@ def require_admin(user: User = Depends(current_user)) -> User:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
+
+
+def _validate_derived_column_payload(column_type: str | None, transform_rule: str | None) -> None:
+    if column_type != "derived_value" or not transform_rule:
+        return
+    try:
+        evaluate_derived_expression(transform_rule, _SAMPLE_ROW)
+    except DerivedExpressionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 def _audit(
     db: Session,
@@ -414,6 +425,8 @@ def add_column(
 ):
     tpl = _get_template_or_404(db, template_id)
 
+    _validate_derived_column_payload(payload.column_type, payload.transform_rule)
+
     if payload.column_type == "mapped_field" and payload.source_field not in AVAILABLE_FIELDS:
         raise HTTPException(
             status_code=400,
@@ -477,6 +490,8 @@ def update_column(
     values = payload.model_dump(exclude_unset=True)
     new_type = values.get("column_type", col.column_type)
     new_field = values.get("source_field", col.source_field)
+    _validate_derived_column_payload(new_type, values.get("transform_rule", col.transform_rule))
+
     if new_type == "mapped_field" and new_field and new_field not in AVAILABLE_FIELDS:
         raise HTTPException(
             status_code=400,
