@@ -25,7 +25,7 @@ from app.utils.storage import batch_export_folder
 logger = logging.getLogger(__name__)
 
 
-def _build_corrected_rows(db: Session, batch: M.InvoiceBatch) -> list[dict]:
+def build_corrected_rows(db: Session, batch: M.InvoiceBatch) -> list[dict]:
     rows = db.execute(
         select(M.InvoiceRow).where(M.InvoiceRow.batch_id == batch.id)
         .order_by(M.InvoiceRow.source_file_id, M.InvoiceRow.page_no, M.InvoiceRow.id)
@@ -58,7 +58,7 @@ def export_batch_corrected(
     batch_metadata: dict | None = None,
 ) -> BytesIO:
     """Render the workbook with corrected values, append audit sheet, log event."""
-    rows = _build_corrected_rows(db, batch)
+    rows = build_corrected_rows(db, batch)
     base_buf: BytesIO = workbook_from_rows(
         rows,
         batch_metadata=batch_metadata,

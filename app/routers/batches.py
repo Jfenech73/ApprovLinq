@@ -28,7 +28,7 @@ from app.routers.auth import current_tenant_id, current_user
 from app.schemas import BatchCreate, BatchUpdate, BatchDetailOut, BatchFileOut, BatchOut, InvoiceRowOut
 from app.services.exporter import workbook_from_rows
 # >>> REVIEW_PACK corrected_export_import
-from app.services.corrected_exporter import export_batch_corrected
+from app.services.corrected_exporter import build_corrected_rows, export_batch_corrected
 # <<< REVIEW_PACK corrected_export_import
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
 from app.services.invoice_arbitration import arbitrate_invoice_row
@@ -3342,10 +3342,13 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
                 "batch_id": str(batch.id),
                 "nominal_account_name": "",
             }
-            # Build per-row enrichment with nominal account names
+            # Build the template sheet from the same corrected overlay rows used by
+            # export_batch_corrected().  Previously the custom template was rendered
+            # from raw InvoiceRow values before correction overlay, so corrected
+            # supplier_name / invoice_number / amounts appeared in the main Invoices
+            # sheet but not in the accounting-template sheet.
             row_dicts = []
-            for row in rows:
-                rd = {col: getattr(row, col, None) for col in row.__table__.columns.keys()}
+            for rd in build_corrected_rows(db, batch):
                 code = str(rd.get("nominal_account_code") or "").strip()
                 rd["nominal_account_name"] = nominal_account_map.get(code, "")
                 row_dicts.append({**enrichment, **rd})
