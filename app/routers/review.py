@@ -2409,11 +2409,20 @@ def apply_saved_regions_to_row(
 
     db.commit()
     checked_changed = (row.review_reasons or "") != reasons_before or (row.method_used or "") != method_before or bool(changed)
+    saved_region_diagnostics = {
+        "status": "checked" if checked_changed else "checked_no_change",
+        "fields_checked": list(tracked),
+        "values_read": changed,
+        "fields_changed": list(changed.keys()),
+        "conflicts": conflict_fields,
+        "skipped_reasons": [] if checked_changed else ["No applicable active saved region changed the selected row."],
+    }
     return {
         "changed": changed,
         "changed_fields": list(changed.keys()),
         "conflict_fields": conflict_fields,
         "checked_regions": 1 if checked_changed else 0,
+        "diagnostics": saved_region_diagnostics,
         "method_used": row.method_used,
     }
 

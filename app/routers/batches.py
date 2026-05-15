@@ -575,6 +575,11 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
         field = rule.field_name
         if not field:
             continue
+        if field in {"invoice_number", "invoice_date"} and rule.rule_type == "remap_field_value":
+            # Dynamic document fields are read from the current document by
+            # _apply_remap_hints as saved_region candidates. Do not replay stale
+            # saved rule text for invoice-specific values.
+            continue
         src = _normalize_rule_value(rule.source_pattern)
         if not src or src != current_supplier_norm:
             # CRITICAL: supplier identity must match
@@ -2070,6 +2075,106 @@ def _match_supplier_fuzzy(
     return best if best_score >= 0.50 else None
 
 
+def _resolve_supplier_identity(
+    db: Session,
+    tenant_id,
+    company_id,
+    row: InvoiceRow,
+    supplier_vat: str | None = None,
+) -> dict[str, object]:
+    """Resolve supplier identity before supplier-gated rules run.
+
+    Inputs are current-document evidence: DI/OCR/native supplier text, optional
+    VAT number, and tenant/company supplier master data. Saved supplier-name
+    regions are replayed immediately after this function and can still add a
+    stronger current-page candidate when the initial supplier text is wrong.
+    """
+    result = {
+        "selected_supplier_name": getattr(row, "supplier_name", None),
+        "confidence": 0.0,
+        "source": "raw_extraction",
+        "review_required": False,
+        "explanation_tags": [],
+    }
+    if not tenant_id or not company_id:
+        return result
+
+    suppliers = (
+        db.query(TenantSupplier)
+        .filter(
+            TenantSupplier.tenant_id == tenant_id,
+            TenantSupplier.company_id == company_id,
+            TenantSupplier.is_active.is_(True),
+        )
+        .all()
+    )
+    if not suppliers:
+        return result
+
+    vat_clean = re.sub(r"\s+", "", supplier_vat or "").upper()
+    if vat_clean:
+        vat_matches = [
+            s for s in suppliers
+            if getattr(s, "vat_number", None)
+            and re.sub(r"\s+", "", s.vat_number or "").upper() == vat_clean
+        ]
+        if len(vat_matches) == 1:
+            old = row.supplier_name
+            row.supplier_name = vat_matches[0].supplier_name
+            result.update({
+                "selected_supplier_name": row.supplier_name,
+                "confidence": 0.98,
+                "source": "supplier_master",
+                "explanation_tags": ["supplier_identity:vat_exact"],
+            })
+            if old != row.supplier_name:
+                _append_method_tag(row, "supplier_resolver:vat_exact")
+            return result
+        if len(vat_matches) > 1:
+            _append_review_marker(row, "supplier_name", "supplier_identity_conflict:vat")
+            result["review_required"] = True
+            result["explanation_tags"] = ["supplier_identity:vat_ambiguous"]
+            return result
+
+    raw_name = getattr(row, "supplier_name", None) or ""
+    if not raw_name:
+        return result
+    scored = sorted(
+        ((s, _word_overlap(raw_name, s.supplier_name)) for s in suppliers),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    exact = [s for s in suppliers if _normalise_supplier(s.supplier_name) == _normalise_supplier(raw_name)]
+    if len(exact) == 1:
+        row.supplier_name = exact[0].supplier_name
+        result.update({
+            "selected_supplier_name": row.supplier_name,
+            "confidence": 0.94,
+            "source": "supplier_master",
+            "explanation_tags": ["supplier_identity:master_exact"],
+        })
+        _append_method_tag(row, "supplier_resolver:master_exact")
+        return result
+    if scored:
+        best, best_score = scored[0]
+        second_score = scored[1][1] if len(scored) > 1 else 0.0
+        if best_score >= 0.88 and (best_score - second_score) >= 0.18:
+            row.supplier_name = best.supplier_name
+            result.update({
+                "selected_supplier_name": row.supplier_name,
+                "confidence": best_score,
+                "source": "supplier_master",
+                "explanation_tags": ["supplier_identity:fuzzy_high_confidence"],
+            })
+            _append_method_tag(row, "supplier_resolver:fuzzy_high_confidence")
+            return result
+        if best_score >= 0.60 and (best_score - second_score) < 0.18:
+            _append_review_marker(row, "supplier_name", "supplier_identity_conflict:fuzzy_ambiguous")
+            result["review_required"] = True
+            result["explanation_tags"] = ["supplier_identity:fuzzy_ambiguous"]
+    return result
+
+
 def _get_supplier_historical_nominal(
     db: Session,
     tenant_id,
@@ -2836,6 +2941,11 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 totals_raw=r.get("totals_raw"),
                                 page_text_raw=r.get("page_text_raw"),
                             )
+                            with perf_ctx.timed("supplier_resolver"):
+                                _resolve_supplier_identity(
+                                    db, tenant_id, batch.company_id, row,
+                                    supplier_vat=supplier_vat,
+                                )
                             with perf_ctx.timed("supplier_history_lookup"):
                                 _apply_account_suggestions(
                                     db, tenant_id, batch.company_id, row,

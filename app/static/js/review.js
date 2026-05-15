@@ -1051,10 +1051,13 @@ async function handleApplySavedRegionsClick(evt) {
     const fields = data.changed_fields || [];
     const conflicts = data.conflict_fields || [];
     const checked = data.checked_regions || 0;
+    const diag = data.diagnostics || {};
+    const checkedFields = Array.isArray(diag.fields_checked) ? diag.fields_checked.join(", ") : "";
+    const skipped = Array.isArray(diag.skipped_reasons) ? diag.skipped_reasons.join("; ") : "";
     if (fields.length) {
       const text = `Saved regions applied: ${fields.join(", ")}. Please verify before approval.`;
       msg(text, "success");
-      setApplySavedRegionsStatus(`Changed: ${fields.join(", ")}`, "success");
+      setApplySavedRegionsStatus(`Changed: ${fields.join(", ")}${checkedFields ? ` | Checked: ${checkedFields}` : ""}`, "success");
       const keepSelected = row.id;
       await load();
       state.selected = keepSelected;
@@ -1063,13 +1066,13 @@ async function handleApplySavedRegionsClick(evt) {
     } else if (conflicts.length) {
       const text = `Saved regions checked ${checked ? `(${checked}) ` : ""}but conflicted with existing values: ${conflicts.join(", ")}. Field left unchanged.`;
       msg(text, "warning");
-      setApplySavedRegionsStatus(`Conflict: ${conflicts.join(", ")}`, "warning");
+      setApplySavedRegionsStatus(`Conflict: ${conflicts.join(", ")}${checkedFields ? ` | Checked: ${checkedFields}` : ""}`, "warning");
       await loadAudit(row.id);
       renderSelectedExplainPanel();
     } else {
       const text = `Saved regions checked${checked ? ` (${checked})` : ""} — no field changed on the selected row.`;
       msg(text, "warning");
-      setApplySavedRegionsStatus("Checked; no change", "warning");
+      setApplySavedRegionsStatus(`Checked; no change${skipped ? ` | ${skipped}` : ""}`, "warning");
       await loadAudit(row.id);
       renderSelectedExplainPanel();
     }

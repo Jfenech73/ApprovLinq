@@ -3329,26 +3329,71 @@ def process_pdf_page(
     # ─────────────────────────────────────────────────────────────────────────
     logger.debug("Stage 1: acquiring page %d from %s", page_index, pdf_path.name)
 
-    # Native PDF text is intentionally NOT used as the primary extraction text.
-    # In production testing it was too often a misleading/partial text layer,
-    # especially on multi-page supplier PDFs.  Keep it only as auxiliary context
-    # for diagnostics or provider fallbacks; the stable route is OCR first, then
-    # image-based DI/vision, then text-only AI only when OCR produced usable text.
+    # Preferred provider order:
+    #   1. Azure Document Intelligence structured extraction, when configured
+    #      and not circuit-broken by a prior fast failure.
+    #   2. Native PDF text, only when it is useful enough to parse safely.
+    #   3. OCR.space/local OCR fallback.
+    #   4. Targeted OCR/region crop reads later during saved-region replay.
     native_text = extract_native_pdf_page(pdf_path, page_index)
-    method = "ocr_primary"
+    method = "provider_start"
     page_quality_score: float = 0.5  # default until we render the image
 
     use_vision = bool(settings.use_openai and openai_api_key)
     final_text = "(page text unavailable)"
-    ocr_text, ocr_method = _get_fallback_ocr_text(pdf_path, page_index, native_text)
-    if ocr_text and count_meaningful_chars(ocr_text) >= 10:
-        final_text = ocr_text
-        method = ocr_method or "ocr_primary"
-    else:
-        # Do not fall back to native text for field extraction.  A blank OCR read
-        # should drive the pipeline to image-based Azure DI/OpenAI vision rather
-        # than producing empty rows labelled as native text.
-        method = "ocr_unavailable_native_text_ignored"
+    ai_fields = None
+    raw_jpeg = None
+    jpeg_bytes = None
+
+    if use_azure_di or use_vision:
+        try:
+            raw_jpeg = OCRBackend.render_pdf_page_to_jpeg_bytes(
+                pdf_path, page_index, scale=1.5, quality=80
+            )
+            if raw_jpeg and len(raw_jpeg) > 4 * 1024 * 1024:
+                raw_jpeg = OCRBackend.render_pdf_page_to_jpeg_bytes(
+                    pdf_path, page_index, scale=1.0, quality=60
+                )
+        except Exception as exc:
+            logger.warning("JPEG render failed p%d: %s", page_index, exc)
+            raw_jpeg = None
+
+        if raw_jpeg:
+            processed_jpeg, page_quality_score = preprocess_page_image(raw_jpeg)
+            jpeg_bytes = raw_jpeg if page_quality_score >= 0.62 else processed_jpeg
+            logger.debug("Page %d quality score: %.2f (image_source=%s)", page_index, page_quality_score, "raw" if jpeg_bytes is raw_jpeg else "processed")
+
+    # 1. Azure DI before OCR where safe. The availability check is config/circuit
+    # based and the extraction call has its own short page timeout; any failure
+    # falls through to native text/OCR without logging secrets or invoice text.
+    if use_azure_di and jpeg_bytes:
+        ai_fields = azure_di_extract_invoice(
+            jpeg_bytes,
+            settings.azure_di_endpoint,
+            settings.azure_di_key,
+        )
+        if ai_fields:
+            method = "azure_di"
+            _di_text = ai_fields.get("di_page_text") or ""
+            if count_meaningful_chars(_di_text) >= 10:
+                final_text = _di_text
+            logger.info("Azure DI extraction succeeded for page %d", page_index)
+
+    # 2. Native text is useful for digital PDFs, but only if it carries invoice
+    # signals. It remains a candidate source rather than a blind replacement.
+    if final_text == "(page text unavailable)" and _native_text_looks_usable(native_text):
+        final_text = native_text
+        method = "native_text"
+
+    # 3. OCR fallback remains available for OCR-only deployments and for pages
+    # where DI/native text is missing or weak.
+    if final_text == "(page text unavailable)":
+        ocr_text, ocr_method = _get_fallback_ocr_text(pdf_path, page_index, native_text)
+        if ocr_text and count_meaningful_chars(ocr_text) >= 10:
+            final_text = ocr_text
+            method = ocr_method or "ocr_primary"
+        else:
+            method = "ocr_unavailable_native_text_ignored"
 
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 2 — Field extraction
@@ -3394,40 +3439,28 @@ def process_pdf_page(
         else:
             jpeg_bytes = None
 
-        ai_fields = None
-
         # 2b — Azure Document Intelligence (primary — highest accuracy)
-        if use_azure_di and jpeg_bytes:
-            ai_fields = azure_di_extract_invoice(
-                jpeg_bytes,
-                settings.azure_di_endpoint,
-                settings.azure_di_key,
-            )
-            if ai_fields:
-                extracted = merge_ai_fields(extracted, ai_fields, account_company_name)
-                # Cascading remediation: Azure DI sometimes misses VendorName or
-                # returns a semantic number that does not reconcile.  Its full
-                # OCR content is still valuable, so run the deterministic text
-                # extractor over that content and use it only to fill/repair
-                # missing or inconsistent fields.
-                _di_text = ai_fields.get("di_page_text") or ""
-                if count_meaningful_chars(_di_text) >= 20:
-                    try:
-                        _recovery = simple_extract(
-                            _di_text,
-                            openai_api_key=None,
-                            account_company_name=account_company_name,
-                        )
-                        extracted = _merge_text_recovery_fields(
-                            extracted, _recovery, "di_text_recovery"
-                        )
-                        extracted = _apply_financial_remediation(
-                            extracted, _di_text, "di_text_reconciliation"
-                        )
-                    except Exception as _rec_exc:
-                        logger.debug("DI text remediation failed p%d: %s", page_index, _rec_exc)
-                method = f"{method}+azure_di"
-                logger.info("Azure DI extraction succeeded for page %d", page_index)
+        if ai_fields:
+            extracted = merge_ai_fields(extracted, ai_fields, account_company_name)
+            # Cascading remediation: Azure DI sometimes misses VendorName or
+            # returns a semantic number that does not reconcile. Its full OCR
+            # content is still valuable and remains current-document evidence.
+            _di_text = ai_fields.get("di_page_text") or ""
+            if count_meaningful_chars(_di_text) >= 20:
+                try:
+                    _recovery = simple_extract(
+                        _di_text,
+                        openai_api_key=None,
+                        account_company_name=account_company_name,
+                    )
+                    extracted = _merge_text_recovery_fields(
+                        extracted, _recovery, "di_text_recovery"
+                    )
+                    extracted = _apply_financial_remediation(
+                        extracted, _di_text, "di_text_reconciliation"
+                    )
+                except Exception as _rec_exc:
+                    logger.debug("DI text remediation failed p%d: %s", page_index, _rec_exc)
 
         # 2c — OpenAI vision (fallback when Azure DI unavailable or returned nothing)
         if ai_fields is None and use_vision and jpeg_bytes:
@@ -3762,6 +3795,7 @@ def process_pdf_page(
     extracted.update({
         "page_no":                    page_index + 1,
         "method_used":                method + ("+llm_ranked" if any(v == "llm_ranking" for v in (extracted.get("_field_sources") or {}).values()) else ""),
+        "extraction_source":          extracted.get("extraction_source") or ("azure_di" if "azure_di" in method else ("native_text" if "native" in method else ("ocr_space" if "ocr_space" in method else "raw_extraction"))),
         "confidence_score":           confidence,
         "validation_status":          final_status,
         "review_required":            review_required,

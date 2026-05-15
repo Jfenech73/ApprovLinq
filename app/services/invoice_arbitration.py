@@ -38,6 +38,32 @@ ARBITRATION_FIELDS: tuple[str, ...] = (
     "currency",
 )
 
+STRONG_RESOLUTION_FIELDS = {
+    "supplier_name",
+    "supplier_posting_account",
+    "nominal_account_code",
+    "net_amount",
+    "vat_amount",
+    "total_amount",
+    "tax_code",
+}
+
+LIGHT_VALIDATION_FIELDS = {
+    "invoice_number",
+    "invoice_date",
+    "description",
+    "currency",
+}
+
+CURRENT_DOCUMENT_SOURCES = {
+    "azure_di",
+    "native_text",
+    "ocr_space",
+    "raw_extraction",
+    "saved_region",
+    "manual",
+}
+
 SOURCE_RANK = {
     "manual": 100,
     "correction_rule": 90,
@@ -49,6 +75,9 @@ SOURCE_RANK = {
     "totals_reconciliation": 65,
     "admin_global_rule": 62,
     "raw_extraction": 50,
+    "azure_di": 58,
+    "native_text": 54,
+    "ocr_space": 52,
 }
 
 AMOUNT_FIELDS = {"net_amount", "vat_amount", "total_amount"}
@@ -197,12 +226,20 @@ def _invoice_number_suspicious(value: Any, supplier_name: Any = None) -> bool:
         return True
     if _parse_date(text):
         return True
+    if re.fullmatch(r"(?:page|pg)?\s*\d{1,3}\s*(?:of|/)\s*\d{1,3}", text, re.I):
+        return True
+    if re.fullmatch(r"(?:\d+[,.])?\d+\.\d{2}", text):
+        return True  # amount/total-shaped value
     digits = re.sub(r"\D", "", text)
     if len(digits) >= 8 and re.fullmatch(r"[\d\s+\-()]+", text):
         return True  # phone/VAT-like number
+    if len(digits) >= 8 and re.search(r"\b(vat|tax|account|acct|customer|client|ref|page|tel|phone|mob)\b", text, re.I):
+        return True
+    if len(digits) in {8, 9, 10, 11, 12} and re.search(r"\b(vat|tax|account|acct|customer|client|ref)\b", text, re.I):
+        return True
     if supplier_name and _similarity(text, supplier_name) >= 0.85:
         return True
-    if re.search(r"\b(vat|tax|tel|phone|mob)\b", text, re.I):
+    if re.search(r"\b(vat|tax|tel|phone|mob|total|subtotal|amount due|balance due|account no|customer no)\b", text, re.I):
         return True
     return False
 
@@ -354,6 +391,19 @@ def _candidate_rejected_reason(decision: FieldDecision, candidate: Candidate, wi
     return f"Rejected because {winner.source_type} candidate was selected."[:1000]
 
 
+def _candidate_allowed_for_light_validation(field_name: str, candidate: Candidate) -> bool:
+    """Light fields are validated, not broadly arbitrated from history/noisy rules."""
+    if field_name not in LIGHT_VALIDATION_FIELDS:
+        return True
+    if candidate.source_type in CURRENT_DOCUMENT_SOURCES:
+        return True
+    if field_name in {"invoice_number", "invoice_date"}:
+        return False
+    # Description/currency may keep stable explicit business defaults, but only
+    # as suggestions. They are not allowed to overwrite meaningful extraction.
+    return candidate.source_type in {"manual", "correction_rule"} and candidate.should_apply
+
+
 def persist_field_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow, result: ArbitrationResult, perf_ctx: ScanPerformanceContext | None = None) -> int:
     """Persist arbitration candidates for future training/analytics.
 
@@ -425,6 +475,17 @@ def _raw_candidates(row: InvoiceRow, extraction_payload: dict[str, Any] | None) 
         base_conf = float(payload.get("confidence_score") or row.confidence_score or 0.50)
     except Exception:
         base_conf = 0.50
+    source = str(payload.get("extraction_source") or "")
+    method = str(payload.get("method_used") or row.method_used or "")
+    source_type = "raw_extraction"
+    if source in {"azure_di", "native_text", "ocr_space"}:
+        source_type = source
+    elif "azure_di" in method:
+        source_type = "azure_di"
+    elif "ocr_space" in method:
+        source_type = "ocr_space"
+    elif "native" in method:
+        source_type = "native_text"
     for field_name in ARBITRATION_FIELDS:
         value = payload.get(field_name)
         if value is None:
@@ -433,10 +494,10 @@ def _raw_candidates(row: InvoiceRow, extraction_payload: dict[str, Any] | None) 
             out.append(Candidate(
                 field_name=field_name,
                 value=_normalise_field_value(field_name, value),
-                source_type="raw_extraction",
+                source_type=source_type,
                 confidence=max(0.20, min(base_conf, 0.95)),
                 evidence=str(payload.get("method_used") or row.method_used or "raw extraction"),
-                reason="Raw extraction candidate validated by field type.",
+                reason="Current document extraction candidate validated by field type.",
             ))
     return out
 
@@ -456,6 +517,8 @@ def _rule_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> list[
         field_name = rule.field_name or ""
         if field_name not in ARBITRATION_FIELDS:
             continue
+        if field_name in {"invoice_number", "invoice_date"} and rule.rule_type not in {"text_correction"}:
+            continue
         value = rule.target_value
         if not _value_valid_for_field(field_name, value, row):
             continue
@@ -465,7 +528,7 @@ def _rule_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> list[
         field_match = bool(current_field_norm and source_norm and current_field_norm == source_norm)
         if rule.rule_type in {"remap_field_value", "supplier_alias"} and not supplier_match:
             continue
-        if rule.rule_type == "text_correction" and not (supplier_match or field_match):
+        if rule.rule_type == "text_correction" and not field_match:
             continue
         if rule.rule_type == "nominal_remap" and field_name == "nominal_account_code" and not field_match:
             continue
@@ -711,7 +774,13 @@ def arbitrate_invoice_row(
     for field_name in ARBITRATION_FIELDS:
         current = getattr(row, field_name, None)
         field_candidates = by_field.get(field_name, [])
-        winner, conflict, reason = _choose_candidate(field_name, field_candidates)
+        choice_candidates = [
+            c for c in field_candidates
+            if _candidate_allowed_for_light_validation(field_name, c)
+        ]
+        winner, conflict, reason = _choose_candidate(field_name, choice_candidates)
+        if field_name in LIGHT_VALIDATION_FIELDS and field_candidates and not choice_candidates:
+            reason = "Field is validation-only; historical/rule candidates were recorded but not used to overwrite current document values."
         decision = FieldDecision(
             field_name=field_name,
             current_value=current,
@@ -789,6 +858,12 @@ def arbitrate_invoice_row(
             and winner.source_type != "correction_rule"
         ):
             can_apply = False
+
+        if field_name in LIGHT_VALIDATION_FIELDS:
+            if not same and winner and winner.source_type not in {"manual", "saved_region", "azure_di", "native_text", "ocr_space", "raw_extraction"}:
+                can_apply = False
+            if not weak_current and field_name in {"invoice_number", "invoice_date", "description"}:
+                can_apply = False
 
         if can_apply:
             new_value = _normalise_field_value(field_name, winner.value)
