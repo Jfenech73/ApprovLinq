@@ -78,3 +78,15 @@ before reaching native text/OCR fallback.
   available.
 - Expanded Apply Saved Regions diagnostics to include saved-region audit events,
   region counts, checked fields, changed values, conflicts, and skipped reasons.
+
+## Hotfix 3 Note
+
+- Tightened the deterministic reading layer before arbitration by using a
+  header-focused identity view for invoice number, invoice date, and supplier
+  candidate collection.
+- Added rule-based supplier VAT extraction so the supplier identity resolver can
+  make exact VAT matches even when AI extraction is weak or unavailable.
+- Added filtered header/totals text views to reduce footer/legal noise in review
+  evidence while keeping full `page_text_raw` available for audit and BCRS logic.
+- Added a lightweight currency backfill from filtered header/totals views when
+  the primary extraction leaves currency blank.

@@ -43,6 +43,83 @@ def count_meaningful_chars(text: str) -> int:
     return len(re.findall(r"[A-Za-z0-9]", text or ""))
 
 
+def _header_region_lines(text: str, max_lines: int = 36) -> list[str]:
+    lines = [" ".join((line or "").split()).strip() for line in (text or "").splitlines()]
+    return [line for line in lines if line][:max_lines]
+
+
+def _header_region_text(text: str, max_lines: int = 36) -> str:
+    return clean_text("\n".join(_header_region_lines(text, max_lines=max_lines)))
+
+
+def _totals_region_text(text: str, tail_lines: int = 28) -> str:
+    lines = [" ".join((line or "").split()).strip() for line in (text or "").splitlines() if str(line or "").strip()]
+    if not lines:
+        return ""
+    tail = lines[-tail_lines:]
+    keep: list[str] = []
+    amount_re = re.compile(r"(?:EUR|GBP|USD|€|£|\$)?\s*\d[\d,]*[.]\d{2}\b", re.I)
+    label_re = re.compile(
+        r"\b(?:subtotal|sub total|before tax|ex vat|net|vat|tax|total|grand total|amount due|balance due|"
+        r"deposit|bcrs|contribution|refund(?:able)? deposit|total inc(?:l(?:uding)?)? vat)\b",
+        re.I,
+    )
+    noise_re = re.compile(
+        r"\b(?:terms|conditions|privacy|gdpr|thank you|website|www\.|http|email|tel|phone|fax|iban|swift|bic)\b",
+        re.I,
+    )
+    for line in tail:
+        if noise_re.search(line) and not label_re.search(line):
+            continue
+        if label_re.search(line) or amount_re.search(line):
+            keep.append(line)
+    return clean_text("\n".join(keep or tail[-12:]))
+
+
+def _extract_supplier_vat_number(text: str | None) -> str | None:
+    if not text:
+        return None
+    patterns = [
+        r"\bvat\s*(?:no\.?|number|reg(?:istration)?\.?\s*no\.?)\s*[:\-]?\s*([A-Z]{0,2}\d{6,}[A-Z0-9]*)",
+        r"\btax\s*(?:id|number|no\.?)\s*[:\-]?\s*([A-Z]{0,2}\d{6,}[A-Z0-9]*)",
+        r"\b(MT\d{6,}[A-Z0-9]*)\b",
+        r"\b([A-Z]{2}\d{6,}[A-Z0-9]*)\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = re.sub(r"\s+", "", match.group(1).upper())
+        if 6 <= len(candidate) <= 20 and re.search(r"\d{6,}", candidate):
+            return candidate
+    return None
+
+
+def _extract_invoice_date_value(text: str | None) -> str | None:
+    if not text:
+        return None
+    patterns = [
+        r"\binvoice\s*date\s*[:\-]?\s*([0-9]{1,2}[\/\-.][0-9]{1,2}[\/\-.][0-9]{2,4})",
+        r"\bdate\s*of\s*invoice\s*[:\-]?\s*([0-9]{1,2}[\/\-.][0-9]{1,2}[\/\-.][0-9]{2,4})",
+        r"\bdate\s*issued\s*[:\-]?\s*([0-9]{1,2}[\/\-.][0-9]{1,2}[\/\-.][0-9]{2,4})",
+        r"\btax\s*point\s*date\s*[:\-]?\s*([0-9]{1,2}[\/\-.][0-9]{1,2}[\/\-.][0-9]{2,4})",
+        r"(?m)^(?!.*\bdue\b)(?!.*\bpayment\b)\s*date\s*[:\-]?\s*([0-9]{1,2}[\/\-.][0-9]{1,2}[\/\-.][0-9]{2,4})\s*$",
+    ]
+    return first_match(patterns, text)
+
+
+def _extract_currency_code(text: str | None) -> str | None:
+    raw = text or ""
+    low = raw.lower()
+    if "£" in raw or "gbp" in low:
+        return "GBP"
+    if "€" in raw or "eur" in low:
+        return "EUR"
+    if "$" in raw or "usd" in low:
+        return "USD"
+    return None
+
+
 def _company_strength_score(value: str | None) -> int:
     v = " ".join(str(value or "").split()).strip()
     if not v or suspicious_supplier_name(v) or bad_supplier_line(v):
@@ -2171,16 +2248,18 @@ def simple_extract(
     account_company_name: str | None = None,
 ) -> dict[str, Any]:
     account_tokens = _build_account_tokens(account_company_name)
+    header_text = _header_region_text(text, max_lines=36)
+    totals_text = _totals_region_text(text, tail_lines=28)
+    identity_text = header_text or clean_text(text)
 
-    invoice_candidates = _collect_invoice_number_candidates(text)  # includes _invoice_number_fallback replay
+    invoice_candidates = _collect_invoice_number_candidates(identity_text)  # includes _invoice_number_fallback replay
     invoice_number = invoice_candidates[0] if invoice_candidates else None
     if not invoice_number:
-        invoice_number = _invoice_number_fallback(text)
+        invoice_number = _invoice_number_fallback(identity_text)
 
-    invoice_date_raw = first_match([
-        r"invoice\s*date\s*[:\-]?\s*([0-9]{1,2}[\/\-.][0-9]{1,2}[\/\-.][0-9]{2,4})",
-        r"\bdate\s*[:\-]?\s*([0-9]{1,2}[\/\-.][0-9]{1,2}[\/\-.][0-9]{2,4})",
-    ], text)
+    invoice_date_raw = _extract_invoice_date_value(identity_text)
+    if not invoice_date_raw:
+        invoice_date_raw = _extract_invoice_date_value(text)
     invoice_date = parse_date(invoice_date_raw)
 
     _curr = r"(?:EUR|GBP|USD|€|£|\$)?"
@@ -2236,8 +2315,12 @@ def simple_extract(
         total_amount = _tmp_amounts.get("total_amount")
         _deposit_candidate = _labelled_bundle.get("_deposit_candidate")
 
-    supplier_candidates = _collect_supplier_candidates(text, account_tokens=account_tokens)
+    supplier_candidates = _dedupe_candidates(
+        _collect_supplier_candidates(identity_text, account_tokens=account_tokens)
+        + _collect_supplier_candidates(text, account_tokens=account_tokens)
+    )
     supplier_name = supplier_candidates[0] if supplier_candidates else None
+    supplier_vat = _extract_supplier_vat_number(identity_text) or _extract_supplier_vat_number(text)
     line_items_raw = extract_candidate_line_items(text)
 
     description = None
@@ -2290,6 +2373,7 @@ def simple_extract(
 
     return {
         "supplier_name": supplier_name,
+        "supplier_vat": supplier_vat,
         "invoice_number": invoice_number,
         "invoice_date": invoice_date,
         "description": description,
@@ -2308,6 +2392,8 @@ def simple_extract(
         "_field_sources": _field_sources,
         "_invoice_candidates": invoice_candidates,
         "_supplier_candidates": supplier_candidates,
+        "_header_text": header_text,
+        "_totals_text": totals_text,
     }
 
 
@@ -3475,6 +3561,14 @@ def process_pdf_page(
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 3 — Line normalization
     # ─────────────────────────────────────────────────────────────────────────
+    if not extracted.get("currency"):
+        resolved_currency = (
+            _extract_currency_code(extracted.get("_header_text"))
+            or _extract_currency_code(extracted.get("_totals_text"))
+            or _extract_currency_code(final_text)
+        )
+        if resolved_currency:
+            extracted["currency"] = resolved_currency
     logger.debug("Stage 3: line normalization for page %d", page_index)
 
     # 3a0 — deterministic financial remediation over the best available text.
@@ -3719,6 +3813,8 @@ def process_pdf_page(
     )
 
     if _text_is_unavailable:
+        _header_view = extracted.get("_header_text") or ""
+        _totals_view = extracted.get("_totals_text") or ""
         _header_parts: list[str] = []
         if extracted.get("supplier_name"):
             _header_parts.append(f"Supplier: {extracted['supplier_name']}")
@@ -3734,6 +3830,8 @@ def process_pdf_page(
             " | ".join(_header_parts) if _header_parts
             else f"[Scanned — extracted via {method}]"
         )
+        if _header_view:
+            header_raw = _header_view
         _totals_parts: list[str] = []
         if extracted.get("net_amount") is not None:
             _totals_parts.append(f"Net: {extracted['net_amount']:.2f}")
@@ -3744,6 +3842,8 @@ def process_pdf_page(
         if extracted.get("currency"):
             _totals_parts.append(f"Currency: {extracted['currency']}")
         totals_raw    = " | ".join(_totals_parts) if _totals_parts else None
+        if _totals_view:
+            totals_raw = _totals_view
         # For scanned/image pages, Azure DI returns result.content (full OCR text).
         # Use it for page_text_raw and totals_raw so the BCRS split logic in
         # batches.py can find labelled deposit/BCRS lines (e.g. "BCRS Deposit 2.40").
@@ -3755,11 +3855,18 @@ def process_pdf_page(
             _di_lines = [ln.strip() for ln in _di_text.splitlines() if ln.strip()]
             if _di_lines:
                 totals_raw = "\n".join(_di_lines[-15:])
+            _filtered_di_totals = _totals_region_text(_di_text, tail_lines=18)
+            if _filtered_di_totals:
+                totals_raw = _filtered_di_totals
         else:
             page_text_raw = f"[Scanned page — no text layer — extracted via {method}]\n" + header_raw
     else:
         header_raw    = "\n".join(final_text.splitlines()[:12])
         totals_raw    = "\n".join(final_text.splitlines()[-10:])
+        if extracted.get("_header_text"):
+            header_raw = extracted.get("_header_text")
+        if extracted.get("_totals_text"):
+            totals_raw = extracted.get("_totals_text")
         page_text_raw = final_text[:20000]
 
     extracted.update({
