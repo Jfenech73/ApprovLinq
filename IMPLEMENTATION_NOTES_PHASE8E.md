@@ -59,3 +59,9 @@ Could not run in this environment because no Python interpreter is installed:
 - `python -m compileall app`
 - requested `pytest` commands
 
+## Hotfix Note
+
+After deployment review, `process_pdf_page` was corrected so `use_azure_di`
+is assigned from `azure_di_available()` before any provider branch reads it.
+The previous zip could raise `cannot access local variable 'use_azure_di'`
+before reaching native text/OCR fallback.

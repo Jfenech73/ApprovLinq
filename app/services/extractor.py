@@ -3345,6 +3345,11 @@ def process_pdf_page(
     raw_jpeg = None
     jpeg_bytes = None
 
+    _di_ok, _di_reason = azure_di_available()
+    use_azure_di = _di_ok
+    if not _di_ok and settings.use_azure_di:
+        logger.debug("Azure DI skipped: %s", _di_reason)
+
     if use_azure_di or use_vision:
         try:
             raw_jpeg = OCRBackend.render_pdf_page_to_jpeg_bytes(
@@ -3407,16 +3412,7 @@ def process_pdf_page(
         account_company_name=account_company_name,
     )
 
-    # Native text fallback has been deliberately removed. If OCR did not produce
-    # enough field evidence, continue to image-based Azure DI/OpenAI vision below
-    # instead of retrying or accepting the PDF text layer.
-
-    _di_ok, _di_reason = azure_di_available()
-    use_azure_di = _di_ok
-    if not _di_ok and settings.use_azure_di:
-        logger.debug("Azure DI skipped: %s", _di_reason)
-
-    if use_azure_di or use_vision:
+    if use_vision or ai_fields:
         # Render page → JPEG (shared by Azure DI and OpenAI vision).
         # Apply preprocessing to improve extraction accuracy on low-quality scans.
         try:
