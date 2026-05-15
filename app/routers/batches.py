@@ -110,6 +110,8 @@ def _audit_rule_application(
     """
     if str(old_value or "") == str(new_value or ""):
         return
+    old_text = None if old_value is None else str(old_value)
+    new_text = None if new_value is None else str(new_value)
     if row.id is None:
         db.add(row)
         db.flush()
@@ -121,6 +123,37 @@ def _audit_rule_application(
         new_value=new_text,
         action="rule_apply",
         note=f"{note}; rule_id={rule.id}; rule_type={rule.rule_type}; scope={'global' if getattr(rule, 'is_global', False) else 'tenant'}",
+        rule_created=False,
+        user_id=None,
+        username="system",
+    ))
+
+
+def _audit_supplier_identity_resolution(
+    db: Session,
+    batch: InvoiceBatch,
+    row: InvoiceRow,
+    old_value: object,
+    new_value: object,
+    action: str,
+    note: str,
+) -> None:
+    """Record supplier resolver evidence before supplier-gated rules run."""
+    old_text = None if old_value is None else str(old_value)
+    new_text = None if new_value is None else str(new_value)
+    if old_text == new_text and action == "supplier_identity_apply":
+        return
+    if row.id is None:
+        db.add(row)
+        db.flush()
+    db.add(InvoiceRowFieldAudit(
+        batch_id=batch.id,
+        row_id=row.id,
+        field_name="supplier_name",
+        old_value=old_text,
+        new_value=new_text,
+        action=action[:40],
+        note=note[:1000],
         rule_created=False,
         user_id=None,
         username="system",
@@ -2081,6 +2114,7 @@ def _resolve_supplier_identity(
     company_id,
     row: InvoiceRow,
     supplier_vat: str | None = None,
+    batch: InvoiceBatch | None = None,
 ) -> dict[str, object]:
     """Resolve supplier identity before supplier-gated rules run.
 
@@ -2129,9 +2163,21 @@ def _resolve_supplier_identity(
             })
             if old != row.supplier_name:
                 _append_method_tag(row, "supplier_resolver:vat_exact")
+                if batch is not None:
+                    _audit_supplier_identity_resolution(
+                        db, batch, row, old, row.supplier_name,
+                        "supplier_identity_apply",
+                        "supplier_identity_resolver source=supplier_master method=vat_exact confidence=0.98",
+                    )
             return result
         if len(vat_matches) > 1:
             _append_review_marker(row, "supplier_name", "supplier_identity_conflict:vat")
+            if batch is not None:
+                _audit_supplier_identity_resolution(
+                    db, batch, row, row.supplier_name, row.supplier_name,
+                    "supplier_identity_conflict",
+                    "supplier_identity_resolver conflict=vat_ambiguous; no supplier selected",
+                )
             result["review_required"] = True
             result["explanation_tags"] = ["supplier_identity:vat_ambiguous"]
             return result
@@ -2154,6 +2200,12 @@ def _resolve_supplier_identity(
             "explanation_tags": ["supplier_identity:master_exact"],
         })
         _append_method_tag(row, "supplier_resolver:master_exact")
+        if batch is not None:
+            _audit_supplier_identity_resolution(
+                db, batch, row, raw_name, row.supplier_name,
+                "supplier_identity_apply",
+                "supplier_identity_resolver source=supplier_master method=master_exact confidence=0.94",
+            )
         return result
     if scored:
         best, best_score = scored[0]
@@ -2167,9 +2219,21 @@ def _resolve_supplier_identity(
                 "explanation_tags": ["supplier_identity:fuzzy_high_confidence"],
             })
             _append_method_tag(row, "supplier_resolver:fuzzy_high_confidence")
+            if batch is not None:
+                _audit_supplier_identity_resolution(
+                    db, batch, row, raw_name, row.supplier_name,
+                    "supplier_identity_apply",
+                    f"supplier_identity_resolver source=supplier_master method=fuzzy_high_confidence confidence={best_score:.2f}",
+                )
             return result
         if best_score >= 0.60 and (best_score - second_score) < 0.18:
             _append_review_marker(row, "supplier_name", "supplier_identity_conflict:fuzzy_ambiguous")
+            if batch is not None:
+                _audit_supplier_identity_resolution(
+                    db, batch, row, raw_name, raw_name,
+                    "supplier_identity_conflict",
+                    f"supplier_identity_resolver conflict=fuzzy_ambiguous best_score={best_score:.2f} second_score={second_score:.2f}; no supplier selected",
+                )
             result["review_required"] = True
             result["explanation_tags"] = ["supplier_identity:fuzzy_ambiguous"]
     return result
@@ -2236,8 +2300,9 @@ def _apply_account_suggestions(
         E. Marked default nominal account (fallback)
     """
     matched_supplier_name: str | None = None
+    supplier_identity_conflicted = "supplier_identity_conflict" in (row.review_reasons or "")
 
-    if row.supplier_name or supplier_vat:
+    if (row.supplier_name or supplier_vat) and (supplier_vat or not supplier_identity_conflicted):
         supplier = _match_supplier_fuzzy(
             db, tenant_id, company_id,
             row.supplier_name or "",
@@ -2258,6 +2323,8 @@ def _apply_account_suggestions(
                     "Nominal [A-supplier-default]: %r → %r",
                     supplier.supplier_name, row.nominal_account_code,
                 )
+    elif supplier_identity_conflicted:
+        _append_method_tag(row, "supplier_resolver:account_match_skipped_ambiguous")
 
     # B. Supplier historical nominal (requires a matched supplier)
     if not row.nominal_account_code and matched_supplier_name:
@@ -2945,6 +3012,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 _resolve_supplier_identity(
                                     db, tenant_id, batch.company_id, row,
                                     supplier_vat=supplier_vat,
+                                    batch=batch,
                                 )
                             with perf_ctx.timed("supplier_history_lookup"):
                                 _apply_account_suggestions(

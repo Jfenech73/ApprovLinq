@@ -3412,92 +3412,66 @@ def process_pdf_page(
         account_company_name=account_company_name,
     )
 
-    if use_vision or ai_fields:
-        # Render page → JPEG (shared by Azure DI and OpenAI vision).
-        # Apply preprocessing to improve extraction accuracy on low-quality scans.
-        try:
-            raw_jpeg = OCRBackend.render_pdf_page_to_jpeg_bytes(
-                pdf_path, page_index, scale=1.5, quality=80
-            )
-            if raw_jpeg and len(raw_jpeg) > 4 * 1024 * 1024:
-                raw_jpeg = OCRBackend.render_pdf_page_to_jpeg_bytes(
-                    pdf_path, page_index, scale=1.0, quality=60
+    # 2b - Azure Document Intelligence remediation over the structured
+    # candidate already read before OCR/native fallback.
+    if ai_fields:
+        extracted = merge_ai_fields(extracted, ai_fields, account_company_name)
+        _di_text = ai_fields.get("di_page_text") or ""
+        if count_meaningful_chars(_di_text) >= 20:
+            try:
+                _recovery = simple_extract(
+                    _di_text,
+                    openai_api_key=None,
+                    account_company_name=account_company_name,
                 )
-        except Exception as exc:
-            logger.warning("JPEG render failed p%d: %s", page_index, exc)
-            raw_jpeg = None
+                extracted = _merge_text_recovery_fields(
+                    extracted, _recovery, "di_text_recovery"
+                )
+                extracted = _apply_financial_remediation(
+                    extracted, _di_text, "di_text_reconciliation"
+                )
+            except Exception as _rec_exc:
+                logger.debug("DI text remediation failed p%d: %s", page_index, _rec_exc)
 
-        # Stage 1 preprocessing applied once we have the JPEG
-        if raw_jpeg:
-            processed_jpeg, page_quality_score = preprocess_page_image(raw_jpeg)
-            jpeg_bytes = raw_jpeg if page_quality_score >= 0.62 else processed_jpeg
-            logger.debug("Page %d quality score: %.2f (image_source=%s)", page_index, page_quality_score, "raw" if jpeg_bytes is raw_jpeg else "processed")
-        else:
-            jpeg_bytes = None
-
-        # 2b — Azure Document Intelligence (primary — highest accuracy)
+    # 2c - OpenAI vision fallback when Azure DI unavailable or returned nothing.
+    if ai_fields is None and use_vision and jpeg_bytes:
+        jpeg_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
+        ai_fields = openai_extract_invoice_vision(
+            jpeg_b64,
+            final_text,
+            openai_api_key,
+            model=settings.openai_model,
+            account_company_name=account_company_name,
+        )
         if ai_fields:
             extracted = merge_ai_fields(extracted, ai_fields, account_company_name)
-            # Cascading remediation: Azure DI sometimes misses VendorName or
-            # returns a semantic number that does not reconcile. Its full OCR
-            # content is still valuable and remains current-document evidence.
-            _di_text = ai_fields.get("di_page_text") or ""
-            if count_meaningful_chars(_di_text) >= 20:
-                try:
-                    _recovery = simple_extract(
-                        _di_text,
-                        openai_api_key=None,
-                        account_company_name=account_company_name,
-                    )
-                    extracted = _merge_text_recovery_fields(
-                        extracted, _recovery, "di_text_recovery"
-                    )
-                    extracted = _apply_financial_remediation(
-                        extracted, _di_text, "di_text_reconciliation"
-                    )
-                except Exception as _rec_exc:
-                    logger.debug("DI text remediation failed p%d: %s", page_index, _rec_exc)
+            method = f"{method}+vision"
 
-        # 2c — OpenAI vision (fallback when Azure DI unavailable or returned nothing)
-        if ai_fields is None and use_vision and jpeg_bytes:
-            jpeg_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
-            ai_fields = openai_extract_invoice_vision(
-                jpeg_b64,
-                final_text,
-                openai_api_key,
+    # 2d - Text-only AI fallback when image extraction produced nothing.
+    if ai_fields is None and use_vision:
+        logger.info("Image unavailable p%d - text-only AI fallback", page_index)
+        _text_for_ai = final_text if count_meaningful_chars(final_text) >= 20 else ""
+        if count_meaningful_chars(_text_for_ai) >= 20:
+            ai_fields = openai_extract_invoice_fields(
+                _text_for_ai, openai_api_key,
                 model=settings.openai_model,
                 account_company_name=account_company_name,
             )
             if ai_fields:
                 extracted = merge_ai_fields(extracted, ai_fields, account_company_name)
-                method = f"{method}+vision"
+                method = f"{method}+openai_text"
 
-        # 2d — Text-only AI (second fallback when image unavailable)
-        if ai_fields is None and use_vision:
-            logger.info("Image unavailable p%d — text-only AI fallback", page_index)
-            _text_for_ai = final_text if count_meaningful_chars(final_text) >= 20 else ""
-            if count_meaningful_chars(_text_for_ai) >= 20:
-                ai_fields = openai_extract_invoice_fields(
-                    _text_for_ai, openai_api_key,
-                    model=settings.openai_model,
-                    account_company_name=account_company_name,
-                )
-                if ai_fields:
-                    extracted = merge_ai_fields(extracted, ai_fields, account_company_name)
-                    method = f"{method}+openai_text"
-
-        # 2e — OpenAI validation pass (cross-checks the merged result)
-        if use_vision and openai_api_key:
-            validation_result = openai_validate_extraction(
-                final_text,
-                extracted,
-                openai_api_key,
-                model=settings.openai_model,
-            )
-            if validation_result:
-                extracted["_validation_result"] = validation_result
-                method = f"{method}+validated"
-
+    # 2e - OpenAI validation pass (cross-checks the merged result).
+    if use_vision and openai_api_key:
+        validation_result = openai_validate_extraction(
+            final_text,
+            extracted,
+            openai_api_key,
+            model=settings.openai_model,
+        )
+        if validation_result:
+            extracted["_validation_result"] = validation_result
+            method = f"{method}+validated"
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 3 — Line normalization
     # ─────────────────────────────────────────────────────────────────────────

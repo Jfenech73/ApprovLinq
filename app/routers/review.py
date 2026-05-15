@@ -2363,6 +2363,12 @@ def apply_saved_regions_to_row(
     supplier_before = row.supplier_name
     reasons_before = row.review_reasons or ""
     method_before = row.method_used or ""
+    last_audit_id = (
+        db.query(InvoiceRowFieldAudit.id)
+        .filter(InvoiceRowFieldAudit.row_id == row.id)
+        .order_by(desc(InvoiceRowFieldAudit.id))
+        .scalar()
+    ) or 0
 
     try:
         from app.routers.batches import _apply_remap_hints, _apply_account_suggestions
@@ -2409,9 +2415,35 @@ def apply_saved_regions_to_row(
 
     db.commit()
     checked_changed = (row.review_reasons or "") != reasons_before or (row.method_used or "") != method_before or bool(changed)
+    region_audits = (
+        db.query(InvoiceRowFieldAudit)
+        .filter(
+            InvoiceRowFieldAudit.row_id == row.id,
+            InvoiceRowFieldAudit.id > last_audit_id,
+            InvoiceRowFieldAudit.action.like("saved_region%"),
+        )
+        .order_by(InvoiceRowFieldAudit.id.asc())
+        .all()
+    )
+    region_events = []
+    for audit in region_audits:
+        note = audit.note or ""
+        hint_match = re.search(r"remap_hint_id=(\d+)", note)
+        region_events.append({
+            "field_name": audit.field_name,
+            "status": audit.action,
+            "old": audit.old_value,
+            "new": audit.new_value,
+            "region_id": int(hint_match.group(1)) if hint_match else None,
+            "reason": note[:500],
+        })
+    checked_fields = sorted({e["field_name"] for e in region_events} | set(changed.keys())) or list(tracked)
     saved_region_diagnostics = {
         "status": "checked" if checked_changed else "checked_no_change",
-        "fields_checked": list(tracked),
+        "regions_found": len(region_events),
+        "regions_tested": len(region_events),
+        "fields_checked": checked_fields,
+        "region_events": region_events,
         "values_read": changed,
         "fields_changed": list(changed.keys()),
         "conflicts": conflict_fields,
@@ -2421,7 +2453,7 @@ def apply_saved_regions_to_row(
         "changed": changed,
         "changed_fields": list(changed.keys()),
         "conflict_fields": conflict_fields,
-        "checked_regions": 1 if checked_changed else 0,
+        "checked_regions": len(region_events),
         "diagnostics": saved_region_diagnostics,
         "method_used": row.method_used,
     }

@@ -65,3 +65,16 @@ After deployment review, `process_pdf_page` was corrected so `use_azure_di`
 is assigned from `azure_di_available()` before any provider branch reads it.
 The previous zip could raise `cannot access local variable 'use_azure_di'`
 before reaching native text/OCR fallback.
+
+## Hotfix 2 Note
+
+- Removed the duplicate page-render block from `process_pdf_page`; the page is
+  rendered once for DI/OpenAI image extraction, with only the existing size
+  fallback render retained.
+- Added supplier identity audit evidence via `supplier_identity_apply` and
+  `supplier_identity_conflict` audit actions.
+- Made account suggestions skip later fuzzy supplier canonicalisation when the
+  supplier resolver has already marked an ambiguity, unless VAT evidence is
+  available.
+- Expanded Apply Saved Regions diagnostics to include saved-region audit events,
+  region counts, checked fields, changed values, conflicts, and skipped reasons.
