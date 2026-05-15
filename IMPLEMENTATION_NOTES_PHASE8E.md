@@ -90,3 +90,16 @@ before reaching native text/OCR fallback.
   evidence while keeping full `page_text_raw` available for audit and BCRS logic.
 - Added a lightweight currency backfill from filtered header/totals views when
   the primary extraction leaves currency blank.
+
+## Hotfix 4 Note
+
+- Reduced false supplier review pressure for tenants without supplier rules by
+  allowing a plausible current-document supplier to be trusted as
+  `document_header` / `document_header_vat` when the document evidence is strong.
+- Tightened invoice-number selection so short header refs and trailing-slash
+  tokens are treated as weak candidates, while longer label-supported invoice
+  ids are preferred.
+- Prevented `merge_ai_fields` from replacing a stronger invoice number with a
+  weaker Azure DI/OpenAI value unless the AI value materially scores better.
+- Updated arbitration so trusted document-header suppliers are not automatically
+  treated as weak values later in the row lifecycle.

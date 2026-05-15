@@ -224,6 +224,8 @@ def _invoice_number_suspicious(value: Any, supplier_name: Any = None) -> bool:
         return True
     if len(text) < 3:
         return True
+    if text.endswith("/") or text.endswith("-"):
+        return True
     if _parse_date(text):
         return True
     if re.fullmatch(r"(?:page|pg)?\s*\d{1,3}\s*(?:of|/)\s*\d{1,3}", text, re.I):
@@ -231,6 +233,11 @@ def _invoice_number_suspicious(value: Any, supplier_name: Any = None) -> bool:
     if re.fullmatch(r"(?:\d+[,.])?\d+\.\d{2}", text):
         return True  # amount/total-shaped value
     digits = re.sub(r"\D", "", text)
+    letters = re.sub(r"[^A-Za-z]", "", text)
+    if len(digits) < 3:
+        return True
+    if len(letters) >= 2 and len(digits) <= 3 and len(text) <= 6:
+        return True
     if len(digits) >= 8 and re.fullmatch(r"[\d\s+\-()]+", text):
         return True  # phone/VAT-like number
     if len(digits) >= 8 and re.search(r"\b(vat|tax|account|acct|customer|client|ref|page|tel|phone|mob)\b", text, re.I):
@@ -296,6 +303,10 @@ def _current_value_is_weak(row: InvoiceRow, field_name: str) -> bool:
     value = getattr(row, field_name, None)
     if value is None or str(value).strip() == "":
         return True
+    if field_name == "supplier_name":
+        match_method = str(getattr(row, "supplier_match_method", "") or "").strip().lower()
+        if match_method in {"vat_match", "alias_match", "document_header", "document_header_vat"}:
+            return not _value_valid_for_field(field_name, value, row)
     review_fields = {f.strip() for f in re.split(r"[|,]", row.review_fields or "") if f.strip()}
     if field_name in review_fields:
         return True

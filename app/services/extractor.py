@@ -1145,10 +1145,83 @@ def suspicious_invoice_number(value: str | None) -> bool:
         return True
     if len(v) < 3:
         return True
+    if v.endswith("/") or v.endswith("-"):
+        return True
     # Pure-letter strings (no digits) are never real invoice numbers
     if re.match(r"^[A-Za-z\s]+$", v):
         return True
+    digit_count = len(re.findall(r"\d", v))
+    letter_count = len(re.findall(r"[a-z]", v))
+    if digit_count < 3:
+        return True
+    # Short mixed header refs like "MP008" are often product/order references,
+    # not the true invoice id. Keep longer prefixed ids such as INV10146.
+    if letter_count >= 2 and digit_count <= 3 and len(v) <= 6:
+        return True
     return False
+
+
+def _invoice_candidate_quality_score(value: str | None, text: str | None = None) -> int:
+    if not value:
+        return -100
+    raw = str(value).strip()
+    low = raw.lower()
+    if suspicious_invoice_number(raw):
+        return -100
+    digits = len(re.findall(r"\d", raw))
+    letters = len(re.findall(r"[A-Za-z]", raw))
+    score = 0
+    score += min(digits, 10) * 2
+    score += min(len(raw), 12)
+    if re.fullmatch(r"\d{5,12}", raw):
+        score += 8
+    if re.fullmatch(r"[A-Za-z]{2,5}\d{4,10}", raw):
+        score += 6
+    if "/" in raw or "-" in raw:
+        score -= 2
+    if letters >= 2 and digits <= 4 and len(raw) <= 7:
+        score -= 8
+    if text:
+        if re.search(
+            rf"\b(?:invoice\s*(?:no\.?|number|#|nr\.?)|document\s*(?:no\.?|number)|inv(?:oice)?)\s*[.:\-]*\s*{re.escape(raw)}\b",
+            text,
+            re.I,
+        ):
+            score += 10
+        elif re.search(rf"\b{re.escape(raw)}\b", text, re.I):
+            score += 1
+    return score
+
+
+def _choose_best_invoice_candidate(candidates: list[str], text: str | None = None) -> str | None:
+    ranked: list[tuple[int, int, str]] = []
+    for idx, candidate in enumerate(candidates or []):
+        cand = str(candidate or "").strip()
+        if not cand:
+            continue
+        score = _invoice_candidate_quality_score(cand, text=text) - idx
+        if score > -100:
+            ranked.append((score, -idx, cand))
+    if not ranked:
+        return None
+    ranked.sort(reverse=True)
+    return ranked[0][2]
+
+
+def _document_supplier_evidence_is_strong(
+    supplier_name: str | None,
+    supplier_vat: str | None = None,
+    ai_confidence: dict[str, Any] | None = None,
+) -> bool:
+    if suspicious_supplier_name(supplier_name):
+        return False
+    score = _company_strength_score(supplier_name)
+    supplier_conf = float((ai_confidence or {}).get("supplier", 0.0) or 0.0)
+    if supplier_vat and score >= 4:
+        return True
+    if score >= 10:
+        return True
+    return score >= 7 and supplier_conf >= 0.55
 
 
 def bad_supplier_line(line: str) -> bool:
@@ -2253,9 +2326,12 @@ def simple_extract(
     identity_text = header_text or clean_text(text)
 
     invoice_candidates = _collect_invoice_number_candidates(identity_text)  # includes _invoice_number_fallback replay
-    invoice_number = invoice_candidates[0] if invoice_candidates else None
+    invoice_number = _choose_best_invoice_candidate(invoice_candidates, text=identity_text)
     if not invoice_number:
-        invoice_number = _invoice_number_fallback(identity_text)
+        invoice_number = _choose_best_invoice_candidate(
+            [_invoice_number_fallback(identity_text)],
+            text=identity_text,
+        )
 
     invoice_date_raw = _extract_invoice_date_value(identity_text)
     if not invoice_date_raw:
@@ -3299,8 +3375,13 @@ def merge_ai_fields(
     )
 
     # -- Invoice number --------------------------------------------------------
-    if suspicious_invoice_number(merged.get("invoice_number")) and ai.get("invoice_number"):
-        merged["invoice_number"] = ai.get("invoice_number")
+    ai_invoice_number = ai.get("invoice_number")
+    if ai_invoice_number:
+        current_invoice = merged.get("invoice_number")
+        current_score = _invoice_candidate_quality_score(current_invoice, text=merged.get("di_page_text") or base.get("di_page_text") or "")
+        ai_score = _invoice_candidate_quality_score(ai_invoice_number, text=ai.get("di_page_text") or "")
+        if current_score < 0 or ai_score >= current_score + 3:
+            merged["invoice_number"] = ai_invoice_number
 
     # -- Date fields -----------------------------------------------------------
     if merged.get("invoice_date") is None and ai.get("invoice_date") is not None:
@@ -3637,6 +3718,14 @@ def process_pdf_page(
         try:
             supplier_vat_s3 = extracted.get("supplier_vat")
             _snorm = _normalize_supplier(clean_supplier, supplier_vat=supplier_vat_s3)
+            if _snorm.match_method == "unmatched" and _document_supplier_evidence_is_strong(
+                clean_supplier,
+                supplier_vat=supplier_vat_s3,
+                ai_confidence=extracted.get("ai_confidence") or {},
+            ):
+                _snorm.match_method = "document_header_vat" if supplier_vat_s3 else "document_header"
+                _snorm.match_confidence = max(_snorm.match_confidence, 0.82 if supplier_vat_s3 else 0.74)
+                _snorm.review_reason = None
             extracted["_supplier_norm"] = _snorm
             extracted["_supplier_match_method"] = _snorm.match_method
             # Prefer canonical name if we got a confident match
