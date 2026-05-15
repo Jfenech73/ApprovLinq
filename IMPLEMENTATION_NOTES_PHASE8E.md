@@ -103,3 +103,11 @@ before reaching native text/OCR fallback.
   weaker Azure DI/OpenAI value unless the AI value materially scores better.
 - Updated arbitration so trusted document-header suppliers are not automatically
   treated as weak values later in the row lifecycle.
+
+## Hotfix 5 Note
+
+- Persisted richer Azure DI candidate evidence per field so Review can show the
+  DI value together with VAT/header/totals excerpts that support it.
+- Added `di_candidate_summary` to export rows so the workbook Evidence sheet can
+  show what Azure DI read for supplier, invoice/date, totals, and currency on
+  each row without a schema change.

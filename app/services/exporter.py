@@ -160,7 +160,7 @@ def workbook_from_rows(
     }
     summary_df = pd.DataFrame(summary)
 
-    evidence_cols = [c for c in ["source_filename", "page_no", "invoice_number", "description", "line_items_raw", "header_raw", "totals_raw"] if c in df.columns]
+    evidence_cols = [c for c in ["source_filename", "page_no", "invoice_number", "description", "line_items_raw", "header_raw", "totals_raw", "di_candidate_summary"] if c in df.columns]
     evidence_df = df[evidence_cols].copy() if evidence_cols else pd.DataFrame()
 
     out = BytesIO()

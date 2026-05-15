@@ -415,6 +415,65 @@ def _candidate_allowed_for_light_validation(field_name: str, candidate: Candidat
     return candidate.source_type in {"manual", "correction_rule"} and candidate.should_apply
 
 
+def _provider_excerpt(text: Any, max_lines: int = 4, max_chars: int = 240) -> str:
+    lines = [str(line).strip() for line in str(text or "").splitlines() if str(line or "").strip()]
+    if not lines:
+        return ""
+    excerpt = " | ".join(lines[:max_lines])
+    return excerpt[:max_chars]
+
+
+def _raw_candidate_confidence(field_name: str, payload: dict[str, Any], base_conf: float, source_type: str) -> float:
+    if source_type != "azure_di":
+        return max(0.20, min(base_conf, 0.95))
+    ai_conf = payload.get("ai_confidence") or {}
+    if field_name == "supplier_name":
+        conf = ai_conf.get("supplier", base_conf)
+    elif field_name in AMOUNT_FIELDS:
+        conf = ai_conf.get("totals", base_conf)
+    else:
+        conf = base_conf
+    try:
+        return max(0.20, min(float(conf), 0.95))
+    except Exception:
+        return max(0.20, min(base_conf, 0.95))
+
+
+def _raw_candidate_evidence(field_name: str, payload: dict[str, Any], source_type: str) -> str:
+    method = str(payload.get("method_used") or "raw extraction")
+    if source_type != "azure_di":
+        return method[:1000]
+    parts = [f"provider=azure_di", f"method={method}"]
+    ai_conf = payload.get("ai_confidence") or {}
+    conf = None
+    if field_name == "supplier_name":
+        conf = ai_conf.get("supplier")
+        if payload.get("supplier_vat"):
+            parts.append(f"vendor_tax_id={payload.get('supplier_vat')}")
+        excerpt = _provider_excerpt(payload.get("header_raw") or payload.get("di_page_text"))
+        if excerpt:
+            parts.append(f"header_excerpt={excerpt}")
+    elif field_name in {"invoice_number", "invoice_date", "currency"}:
+        excerpt = _provider_excerpt(payload.get("header_raw") or payload.get("di_page_text"))
+        if excerpt:
+            parts.append(f"header_excerpt={excerpt}")
+    elif field_name in AMOUNT_FIELDS:
+        conf = ai_conf.get("totals")
+        excerpt = _provider_excerpt(payload.get("totals_raw") or payload.get("di_page_text"))
+        if excerpt:
+            parts.append(f"totals_excerpt={excerpt}")
+    else:
+        excerpt = _provider_excerpt(payload.get("di_page_text"))
+        if excerpt:
+            parts.append(f"page_excerpt={excerpt}")
+    if conf is not None:
+        try:
+            parts.append(f"section_confidence={float(conf):.2f}")
+        except Exception:
+            pass
+    return "; ".join(parts)[:1000]
+
+
 def persist_field_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow, result: ArbitrationResult, perf_ctx: ScanPerformanceContext | None = None) -> int:
     """Persist arbitration candidates for future training/analytics.
 
@@ -502,12 +561,13 @@ def _raw_candidates(row: InvoiceRow, extraction_payload: dict[str, Any] | None) 
         if value is None:
             value = getattr(row, field_name, None)
         if _value_valid_for_field(field_name, value, row):
+            candidate_conf = _raw_candidate_confidence(field_name, payload, base_conf, source_type)
             out.append(Candidate(
                 field_name=field_name,
                 value=_normalise_field_value(field_name, value),
                 source_type=source_type,
-                confidence=max(0.20, min(base_conf, 0.95)),
-                evidence=str(payload.get("method_used") or row.method_used or "raw extraction"),
+                confidence=candidate_conf,
+                evidence=_raw_candidate_evidence(field_name, payload, source_type),
                 reason="Current document extraction candidate validated by field type.",
             ))
     return out

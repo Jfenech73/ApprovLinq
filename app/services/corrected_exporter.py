@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import models as M
-from app.db.review_models import InvoiceRowFieldAudit, BatchExportEvent
+from app.db.review_models import InvoiceRowFieldAudit, BatchExportEvent, InvoiceFieldCandidate
 from app.services import correction_service as cs
 from app.services.candidate_outcomes import label_batch_candidates
 from app.services.exporter import workbook_from_rows
@@ -25,12 +25,56 @@ from app.utils.storage import batch_export_folder
 logger = logging.getLogger(__name__)
 
 
+def _build_di_candidate_summary_map(db: Session, batch_id) -> dict[int, str]:
+    rows = db.execute(
+        select(InvoiceFieldCandidate).where(
+            InvoiceFieldCandidate.batch_id == batch_id,
+            InvoiceFieldCandidate.source_type == "azure_di",
+        ).order_by(
+            InvoiceFieldCandidate.row_id.asc(),
+            InvoiceFieldCandidate.field_name.asc(),
+            InvoiceFieldCandidate.selected.desc(),
+            InvoiceFieldCandidate.applied.desc(),
+            InvoiceFieldCandidate.confidence.desc().nullslast(),
+            InvoiceFieldCandidate.created_at.desc(),
+        )
+    ).scalars().all()
+    grouped: dict[int, dict[str, InvoiceFieldCandidate]] = {}
+    for cand in rows:
+        field_map = grouped.setdefault(cand.row_id, {})
+        if cand.field_name not in field_map:
+            field_map[cand.field_name] = cand
+    out: dict[int, str] = {}
+    for row_id, field_map in grouped.items():
+        parts: list[str] = []
+        for field_name in ("supplier_name", "invoice_number", "invoice_date", "net_amount", "vat_amount", "total_amount", "currency"):
+            cand = field_map.get(field_name)
+            if not cand or not cand.candidate_value:
+                continue
+            conf = ""
+            if cand.confidence is not None:
+                try:
+                    conf = f" ({float(cand.confidence):.0%})"
+                except Exception:
+                    conf = ""
+            evidence = (cand.evidence or "").strip()
+            if evidence:
+                evidence = evidence[:120]
+                parts.append(f"{field_name}={cand.candidate_value}{conf} [{evidence}]")
+            else:
+                parts.append(f"{field_name}={cand.candidate_value}{conf}")
+        if parts:
+            out[row_id] = " | ".join(parts)[:4000]
+    return out
+
+
 def build_corrected_rows(db: Session, batch: M.InvoiceBatch) -> list[dict]:
     rows = db.execute(
         select(M.InvoiceRow).where(M.InvoiceRow.batch_id == batch.id)
         .order_by(M.InvoiceRow.source_file_id, M.InvoiceRow.page_no, M.InvoiceRow.id)
     ).scalars().all()
     cmap = cs.load_correction_map(db, batch.id)
+    di_summary_by_row = _build_di_candidate_summary_map(db, batch.id)
     out = []
     for r in rows:
         c = cmap.get(r.id)
@@ -44,6 +88,7 @@ def build_corrected_rows(db: Session, batch: M.InvoiceBatch) -> list[dict]:
                 v = getattr(c, f, None)
                 if v is not None:
                     d[f] = v
+        d["di_candidate_summary"] = di_summary_by_row.get(r.id)
         out.append(d)
     return out
 
