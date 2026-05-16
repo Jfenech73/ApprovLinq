@@ -205,3 +205,13 @@ before reaching native text/OCR fallback.
   `InvoiceRow` insert/flush and before downstream mutation layers can change the
   row. This gives a stable comparison point between raw DI output and the final
   row values used later in the pipeline.
+
+## Hotfix 10a Note
+
+- Corrected a runtime regression in `app/services/extractor.py`: the new
+  `_json_safe()` helper checks `datetime` and `date`, but `date` had not been
+  imported into the module.
+- This caused page-processing failures with `name 'date' is not defined` during
+  raw DI payload persistence.
+- The fix is limited to importing `date` and bumping the extractor build tag to
+  `phase8e_hotfix10a` so the deployed artifact can be confirmed in logs/code.

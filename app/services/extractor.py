@@ -4,7 +4,7 @@ import base64
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -31,7 +31,7 @@ except ImportError as _imp_err:
     _log.getLogger(__name__).warning("New pipeline modules not available: %s", _imp_err)
 
 logger = logging.getLogger(__name__)
-EXTRACTOR_BUILD_TAG = "phase8e_hotfix10"
+EXTRACTOR_BUILD_TAG = "phase8e_hotfix10a"
 
 
 def clean_text(text: str) -> str:

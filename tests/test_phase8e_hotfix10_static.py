@@ -10,7 +10,8 @@ def read(rel: str) -> str:
 
 def test_extractor_persists_raw_di_payload_and_extended_header_fields():
     src = read("app/services/extractor.py")
-    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix10"' in src
+    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix10a"' in src
+    assert "from datetime import date, datetime" in src
     assert 'supplier_addr_recipient, _ = _str(fields.get("VendorAddressRecipient"))' in src
     assert 'customer_addr_recipient, _ = _str(fields.get("CustomerAddressRecipient"))' in src
     assert 'order_number, _           = _str(fields.get("OrderNumber"))' in src
