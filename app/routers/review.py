@@ -46,6 +46,8 @@ EXPLAINABLE_ACTION_SOURCES = {
 
 SOURCE_LABELS = {
     "raw_extraction": "Raw extraction",
+    "header_rule": "Header rule",
+    "azure_di_structured": "Azure DI structured",
     "correction_rule": "Correction rule",
     "saved_region": "Saved region",
     "supplier_history": "Supplier history",

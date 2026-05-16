@@ -29,7 +29,7 @@ def _build_di_candidate_summary_map(db: Session, batch_id) -> dict[int, str]:
     rows = db.execute(
         select(InvoiceFieldCandidate).where(
             InvoiceFieldCandidate.batch_id == batch_id,
-            InvoiceFieldCandidate.source_type == "azure_di",
+            InvoiceFieldCandidate.source_type.in_(["azure_di", "azure_di_structured"]),
         ).order_by(
             InvoiceFieldCandidate.row_id.asc(),
             InvoiceFieldCandidate.field_name.asc(),

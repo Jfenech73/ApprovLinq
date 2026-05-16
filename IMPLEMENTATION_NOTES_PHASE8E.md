@@ -111,3 +111,16 @@ before reaching native text/OCR fallback.
 - Added `di_candidate_summary` to export rows so the workbook Evidence sheet can
   show what Azure DI read for supplier, invoice/date, totals, and currency on
   each row without a schema change.
+
+## Hotfix 6 Note
+
+- Preserved raw structured Azure DI fields before merge in `_di_structured_fields`
+  so Review/export can inspect what DI returned independently of later merge logic.
+- Added field-level provenance for raw candidates using `_field_sources`, so a
+  supplier read from header rules is no longer automatically labelled as DI just
+  because the page used Azure DI overall.
+- Persisted separate `azure_di_structured` candidates alongside merged row
+  values, allowing direct comparison between raw DI structured output and the
+  final selected field in Review and export evidence.
+- Adjusted Azure DI supplier merge policy to prefer the structured vendor name
+  more consistently when its confidence is strong enough.

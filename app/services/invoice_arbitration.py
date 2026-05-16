@@ -57,6 +57,7 @@ LIGHT_VALIDATION_FIELDS = {
 
 CURRENT_DOCUMENT_SOURCES = {
     "azure_di",
+    "azure_di_structured",
     "native_text",
     "ocr_space",
     "raw_extraction",
@@ -76,8 +77,10 @@ SOURCE_RANK = {
     "admin_global_rule": 62,
     "raw_extraction": 50,
     "azure_di": 58,
+    "azure_di_structured": 60,
     "native_text": 54,
     "ocr_space": 52,
+    "header_rule": 48,
 }
 
 AMOUNT_FIELDS = {"net_amount", "vat_amount", "total_amount"}
@@ -424,7 +427,7 @@ def _provider_excerpt(text: Any, max_lines: int = 4, max_chars: int = 240) -> st
 
 
 def _raw_candidate_confidence(field_name: str, payload: dict[str, Any], base_conf: float, source_type: str) -> float:
-    if source_type != "azure_di":
+    if source_type not in {"azure_di", "azure_di_structured"}:
         return max(0.20, min(base_conf, 0.95))
     ai_conf = payload.get("ai_confidence") or {}
     if field_name == "supplier_name":
@@ -441,9 +444,9 @@ def _raw_candidate_confidence(field_name: str, payload: dict[str, Any], base_con
 
 def _raw_candidate_evidence(field_name: str, payload: dict[str, Any], source_type: str) -> str:
     method = str(payload.get("method_used") or "raw extraction")
-    if source_type != "azure_di":
+    if source_type not in {"azure_di", "azure_di_structured"}:
         return method[:1000]
-    parts = [f"provider=azure_di", f"method={method}"]
+    parts = [f"provider={source_type}", f"method={method}"]
     ai_conf = payload.get("ai_confidence") or {}
     conf = None
     if field_name == "supplier_name":
@@ -472,6 +475,18 @@ def _raw_candidate_evidence(field_name: str, payload: dict[str, Any], source_typ
         except Exception:
             pass
     return "; ".join(parts)[:1000]
+
+
+def _field_source_type(payload: dict[str, Any], field_name: str, default_source_type: str) -> str:
+    field_sources = payload.get("_field_sources") or {}
+    tag = str(field_sources.get(field_name) or "").strip().lower()
+    if tag == "azure_di_structured":
+        return "azure_di_structured"
+    if tag in {"header_supplier", "header_identity", "text_rules"}:
+        return "header_rule"
+    if tag.startswith("openai"):
+        return "raw_extraction"
+    return default_source_type
 
 
 def persist_field_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow, result: ArbitrationResult, perf_ctx: ScanPerformanceContext | None = None) -> int:
@@ -561,15 +576,29 @@ def _raw_candidates(row: InvoiceRow, extraction_payload: dict[str, Any] | None) 
         if value is None:
             value = getattr(row, field_name, None)
         if _value_valid_for_field(field_name, value, row):
-            candidate_conf = _raw_candidate_confidence(field_name, payload, base_conf, source_type)
+            field_source_type = _field_source_type(payload, field_name, source_type)
+            candidate_conf = _raw_candidate_confidence(field_name, payload, base_conf, field_source_type)
             out.append(Candidate(
                 field_name=field_name,
                 value=_normalise_field_value(field_name, value),
-                source_type=source_type,
+                source_type=field_source_type,
                 confidence=candidate_conf,
-                evidence=_raw_candidate_evidence(field_name, payload, source_type),
+                evidence=_raw_candidate_evidence(field_name, payload, field_source_type),
                 reason="Current document extraction candidate validated by field type.",
             ))
+    di_structured = payload.get("_di_structured_fields") or {}
+    for field_name in ARBITRATION_FIELDS:
+        value = di_structured.get(field_name)
+        if not _value_valid_for_field(field_name, value, row):
+            continue
+        out.append(Candidate(
+            field_name=field_name,
+            value=_normalise_field_value(field_name, value),
+            source_type="azure_di_structured",
+            confidence=_raw_candidate_confidence(field_name, payload, base_conf, "azure_di_structured"),
+            evidence=_raw_candidate_evidence(field_name, payload, "azure_di_structured"),
+            reason="Raw structured Azure DI field captured before merge.",
+        ))
     return out
 
 

@@ -2446,6 +2446,14 @@ def simple_extract(
             _field_sources["supplier_name"] = "llm_ranking"
         elif ranked and ranked.get("review_recommended"):
             _field_sources["supplier_name"] = "llm_review"
+    if supplier_name and "supplier_name" not in _field_sources:
+        _field_sources["supplier_name"] = "header_supplier"
+    if invoice_number and "invoice_number" not in _field_sources:
+        _field_sources["invoice_number"] = "header_identity"
+    if invoice_date and "invoice_date" not in _field_sources:
+        _field_sources["invoice_date"] = "header_identity"
+    if currency and "currency" not in _field_sources:
+        _field_sources["currency"] = "text_rules"
 
     return {
         "supplier_name": supplier_name,
@@ -3056,6 +3064,20 @@ def azure_di_extract_invoice(
         # Full OCR text from Azure DI — used by the BCRS split logic in batches.py
         # for scanned/image pages where the native PDF text layer is absent.
         "di_page_text":     getattr(result, "content", None) or "",
+        "_di_structured_fields": {
+            "supplier_name": supplier_name,
+            "supplier_vat": supplier_vat,
+            "supplier_address": supplier_addr,
+            "invoice_number": invoice_number,
+            "invoice_date": invoice_date,
+            "due_date": due_date,
+            "net_amount": net_amount,
+            "vat_amount": vat_amount,
+            "total_amount": total_amount,
+            "currency": currency,
+            "customer_name": customer_name,
+            "customer_vat": customer_vat,
+        },
         "ai_confidence": {
             "supplier": round(s_conf, 2),
             "customer": round(c_conf, 2),
@@ -3300,6 +3322,7 @@ def merge_ai_fields(
         return base
 
     merged = dict(base)
+    field_sources = dict(merged.get("_field_sources") or {})
 
     # -- Supplier name ---------------------------------------------------------
     # Strategy: trust the rule-based result when it found something plausible,
@@ -3362,12 +3385,18 @@ def merge_ai_fields(
         rule_score = _company_strength_score(rule_supplier)
         if not rule_supplier_ok:
             merged["supplier_name"] = ai_supplier
+            field_sources["supplier_name"] = "azure_di_structured" if is_azure_di else "openai_ai"
         elif is_azure_di:
-            if ai_score >= rule_score or len(ai_supplier or "") >= len(rule_supplier or "") + 4:
+            if ai_supplier_conf >= 0.70 and ai_score + 1 >= rule_score:
                 merged["supplier_name"] = ai_supplier
+                field_sources["supplier_name"] = "azure_di_structured"
+            elif ai_score >= rule_score or len(ai_supplier or "") >= len(rule_supplier or "") + 4:
+                merged["supplier_name"] = ai_supplier
+                field_sources["supplier_name"] = "azure_di_structured"
         else:
             if ai_supplier_conf >= 0.85 and ai_score >= rule_score:
                 merged["supplier_name"] = ai_supplier
+                field_sources["supplier_name"] = "openai_ai"
 
     # Clean OCR artefacts (embedded newlines, leading junk chars) then normalise casing.
     merged["supplier_name"] = normalise_company_name(
@@ -3382,10 +3411,12 @@ def merge_ai_fields(
         ai_score = _invoice_candidate_quality_score(ai_invoice_number, text=ai.get("di_page_text") or "")
         if current_score < 0 or ai_score >= current_score + 3:
             merged["invoice_number"] = ai_invoice_number
+            field_sources["invoice_number"] = "azure_di_structured" if is_azure_di else "openai_ai"
 
     # -- Date fields -----------------------------------------------------------
     if merged.get("invoice_date") is None and ai.get("invoice_date") is not None:
         merged["invoice_date"] = ai.get("invoice_date")
+        field_sources["invoice_date"] = "azure_di_structured" if is_azure_di else "openai_ai"
     # Due date is new — copy from AI whenever present
     if ai.get("due_date"):
         merged["due_date"] = ai.get("due_date")
@@ -3429,21 +3460,27 @@ def merge_ai_fields(
             ):
                 continue
             merged[field] = ai_val
+            field_sources[field] = "azure_di_structured"
     else:
         if merged.get("net_amount") is None and ai.get("net_amount") is not None:
             merged["net_amount"] = ai.get("net_amount")
+            field_sources["net_amount"] = "openai_ai"
         if merged.get("vat_amount") is None and ai.get("vat_amount") is not None:
             merged["vat_amount"] = ai.get("vat_amount")
+            field_sources["vat_amount"] = "openai_ai"
         if merged.get("total_amount") is None and ai.get("total_amount") is not None:
             merged["total_amount"] = ai.get("total_amount")
+            field_sources["total_amount"] = "openai_ai"
 
     # -- Metadata --------------------------------------------------------------
     if not merged.get("currency") and ai.get("currency"):
         merged["currency"] = ai.get("currency")
+        field_sources["currency"] = "azure_di_structured" if is_azure_di else "openai_ai"
     if not merged.get("tax_code") and ai.get("tax_code"):
         merged["tax_code"] = ai.get("tax_code")
     if merged.get("description") in (None, "", "Invoice extraction", "Invoice goods or services") and ai.get("description"):
         merged["description"] = ai.get("description")
+        field_sources["description"] = "azure_di_structured" if is_azure_di else "openai_ai"
 
     # -- Extended framework fields (not in rule-based base) --------------------
     for field in (
@@ -3454,9 +3491,13 @@ def merge_ai_fields(
         "line_items_structured",   # structured list from Azure DI / OpenAI
         "extraction_source",       # tracks which engine produced the result
         "di_page_text",            # full OCR text from Azure DI (used by BCRS detection)
+        "_di_structured_fields",   # raw structured Azure DI field values before merge
     ):
         if ai.get(field) is not None:
             merged[field] = ai[field]
+
+    if field_sources:
+        merged["_field_sources"] = field_sources
 
     return merged
 
