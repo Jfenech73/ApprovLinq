@@ -120,6 +120,46 @@ def _stringify_date(value: object) -> str | None:
     return str(value)
 
 
+def _di_field_scalar_value(field_payload: object) -> str | None:
+    if not isinstance(field_payload, dict):
+        return None
+    for key in ("value_string", "value_phone_number", "value_date", "value_number"):
+        value = field_payload.get(key)
+        if value not in (None, ""):
+            return str(value)
+    currency = field_payload.get("value_currency")
+    if isinstance(currency, dict):
+        amount = currency.get("amount")
+        if amount not in (None, ""):
+            return str(amount)
+    address = field_payload.get("value_address")
+    if isinstance(address, dict):
+        parts = [
+            address.get("road"),
+            address.get("city"),
+            address.get("state"),
+            address.get("postal_code"),
+            address.get("country_region"),
+        ]
+        text = ", ".join(str(part).strip() for part in parts if str(part or "").strip())
+        if text:
+            return text
+    content = field_payload.get("content")
+    if content not in (None, ""):
+        return str(content)
+    return None
+
+
+def _di_field_complex_value(field_payload: object) -> object:
+    if not isinstance(field_payload, dict):
+        return None
+    if "value_array" in field_payload:
+        return _json_safe(field_payload.get("value_array"))
+    if "value_object" in field_payload:
+        return _json_safe(field_payload.get("value_object"))
+    return None
+
+
 def _persist_invoice_read_snapshot(
     db: Session,
     *,
@@ -133,6 +173,9 @@ def _persist_invoice_read_snapshot(
     structured_items = payload.get("line_items_structured")
     if not isinstance(structured_items, list):
         structured_items = []
+    raw_di_fields = payload.get("_di_raw_fields") or {}
+    if not isinstance(raw_di_fields, dict):
+        raw_di_fields = {}
     source_file_id = row.source_file_id or invoice_file.id
     header = InvoiceReadHeader(
         batch_id=batch.id,
@@ -193,20 +236,82 @@ def _persist_invoice_read_snapshot(
             "currency": payload.get("currency"),
             "description": payload.get("description"),
         }),
-        raw_di_fields=_json_safe(payload.get("_di_raw_fields") or {}),
+        raw_di_fields=_json_safe(raw_di_fields),
         raw_di_payload=_json_safe(payload.get("_di_raw_payload") or {}),
+        BatchPages=invoice_file.page_count,
+        DocumentInBatch=row.page_no,
+        DocType=payload.get("document_type") or ((payload.get("_di_raw_payload") or {}).get("document") or {}).get("doc_type"),
+        DocumentConfidence=(payload.get("raw_di_document_confidence") or ((payload.get("_di_raw_payload") or {}).get("document") or {}).get("confidence")),
+        CustomerName=_di_field_scalar_value(raw_di_fields.get("CustomerName")),
+        CustomerId=_di_field_scalar_value(raw_di_fields.get("CustomerId")),
+        PurchaseOrder=_di_field_scalar_value(raw_di_fields.get("PurchaseOrder")),
+        InvoiceId=_di_field_scalar_value(raw_di_fields.get("InvoiceId")),
+        InvoiceDate=_di_field_scalar_value(raw_di_fields.get("InvoiceDate")),
+        DueDate=_di_field_scalar_value(raw_di_fields.get("DueDate")),
+        VendorName=_di_field_scalar_value(raw_di_fields.get("VendorName")),
+        VendorAddress=_di_field_scalar_value(raw_di_fields.get("VendorAddress")),
+        VendorAddressRecipient=_di_field_scalar_value(raw_di_fields.get("VendorAddressRecipient")),
+        CustomerAddress=_di_field_scalar_value(raw_di_fields.get("CustomerAddress")),
+        CustomerAddressRecipient=_di_field_scalar_value(raw_di_fields.get("CustomerAddressRecipient")),
+        BillingAddress=_di_field_scalar_value(raw_di_fields.get("BillingAddress")),
+        BillingAddressRecipient=_di_field_scalar_value(raw_di_fields.get("BillingAddressRecipient")),
+        ShippingAddress=_di_field_scalar_value(raw_di_fields.get("ShippingAddress")),
+        ShippingAddressRecipient=_di_field_scalar_value(raw_di_fields.get("ShippingAddressRecipient")),
+        SubTotal=_di_field_scalar_value(raw_di_fields.get("SubTotal")),
+        TotalDiscount=_di_field_scalar_value(raw_di_fields.get("TotalDiscount")),
+        TotalTax=_di_field_scalar_value(raw_di_fields.get("TotalTax")),
+        InvoiceTotal=_di_field_scalar_value(raw_di_fields.get("InvoiceTotal")),
+        AmountDue=_di_field_scalar_value(raw_di_fields.get("AmountDue")),
+        PreviousUnpaidBalance=_di_field_scalar_value(raw_di_fields.get("PreviousUnpaidBalance")),
+        RemittanceAddress=_di_field_scalar_value(raw_di_fields.get("RemittanceAddress")),
+        RemittanceAddressRecipient=_di_field_scalar_value(raw_di_fields.get("RemittanceAddressRecipient")),
+        ServiceAddress=_di_field_scalar_value(raw_di_fields.get("ServiceAddress")),
+        ServiceAddressRecipient=_di_field_scalar_value(raw_di_fields.get("ServiceAddressRecipient")),
+        ServiceStartDate=_di_field_scalar_value(raw_di_fields.get("ServiceStartDate")),
+        ServiceEndDate=_di_field_scalar_value(raw_di_fields.get("ServiceEndDate")),
+        VendorTaxId=_di_field_scalar_value(raw_di_fields.get("VendorTaxId")),
+        CustomerTaxId=_di_field_scalar_value(raw_di_fields.get("CustomerTaxId")),
+        PaymentTerm=_di_field_scalar_value(raw_di_fields.get("PaymentTerm")),
+        KVKNumber=_di_field_scalar_value(raw_di_fields.get("KVKNumber")),
+        CurrencyCode=_di_field_scalar_value(raw_di_fields.get("CurrencyCode")),
+        VendorPhoneNumber=_di_field_scalar_value(raw_di_fields.get("VendorPhoneNumber")),
+        CustomerPhoneNumber=_di_field_scalar_value(raw_di_fields.get("CustomerPhoneNumber")),
+        BillingPhoneNumber=_di_field_scalar_value(raw_di_fields.get("BillingPhoneNumber")),
+        VendorEmail=_di_field_scalar_value(raw_di_fields.get("VendorEmail")),
+        VendorFaxNumber=_di_field_scalar_value(raw_di_fields.get("VendorFaxNumber")),
+        ReferenceNumber=_di_field_scalar_value(raw_di_fields.get("ReferenceNumber")),
+        PaymentDetails=_di_field_complex_value(raw_di_fields.get("PaymentDetails")),
+        TaxDetails=_di_field_complex_value(raw_di_fields.get("TaxDetails")),
+        PaidInFourInstallements=_di_field_complex_value(raw_di_fields.get("PaidInFourInstallements")),
     )
     db.add(header)
     db.flush()
-    for idx, item in enumerate(structured_items, start=1):
+    raw_items = _di_field_complex_value(raw_di_fields.get("Items"))
+    if isinstance(raw_items, list):
+        items_to_persist = raw_items
+    else:
+        items_to_persist = structured_items
+    for idx, item in enumerate(items_to_persist, start=1):
+        item_fields = item.get("value_object") if isinstance(item, dict) else None
+        if not isinstance(item_fields, dict):
+            item_fields = {}
         db.add(InvoiceReadDetail(
             header_id=header.id,
             line_no=idx,
-            description=item.get("description"),
-            quantity=item.get("quantity"),
-            unit_price=item.get("unit_price"),
-            net_amount=item.get("net_amount"),
-            tax_amount=item.get("tax_amount"),
+            description=(item.get("description") if isinstance(item, dict) else None),
+            quantity=(item.get("quantity") if isinstance(item, dict) else None),
+            unit_price=(item.get("unit_price") if isinstance(item, dict) else None),
+            net_amount=(item.get("net_amount") if isinstance(item, dict) else None),
+            tax_amount=(item.get("tax_amount") if isinstance(item, dict) else None),
+            Amount=_di_field_scalar_value(item_fields.get("Amount")),
+            Date=_di_field_scalar_value(item_fields.get("Date")),
+            Description=_di_field_scalar_value(item_fields.get("Description")),
+            ProductCode=_di_field_scalar_value(item_fields.get("ProductCode")),
+            Quantity=_di_field_scalar_value(item_fields.get("Quantity")),
+            Tax=_di_field_scalar_value(item_fields.get("Tax")),
+            TaxRate=_di_field_scalar_value(item_fields.get("TaxRate")),
+            Unit=_di_field_scalar_value(item_fields.get("Unit")),
+            UnitPrice=_di_field_scalar_value(item_fields.get("UnitPrice")),
             raw_detail=_json_safe(item),
         ))
 

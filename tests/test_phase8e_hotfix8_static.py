@@ -35,4 +35,4 @@ def test_merge_ai_fields_leaves_supplier_unresolved_when_not_actionable():
 
 def test_hotfix8_supplier_guards_still_present_under_current_build():
     src = read("app/services/extractor.py")
-    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix10a"' in src
+    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix10b"' in src

@@ -16,7 +16,7 @@ def test_config_exposes_provider_baseline_mode():
 
 def test_extractor_has_provider_baseline_result_helper_and_build_tag():
     src = read("app/services/extractor.py")
-    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix10a"' in src
+    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix10b"' in src
     assert "def _build_provider_baseline_result(" in src
     assert '"validation_status": "review_provider_baseline" if missing_core else "ok_provider_baseline",' in src
     assert '"supplier_match_method": "provider_direct",' in src

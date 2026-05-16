@@ -31,7 +31,7 @@ except ImportError as _imp_err:
     _log.getLogger(__name__).warning("New pipeline modules not available: %s", _imp_err)
 
 logger = logging.getLogger(__name__)
-EXTRACTOR_BUILD_TAG = "phase8e_hotfix10a"
+EXTRACTOR_BUILD_TAG = "phase8e_hotfix10b"
 
 
 def clean_text(text: str) -> str:
@@ -3018,6 +3018,25 @@ def _serialise_di_field(field: Any) -> dict[str, Any] | None:
             }
     except Exception:
         pass
+    try:
+        value_array = getattr(field, "value_array", None)
+    except Exception:
+        value_array = None
+    if value_array is None and isinstance(field, dict):
+        value_array = field.get("valueArray") or field.get("value_array")
+    if value_array is not None:
+        payload["value_array"] = [_serialise_di_field(item) for item in value_array]
+    try:
+        value_object = getattr(field, "value_object", None)
+    except Exception:
+        value_object = None
+    if value_object is None and isinstance(field, dict):
+        value_object = field.get("valueObject") or field.get("value_object")
+    if value_object is not None:
+        payload["value_object"] = {
+            str(name): _serialise_di_field(item)
+            for name, item in value_object.items()
+        }
     return payload
 
 

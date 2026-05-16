@@ -215,3 +215,16 @@ before reaching native text/OCR fallback.
   raw DI payload persistence.
 - The fix is limited to importing `date` and bumping the extractor build tag to
   `phase8e_hotfix10a` so the deployed artifact can be confirmed in logs/code.
+
+## Hotfix 10b Note
+
+- Extended DI serialisation to preserve nested `value_array` and `value_object`
+  content. This is required for DI fields such as `Items`, `PaymentDetails`,
+  and `TaxDetails`.
+- Added Microsoft-named columns to `invoice_read_headers` so the read snapshot
+  can be inspected using DI field names directly, for example `VendorName`,
+  `InvoiceId`, `InvoiceDate`, `PaymentDetails`, and `TaxDetails`.
+- Added Microsoft-named columns to `invoice_read_details` and changed the
+  snapshot writer to populate detail rows from raw DI `Items` when available.
+- The existing app-normalized columns remain for compatibility; the new columns
+  are there to compare the raw DI read against later pipeline state.
