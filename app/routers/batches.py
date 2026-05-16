@@ -14,7 +14,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
-from app.db.models import Company, InvoiceBatch, InvoiceFile, InvoiceRow, IssueLog, TenantNominalAccount, TenantSupplier, User
+from app.db.models import Company, InvoiceBatch, InvoiceFile, InvoiceReadDetail, InvoiceReadHeader, InvoiceRow, IssueLog, TenantNominalAccount, TenantSupplier, User
 
 try:
     from app.services.classify_lines import classify_line as _classify_line
@@ -90,6 +90,125 @@ def _append_method_tag(row: InvoiceRow, tag: str) -> None:
     if tag not in parts:
         parts.append(tag)
     row.method_used = "+".join(parts)
+
+
+def _json_safe(value: object) -> object:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return str(value)
+
+
+def _stringify_date(value: object) -> str | None:
+    if value in (None, ""):
+        return None
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    return str(value)
+
+
+def _persist_invoice_read_snapshot(
+    db: Session,
+    *,
+    batch: InvoiceBatch,
+    invoice_file: InvoiceFile,
+    row: InvoiceRow,
+    payload: dict,
+    baseline_mode: bool,
+) -> None:
+    provider_name = str((payload.get("method_used") or "unknown")).split("+")[0]
+    structured_items = payload.get("line_items_structured")
+    if not isinstance(structured_items, list):
+        structured_items = []
+    source_file_id = row.source_file_id or invoice_file.id
+    header = InvoiceReadHeader(
+        batch_id=batch.id,
+        tenant_id=batch.tenant_id,
+        company_id=batch.company_id,
+        source_file_id=source_file_id,
+        row_id=row.id,
+        source_filename=row.source_filename or invoice_file.original_filename,
+        page_no=row.page_no,
+        provider_name=provider_name,
+        extraction_source=payload.get("extraction_source"),
+        method_used=payload.get("method_used"),
+        baseline_mode=baseline_mode,
+        document_type=payload.get("document_type"),
+        document_confidence=(payload.get("raw_di_document_confidence") or ((payload.get("_di_raw_payload") or {}).get("document") or {}).get("confidence")),
+        supplier_name=payload.get("supplier_name"),
+        supplier_vat=payload.get("supplier_vat"),
+        supplier_address=payload.get("supplier_address"),
+        supplier_address_recipient=payload.get("supplier_address_recipient"),
+        customer_name=payload.get("customer_name"),
+        customer_vat=payload.get("customer_vat"),
+        customer_address=payload.get("customer_address"),
+        customer_address_recipient=payload.get("customer_address_recipient"),
+        invoice_number=payload.get("invoice_number"),
+        invoice_date=_stringify_date(payload.get("invoice_date")),
+        due_date=_stringify_date(payload.get("due_date")),
+        order_number=payload.get("order_number"),
+        purchase_order=payload.get("purchase_order"),
+        description=payload.get("description"),
+        net_amount=payload.get("net_amount"),
+        vat_amount=payload.get("vat_amount"),
+        total_amount=payload.get("total_amount"),
+        currency=payload.get("currency"),
+        header_text=payload.get("_header_text") or payload.get("header_raw"),
+        totals_text=payload.get("_totals_text") or payload.get("totals_raw"),
+        page_text=payload.get("di_page_text") or payload.get("page_text_raw"),
+        raw_provider_fields=_json_safe(payload.get("_di_structured_fields") or {}),
+        raw_provider_payload=_json_safe({
+            "extraction_source": payload.get("extraction_source"),
+            "method_used": payload.get("method_used"),
+            "document_type": payload.get("document_type"),
+            "supplier_name": payload.get("supplier_name"),
+            "supplier_vat": payload.get("supplier_vat"),
+            "supplier_address": payload.get("supplier_address"),
+            "supplier_address_recipient": payload.get("supplier_address_recipient"),
+            "customer_name": payload.get("customer_name"),
+            "customer_vat": payload.get("customer_vat"),
+            "customer_address": payload.get("customer_address"),
+            "customer_address_recipient": payload.get("customer_address_recipient"),
+            "invoice_number": payload.get("invoice_number"),
+            "invoice_date": _stringify_date(payload.get("invoice_date")),
+            "due_date": _stringify_date(payload.get("due_date")),
+            "order_number": payload.get("order_number"),
+            "purchase_order": payload.get("purchase_order"),
+            "net_amount": payload.get("net_amount"),
+            "vat_amount": payload.get("vat_amount"),
+            "total_amount": payload.get("total_amount"),
+            "currency": payload.get("currency"),
+            "description": payload.get("description"),
+        }),
+        raw_di_fields=_json_safe(payload.get("_di_raw_fields") or {}),
+        raw_di_payload=_json_safe(payload.get("_di_raw_payload") or {}),
+    )
+    db.add(header)
+    db.flush()
+    for idx, item in enumerate(structured_items, start=1):
+        db.add(InvoiceReadDetail(
+            header_id=header.id,
+            line_no=idx,
+            description=item.get("description"),
+            quantity=item.get("quantity"),
+            unit_price=item.get("unit_price"),
+            net_amount=item.get("net_amount"),
+            tax_amount=item.get("tax_amount"),
+            raw_detail=_json_safe(item),
+        ))
 
 
 def _audit_rule_application(
@@ -3010,6 +3129,16 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 totals_raw=r.get("totals_raw"),
                                 page_text_raw=r.get("page_text_raw"),
                             )
+                            db.add(row)
+                            db.flush()
+                            _persist_invoice_read_snapshot(
+                                db,
+                                batch=batch,
+                                invoice_file=invoice_file,
+                                row=row,
+                                payload=r,
+                                baseline_mode=provider_baseline_mode,
+                            )
                             if not provider_baseline_mode:
                                 with perf_ctx.timed("supplier_resolver"):
                                     _resolve_supplier_identity(
@@ -3059,7 +3188,6 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 _ts = str(row.totals_reconciliation_status)
                                 totals_status_counts[_ts] = totals_status_counts.get(_ts, 0) + 1
 
-                            db.add(row)
                             inserted_rows += 1
                             total_rows += 1
                             if provider_baseline_mode or (batch.scan_mode or "summary").lower() == "lines":

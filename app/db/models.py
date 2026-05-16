@@ -229,6 +229,72 @@ class InvoiceRow(Base):
 
     batch: Mapped["InvoiceBatch"] = relationship(back_populates="rows")
     source_file: Mapped["InvoiceFile | None"] = relationship(back_populates="rows")
+    read_headers: Mapped[list["InvoiceReadHeader"]] = relationship(back_populates="row")
+
+
+class InvoiceReadHeader(Base):
+    __tablename__ = "invoice_read_headers"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True)
+    company_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
+    source_file_id: Mapped[int | None] = mapped_column(ForeignKey("invoice_files.id", ondelete="SET NULL"), nullable=True)
+    row_id: Mapped[int | None] = mapped_column(ForeignKey("invoice_rows.id", ondelete="SET NULL"), nullable=True)
+    source_filename: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    page_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    extraction_source: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    method_used: Mapped[str | None] = mapped_column(Text, nullable=True)
+    baseline_mode: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    document_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    document_confidence: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True)
+    supplier_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    supplier_vat: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    supplier_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    supplier_address_recipient: Mapped[str | None] = mapped_column(Text, nullable=True)
+    customer_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    customer_vat: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    customer_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    customer_address_recipient: Mapped[str | None] = mapped_column(Text, nullable=True)
+    invoice_number: Mapped[str | None] = mapped_column(Text, nullable=True)
+    invoice_date: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    due_date: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    order_number: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    purchase_order: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    net_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    vat_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    total_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    header_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    totals_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    page_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_provider_fields: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    raw_provider_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    raw_di_fields: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    raw_di_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    row: Mapped["InvoiceRow | None"] = relationship(back_populates="read_headers")
+    details: Mapped[list["InvoiceReadDetail"]] = relationship(back_populates="header", cascade="all, delete-orphan")
+
+
+class InvoiceReadDetail(Base):
+    __tablename__ = "invoice_read_details"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    header_id: Mapped[int] = mapped_column(ForeignKey("invoice_read_headers.id", ondelete="CASCADE"), nullable=False)
+    line_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quantity: Mapped[float | None] = mapped_column(Numeric(14, 4), nullable=True)
+    unit_price: Mapped[float | None] = mapped_column(Numeric(14, 4), nullable=True)
+    net_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    tax_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    raw_detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    header: Mapped["InvoiceReadHeader"] = relationship(back_populates="details")
 
 
 class ExportTemplate(Base):

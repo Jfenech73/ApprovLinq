@@ -178,6 +178,30 @@ before reaching native text/OCR fallback.
   - saved-region replay
   - saved rules
   - arbitration
-  - candidate persistence (implicitly, because arbitration is skipped)
-  - duplicate pass
-  - BCRS/deposit split
+- candidate persistence (implicitly, because arbitration is skipped)
+- duplicate pass
+- BCRS/deposit split
+
+## Hotfix 10 Note
+
+- Reviewed the DI-only workbooks and kept the extraction mapping anchored to the
+  actual Azure invoice fields used there: `VendorName`, `VendorAddress`,
+  `VendorAddressRecipient`, `VendorTaxId`, `CustomerName`, `CustomerAddress`,
+  `CustomerAddressRecipient`, `CustomerTaxId`, `InvoiceId`, `InvoiceDate`,
+  `DueDate`, `OrderNumber`, `PurchaseOrder`, `SubTotal`, `TotalTax`,
+  `InvoiceTotal`, `AmountDue`, `CurrencyCode`, and `Items`.
+- Added raw DI serialisation in `app/services/extractor.py` so every DI page can
+  persist:
+  - `_di_raw_fields`: the full document field map returned by Azure DI
+  - `_di_raw_payload`: the serialised top-level DI document payload
+  - `raw_di_document_confidence`: the document confidence from Azure DI
+- Added two new persistence tables:
+  - `invoice_read_headers`: one row per page read, storing the flattened header
+    data plus `raw_provider_fields`, `raw_provider_payload`, `raw_di_fields`,
+    and `raw_di_payload`
+  - `invoice_read_details`: one row per structured line item, linked back to
+    `invoice_read_headers.header_id`
+- The batch pipeline now writes the read snapshot immediately after the
+  `InvoiceRow` insert/flush and before downstream mutation layers can change the
+  row. This gives a stable comparison point between raw DI output and the final
+  row values used later in the pipeline.

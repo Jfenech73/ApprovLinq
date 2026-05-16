@@ -31,7 +31,7 @@ except ImportError as _imp_err:
     _log.getLogger(__name__).warning("New pipeline modules not available: %s", _imp_err)
 
 logger = logging.getLogger(__name__)
-EXTRACTOR_BUILD_TAG = "phase8e_hotfix9"
+EXTRACTOR_BUILD_TAG = "phase8e_hotfix10"
 
 
 def clean_text(text: str) -> str:
@@ -2974,6 +2974,70 @@ def azure_di_available() -> tuple[bool, str | None]:
     return True, None
 
 
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return str(value)
+
+
+def _serialise_di_field(field: Any) -> dict[str, Any] | None:
+    if field is None:
+        return None
+    payload: dict[str, Any] = {
+        "content": _json_safe(getattr(field, "content", None) or (field.get("content") if isinstance(field, dict) else None)),
+        "confidence": _json_safe(getattr(field, "confidence", None) or (field.get("confidence") if isinstance(field, dict) else None)),
+        "value_type": _json_safe(getattr(field, "value_type", None) or (field.get("valueType") if isinstance(field, dict) else None)),
+    }
+    for attr in ("value_string", "value_number", "value_date", "value_phone_number"):
+        value = getattr(field, attr, None)
+        if value is not None:
+            payload[attr] = _json_safe(value)
+    try:
+        if getattr(field, "value_currency", None) is not None:
+            payload["value_currency"] = {
+                "amount": _json_safe(getattr(field.value_currency, "amount", None)),
+                "currency_code": _json_safe(getattr(field.value_currency, "currency_code", None)),
+                "currency_symbol": _json_safe(getattr(field.value_currency, "currency_symbol", None)),
+            }
+    except Exception:
+        pass
+    try:
+        if getattr(field, "value_address", None) is not None:
+            payload["value_address"] = {
+                "road": _json_safe(getattr(field.value_address, "road", None)),
+                "city": _json_safe(getattr(field.value_address, "city", None)),
+                "state": _json_safe(getattr(field.value_address, "state", None)),
+                "postal_code": _json_safe(getattr(field.value_address, "postal_code", None)),
+                "country_region": _json_safe(getattr(field.value_address, "country_region", None)),
+            }
+    except Exception:
+        pass
+    return payload
+
+
+def _serialise_di_document(result: Any) -> dict[str, Any]:
+    documents = getattr(result, "documents", None) or []
+    document = documents[0] if documents else None
+    fields = getattr(document, "fields", None) or {}
+    raw_fields = {str(name): _serialise_di_field(field) for name, field in fields.items()}
+    return {
+        "model_id": _json_safe(getattr(result, "model_id", None)),
+        "content": _json_safe(getattr(result, "content", None)),
+        "document_count": len(documents),
+        "document": {
+            "doc_type": _json_safe(getattr(document, "doc_type", None)) if document is not None else None,
+            "confidence": _json_safe(getattr(document, "confidence", None)) if document is not None else None,
+            "fields": raw_fields,
+        },
+    }
+
+
 def azure_di_extract_invoice(
     jpeg_bytes: bytes,
     endpoint: str,
@@ -3131,7 +3195,8 @@ def azure_di_extract_invoice(
         logger.info("Azure DI returned no documents")
         return None
 
-    fields = result.documents[0].fields or {}
+    document = result.documents[0]
+    fields = document.fields or {}
 
     # ── Core fields ────────────────────────────────────────────────────────
     supplier_name, s_conf     = _str(fields.get("VendorName"))
@@ -3139,16 +3204,20 @@ def azure_di_extract_invoice(
     if not supplier_addr:
         supplier_addr = _addr(fields.get("VendorAddress"))
     supplier_vat, _           = _str(fields.get("VendorTaxId"))
+    supplier_addr_recipient, _ = _str(fields.get("VendorAddressRecipient"))
 
     customer_name, c_conf     = _str(fields.get("CustomerName"))
     customer_addr, _          = _str(fields.get("CustomerAddress"))
     if not customer_addr:
         customer_addr = _addr(fields.get("CustomerAddress"))
     customer_vat, _           = _str(fields.get("CustomerTaxId"))
+    customer_addr_recipient, _ = _str(fields.get("CustomerAddressRecipient"))
 
     invoice_number, _         = _str(fields.get("InvoiceId"))
     invoice_date, _           = _date(fields.get("InvoiceDate"))
     due_date, _               = _date(fields.get("DueDate"))
+    order_number, _           = _str(fields.get("OrderNumber"))
+    purchase_order, _         = _str(fields.get("PurchaseOrder"))
 
     net_amount, t_conf_sub    = _num(fields.get("SubTotal"))
     vat_amount, t_conf_tax    = _num(fields.get("TotalTax"))
@@ -3244,18 +3313,24 @@ def azure_di_extract_invoice(
         "Azure DI extracted: supplier=%r inv=%r total=%s conf=s%.2f/c%.2f/t%.2f",
         supplier_name, invoice_number, total_amount, s_conf, c_conf, totals_conf,
     )
+    di_raw_payload = _serialise_di_document(result)
+    di_raw_fields = (di_raw_payload.get("document") or {}).get("fields") or {}
 
     return {
         "extraction_source": "azure_di",
         "supplier_name":    supplier_name,
         "supplier_address": supplier_addr,
+        "supplier_address_recipient": supplier_addr_recipient,
         "supplier_vat":     supplier_vat,
         "customer_name":    customer_name,
         "customer_address": customer_addr,
+        "customer_address_recipient": customer_addr_recipient,
         "customer_vat":     customer_vat,
         "invoice_number":   invoice_number,
         "invoice_date":     invoice_date,
         "due_date":         due_date,
+        "order_number":     order_number,
+        "purchase_order":   purchase_order,
         "description":      description,
         "net_amount":       net_amount,
         "vat_amount":       vat_amount,
@@ -3272,16 +3347,24 @@ def azure_di_extract_invoice(
             "supplier_name": supplier_name,
             "supplier_vat": supplier_vat,
             "supplier_address": supplier_addr,
+            "supplier_address_recipient": supplier_addr_recipient,
             "invoice_number": invoice_number,
             "invoice_date": invoice_date,
             "due_date": due_date,
+            "order_number": order_number,
+            "purchase_order": purchase_order,
             "net_amount": net_amount,
             "vat_amount": vat_amount,
             "total_amount": total_amount,
             "currency": currency,
             "customer_name": customer_name,
+            "customer_address": customer_addr,
+            "customer_address_recipient": customer_addr_recipient,
             "customer_vat": customer_vat,
         },
+        "_di_raw_fields": di_raw_fields,
+        "_di_raw_payload": di_raw_payload,
+        "raw_di_document_confidence": getattr(document, "confidence", None),
         "ai_confidence": {
             "supplier": round(s_conf, 2),
             "customer": round(c_conf, 2),
@@ -3672,14 +3755,17 @@ def merge_ai_fields(
 
     # -- Extended framework fields (not in rule-based base) --------------------
     for field in (
-        "supplier_address", "supplier_vat", "supplier_email", "supplier_phone",
-        "customer_name", "customer_address", "customer_vat",
+        "supplier_address", "supplier_address_recipient", "supplier_vat", "supplier_email", "supplier_phone",
+        "customer_name", "customer_address", "customer_address_recipient", "customer_vat",
+        "order_number", "purchase_order",
         "document_type", "extraction_status", "totals_reconcile",
         "ai_issues", "ai_confidence",
         "line_items_structured",   # structured list from Azure DI / OpenAI
         "extraction_source",       # tracks which engine produced the result
         "di_page_text",            # full OCR text from Azure DI (used by BCRS detection)
         "_di_structured_fields",   # raw structured Azure DI field values before merge
+        "_di_raw_fields",          # exact serialised field payload returned by Azure DI
+        "_di_raw_payload",         # serialised top-level DI document payload
     ):
         if ai.get(field) is not None:
             merged[field] = ai[field]
