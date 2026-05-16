@@ -33,10 +33,14 @@ def test_batches_persist_microsoft_named_fields_from_raw_di():
     src = read("app/routers/batches.py")
     assert "def _di_field_scalar_value(" in src
     assert "def _di_field_complex_value(" in src
+    assert "def _existing_table_columns(" in src
+    assert "def _filter_existing_columns(" in src
     assert 'VendorName=_di_field_scalar_value(raw_di_fields.get("VendorName")),' in src
     assert 'PaymentDetails=_di_field_complex_value(raw_di_fields.get("PaymentDetails")),' in src
     assert 'raw_items = _di_field_complex_value(raw_di_fields.get("Items"))' in src
     assert 'Amount=_di_field_scalar_value(item_fields.get("Amount")),' in src
+    assert 'InvoiceReadHeader(**_filter_existing_columns(db, "invoice_read_headers", header_values))' in src
+    assert 'InvoiceReadDetail(**_filter_existing_columns(db, "invoice_read_details", detail_values))' in src
 
 
 def test_migration_adds_microsoft_named_columns():

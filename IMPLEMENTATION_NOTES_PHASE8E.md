@@ -228,3 +228,14 @@ before reaching native text/OCR fallback.
   snapshot writer to populate detail rows from raw DI `Items` when available.
 - The existing app-normalized columns remain for compatibility; the new columns
   are there to compare the raw DI read against later pipeline state.
+
+## Hotfix 10c Note
+
+- Corrected the read-snapshot insert path so the app can run against databases
+  that have not yet applied the new DI-named column migration.
+- `app/routers/batches.py` now inspects the live table schema and filters insert
+  kwargs to only the columns that actually exist in `invoice_read_headers` and
+  `invoice_read_details`.
+- Result: if migration `20260516_0004` is present, the Microsoft-named DI
+  columns are populated; if not, the app still writes the legacy snapshot
+  columns instead of failing with `UndefinedColumn`.

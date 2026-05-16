@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import or_
+from sqlalchemy import inspect, or_
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
@@ -47,6 +47,7 @@ router = APIRouter(prefix="/batches", tags=["batches"])
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
 _ACTIVE_BATCHES: set[str] = set()
 _ACTIVE_BATCHES_LOCK = Lock()
+_READ_SNAPSHOT_SCHEMA_CACHE: dict[str, set[str]] = {}
 
 
 def _batch_folder(batch_id: UUID) -> Path:
@@ -160,6 +161,20 @@ def _di_field_complex_value(field_payload: object) -> object:
     return None
 
 
+def _existing_table_columns(db: Session, table_name: str) -> set[str]:
+    cached = _READ_SNAPSHOT_SCHEMA_CACHE.get(table_name)
+    if cached is not None:
+        return cached
+    cols = {col["name"] for col in inspect(db.bind).get_columns(table_name)}
+    _READ_SNAPSHOT_SCHEMA_CACHE[table_name] = cols
+    return cols
+
+
+def _filter_existing_columns(db: Session, table_name: str, values: dict[str, object]) -> dict[str, object]:
+    existing = _existing_table_columns(db, table_name)
+    return {key: value for key, value in values.items() if key in existing}
+
+
 def _persist_invoice_read_snapshot(
     db: Session,
     *,
@@ -177,7 +192,7 @@ def _persist_invoice_read_snapshot(
     if not isinstance(raw_di_fields, dict):
         raw_di_fields = {}
     source_file_id = row.source_file_id or invoice_file.id
-    header = InvoiceReadHeader(
+    header_values = dict(
         batch_id=batch.id,
         tenant_id=batch.tenant_id,
         company_id=batch.company_id,
@@ -284,6 +299,7 @@ def _persist_invoice_read_snapshot(
         TaxDetails=_di_field_complex_value(raw_di_fields.get("TaxDetails")),
         PaidInFourInstallements=_di_field_complex_value(raw_di_fields.get("PaidInFourInstallements")),
     )
+    header = InvoiceReadHeader(**_filter_existing_columns(db, "invoice_read_headers", header_values))
     db.add(header)
     db.flush()
     raw_items = _di_field_complex_value(raw_di_fields.get("Items"))
@@ -295,7 +311,7 @@ def _persist_invoice_read_snapshot(
         item_fields = item.get("value_object") if isinstance(item, dict) else None
         if not isinstance(item_fields, dict):
             item_fields = {}
-        db.add(InvoiceReadDetail(
+        detail_values = dict(
             header_id=header.id,
             line_no=idx,
             description=(item.get("description") if isinstance(item, dict) else None),
@@ -313,7 +329,8 @@ def _persist_invoice_read_snapshot(
             Unit=_di_field_scalar_value(item_fields.get("Unit")),
             UnitPrice=_di_field_scalar_value(item_fields.get("UnitPrice")),
             raw_detail=_json_safe(item),
-        ))
+        )
+        db.add(InvoiceReadDetail(**_filter_existing_columns(db, "invoice_read_details", detail_values)))
 
 
 def _audit_rule_application(
