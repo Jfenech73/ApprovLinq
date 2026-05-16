@@ -31,7 +31,7 @@ except ImportError as _imp_err:
     _log.getLogger(__name__).warning("New pipeline modules not available: %s", _imp_err)
 
 logger = logging.getLogger(__name__)
-EXTRACTOR_BUILD_TAG = "phase8e_hotfix8"
+EXTRACTOR_BUILD_TAG = "phase8e_hotfix9"
 
 
 def clean_text(text: str) -> str:
@@ -3690,6 +3690,77 @@ def merge_ai_fields(
     return merged
 
 
+def _build_provider_baseline_result(
+    extracted: dict[str, Any],
+    *,
+    method: str,
+    page_index: int,
+    page_quality_score: float,
+    page_text: str,
+) -> dict[str, Any]:
+    out = dict(extracted or {})
+    source = str(out.get("extraction_source") or ("azure_di" if "azure_di" in method else method)).strip() or "raw_extraction"
+    cleaned_text = clean_text(page_text or out.get("di_page_text") or "")
+    header_text = out.get("_header_text") or _header_region_text(cleaned_text, max_lines=24)
+    totals_text = out.get("_totals_text") or _totals_region_text(cleaned_text, tail_lines=24)
+    out["supplier_name"] = normalise_company_name(_clean_ocr_supplier_name(out.get("supplier_name")))
+    if out.get("invoice_date") is not None:
+        out["invoice_date"] = parse_date(out.get("invoice_date"))
+    if out.get("due_date") is not None:
+        out["due_date"] = parse_date(out.get("due_date"))
+    for field in ("net_amount", "vat_amount", "total_amount"):
+        if out.get(field) is not None:
+            try:
+                out[field] = round(float(out.get(field)), 2)
+            except Exception:
+                pass
+    if not out.get("currency"):
+        out["currency"] = (
+            _extract_currency_code(header_text)
+            or _extract_currency_code(totals_text)
+            or _extract_currency_code(cleaned_text)
+        )
+    ai_conf = out.get("ai_confidence") or {}
+    if ai_conf:
+        supplier_conf = float(ai_conf.get("supplier", 0.0) or 0.0)
+        totals_conf = float(ai_conf.get("totals", 0.0) or 0.0)
+        confidence = round(min(max((supplier_conf * 0.45) + (totals_conf * 0.45) + 0.10, 0.0), 0.99), 2)
+    else:
+        completeness = sum(
+            1
+            for value in (
+                out.get("supplier_name"),
+                out.get("invoice_number"),
+                out.get("invoice_date"),
+                out.get("total_amount"),
+            )
+            if value not in (None, "", [])
+        )
+        confidence = round(min(0.35 + (completeness * 0.15), 0.9), 2)
+    missing_core = any(
+        out.get(field) in (None, "")
+        for field in ("supplier_name", "invoice_number", "invoice_date", "total_amount")
+    )
+    out.update({
+        "page_no": page_index + 1,
+        "method_used": f"{method}+provider_baseline",
+        "extraction_source": source,
+        "confidence_score": confidence,
+        "validation_status": "review_provider_baseline" if missing_core else "ok_provider_baseline",
+        "review_required": bool(missing_core),
+        "review_priority": "medium" if missing_core else None,
+        "review_reasons": "provider_baseline_missing_core" if missing_core else None,
+        "review_fields": "supplier_name|invoice_number|invoice_date|total_amount" if missing_core else None,
+        "auto_approved": False if missing_core else True,
+        "page_quality_score": round(page_quality_score, 2),
+        "supplier_match_method": "provider_direct",
+        "header_raw": header_text,
+        "totals_raw": totals_text,
+        "page_text_raw": cleaned_text[:20000],
+    })
+    return out
+
+
 def process_pdf_page(
     pdf_path: str | Path,
     page_index: int,
@@ -3736,7 +3807,8 @@ def process_pdf_page(
     method = "provider_start"
     page_quality_score: float = 0.5  # default until we render the image
 
-    use_vision = bool(settings.use_openai and openai_api_key)
+    provider_baseline_mode = bool(getattr(settings, "scan_provider_baseline_mode", False))
+    use_vision = bool(settings.use_openai and openai_api_key and not provider_baseline_mode)
     final_text = "(page text unavailable)"
     ai_fields = None
     raw_jpeg = None
@@ -3781,26 +3853,61 @@ def process_pdf_page(
                 final_text = _di_text
             logger.info("Azure DI extraction succeeded for page %d", page_index)
 
-    # 2. Native text is useful for digital PDFs, but only if it carries invoice
-    # signals. It remains a candidate source rather than a blind replacement.
-    if final_text == "(page text unavailable)" and _native_text_looks_usable(native_text):
-        final_text = native_text
-        method = "native_text"
+    if provider_baseline_mode:
+        # Provider-baseline mode: DI first, immediate OCR fallback, native text last.
+        if final_text == "(page text unavailable)":
+            ocr_text, ocr_method = _get_fallback_ocr_text(pdf_path, page_index, native_text)
+            if ocr_text and count_meaningful_chars(ocr_text) >= 10:
+                final_text = ocr_text
+                method = ocr_method or "ocr_primary"
+        if final_text == "(page text unavailable)" and _native_text_looks_usable(native_text):
+            final_text = native_text
+            method = "native_text"
+        if final_text == "(page text unavailable)":
+            method = "provider_unavailable"
+    else:
+        # 2. Native text is useful for digital PDFs, but only if it carries invoice
+        # signals. It remains a candidate source rather than a blind replacement.
+        if final_text == "(page text unavailable)" and _native_text_looks_usable(native_text):
+            final_text = native_text
+            method = "native_text"
 
-    # 3. OCR fallback remains available for OCR-only deployments and for pages
-    # where DI/native text is missing or weak.
-    if final_text == "(page text unavailable)":
-        ocr_text, ocr_method = _get_fallback_ocr_text(pdf_path, page_index, native_text)
-        if ocr_text and count_meaningful_chars(ocr_text) >= 10:
-            final_text = ocr_text
-            method = ocr_method or "ocr_primary"
-        else:
-            method = "ocr_unavailable_native_text_ignored"
+        # 3. OCR fallback remains available for OCR-only deployments and for pages
+        # where DI/native text is missing or weak.
+        if final_text == "(page text unavailable)":
+            ocr_text, ocr_method = _get_fallback_ocr_text(pdf_path, page_index, native_text)
+            if ocr_text and count_meaningful_chars(ocr_text) >= 10:
+                final_text = ocr_text
+                method = ocr_method or "ocr_primary"
+            else:
+                method = "ocr_unavailable_native_text_ignored"
 
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 2 — Field extraction
     # ─────────────────────────────────────────────────────────────────────────
     logger.debug("Stage 2: field extraction for page %d", page_index)
+
+    if provider_baseline_mode:
+        if ai_fields:
+            return _build_provider_baseline_result(
+                ai_fields,
+                method=method,
+                page_index=page_index,
+                page_quality_score=page_quality_score,
+                page_text=ai_fields.get("di_page_text") or final_text,
+            )
+        extracted = simple_extract(
+            final_text,
+            openai_api_key=None,
+            account_company_name=account_company_name,
+        )
+        return _build_provider_baseline_result(
+            extracted,
+            method=method,
+            page_index=page_index,
+            page_quality_score=page_quality_score,
+            page_text=final_text,
+        )
 
     # 2a — Rule-based baseline (no API cost, instant)
     extracted = simple_extract(

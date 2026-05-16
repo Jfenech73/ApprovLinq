@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     use_azure_di: bool = False
     azure_di_endpoint: str | None = None
     azure_di_key: str | None = None
+    azure_di_page_timeout_s: float = 45.0
+
+    # Temporary extraction-baseline mode:
+    # DI first, immediate fallback, and no downstream rule/arbitration mutation.
+    scan_provider_baseline_mode: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -72,6 +77,8 @@ class Settings(BaseSettings):
             "use_azure_di": self.use_azure_di,
             "azure_di_endpoint": self.azure_di_endpoint,
             "azure_di_key_present": bool(self.azure_di_key),
+            "azure_di_page_timeout_s": self.azure_di_page_timeout_s,
+            "scan_provider_baseline_mode": self.scan_provider_baseline_mode,
             "upload_dir": self.upload_dir,
             "export_dir": self.export_dir,
         }

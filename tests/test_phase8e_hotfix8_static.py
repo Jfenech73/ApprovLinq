@@ -33,6 +33,6 @@ def test_merge_ai_fields_leaves_supplier_unresolved_when_not_actionable():
     assert 'merged["_supplier_resolution"] = supplier_meta' in fn
 
 
-def test_hotfix8_build_tag_present():
+def test_hotfix8_supplier_guards_still_present_under_current_build():
     src = read("app/services/extractor.py")
-    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix8"' in src
+    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix9"' in src

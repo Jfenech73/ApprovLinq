@@ -2926,6 +2926,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         review_required_count = 0
         totals_status_counts: dict[str, int] = {}
         extraction_method_counts: dict[str, int] = {}
+        provider_baseline_mode = bool(getattr(settings, "scan_provider_baseline_mode", False))
         perf_ctx = ScanPerformanceContext(batch_id=batch_id)
         _batch_perf_start = __import__("time").perf_counter()
         for file_index, invoice_file in enumerate(files, start=1):
@@ -2956,26 +2957,27 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             batch_id, file_index, page_index + 1, len(row_payloads), ",".join(page_methods),
                         )
                         for r in row_payloads:
-                            # --- Pattern-based supplier pre-fill ---------
-                            # Before fuzzy matching, check whether we have a
-                            # stored keyword fingerprint for this invoice's
-                            # header. If we get a confident match, override the
-                            # AI/rule-based supplier_name so that
-                            # _apply_account_suggestions can do an exact lookup.
-                            header_text = r.get("header_raw") or ""
-                            pattern_supplier = _match_supplier_by_pattern(
-                                db, _batch_tenant_id, _batch_company_id, header_text
-                            )
                             supplier_name = r.get("supplier_name")
                             supplier_vat  = r.get("supplier_vat")
-                            if pattern_supplier:
-                                supplier_name = pattern_supplier.supplier_name
-                                logger.debug(
-                                    "Pattern match: '%s' for page %s",
-                                    supplier_name,
-                                    r.get("page_no"),
+                            if not provider_baseline_mode:
+                                # --- Pattern-based supplier pre-fill ---------
+                                # Before fuzzy matching, check whether we have a
+                                # stored keyword fingerprint for this invoice's
+                                # header. If we get a confident match, override the
+                                # AI/rule-based supplier_name so that
+                                # _apply_account_suggestions can do an exact lookup.
+                                header_text = r.get("header_raw") or ""
+                                pattern_supplier = _match_supplier_by_pattern(
+                                    db, _batch_tenant_id, _batch_company_id, header_text
                                 )
-                            # ----------------------------------------------
+                                if pattern_supplier:
+                                    supplier_name = pattern_supplier.supplier_name
+                                    logger.debug(
+                                        "Pattern match: '%s' for page %s",
+                                        supplier_name,
+                                        r.get("page_no"),
+                                    )
+                                # ----------------------------------------------
                             row = InvoiceRow(
                                 batch_id=batch_id,
                                 tenant_id=batch.tenant_id,
@@ -3008,36 +3010,39 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 totals_raw=r.get("totals_raw"),
                                 page_text_raw=r.get("page_text_raw"),
                             )
-                            with perf_ctx.timed("supplier_resolver"):
-                                _resolve_supplier_identity(
-                                    db, tenant_id, batch.company_id, row,
-                                    supplier_vat=supplier_vat,
-                                    batch=batch,
-                                )
-                            with perf_ctx.timed("supplier_history_lookup"):
-                                _apply_account_suggestions(
-                                    db, tenant_id, batch.company_id, row,
-                                    supplier_vat=supplier_vat,
-                                )
-                            _supplier_before_remap = row.supplier_name
-                            with perf_ctx.timed("saved_region_replay"):
-                                _apply_remap_hints(db, batch, row, perf_ctx=perf_ctx)
-                            # Supplier-name saved regions are allowed to confirm/fix a supplier
-                            # after the first master-data suggestion pass.  Re-run suggestions
-                            # so posting account / supplier match data follow the corrected name.
-                            if row.supplier_name != _supplier_before_remap:
+                            if not provider_baseline_mode:
+                                with perf_ctx.timed("supplier_resolver"):
+                                    _resolve_supplier_identity(
+                                        db, tenant_id, batch.company_id, row,
+                                        supplier_vat=supplier_vat,
+                                        batch=batch,
+                                    )
                                 with perf_ctx.timed("supplier_history_lookup"):
                                     _apply_account_suggestions(
                                         db, tenant_id, batch.company_id, row,
                                         supplier_vat=supplier_vat,
                                     )
-                            with perf_ctx.timed("rule_application"):
-                                _apply_saved_rules(db, batch, row)
-                            # Deterministic post-extraction arbitration: compare raw extraction,
-                            # rules, saved-region activity, supplier history/master data and
-                            # totals evidence before final review/BCRS decisions.
-                            with perf_ctx.timed("arbitration"):
-                                arbitrate_invoice_row(db, batch, row, r, context={"scan_mode": batch.scan_mode or "summary", "perf_ctx": perf_ctx})
+                                _supplier_before_remap = row.supplier_name
+                                with perf_ctx.timed("saved_region_replay"):
+                                    _apply_remap_hints(db, batch, row, perf_ctx=perf_ctx)
+                                # Supplier-name saved regions are allowed to confirm/fix a supplier
+                                # after the first master-data suggestion pass.  Re-run suggestions
+                                # so posting account / supplier match data follow the corrected name.
+                                if row.supplier_name != _supplier_before_remap:
+                                    with perf_ctx.timed("supplier_history_lookup"):
+                                        _apply_account_suggestions(
+                                            db, tenant_id, batch.company_id, row,
+                                            supplier_vat=supplier_vat,
+                                        )
+                                with perf_ctx.timed("rule_application"):
+                                    _apply_saved_rules(db, batch, row)
+                                # Deterministic post-extraction arbitration: compare raw extraction,
+                                # rules, saved-region activity, supplier history/master data and
+                                # totals evidence before final review/BCRS decisions.
+                                with perf_ctx.timed("arbitration"):
+                                    arbitrate_invoice_row(db, batch, row, r, context={"scan_mode": batch.scan_mode or "summary", "perf_ctx": perf_ctx})
+                            else:
+                                _append_method_tag(row, "provider_baseline_mode")
 
                             _method_text = row.method_used or ""
                             if "rule:" in _method_text or "arbitrated:correction_rule" in _method_text or "arbitrated:admin_global_rule" in _method_text:
@@ -3057,7 +3062,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             db.add(row)
                             inserted_rows += 1
                             total_rows += 1
-                            if (batch.scan_mode or "summary").lower() == "lines":
+                            if provider_baseline_mode or (batch.scan_mode or "summary").lower() == "lines":
                                 continue
                             bcrs_outcome, bcrs_amount, bcrs_reason = _decide_bcrs_split(db, batch, row, r, [row])
                             if bcrs_outcome == "auto_split" and bcrs_amount and bcrs_amount > 0:
@@ -3200,10 +3205,11 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 db.commit()
                 failed_files += 1
 
-        duplicate_review_count = _mark_duplicate_invoice_rows(db, batch_id)
-        if duplicate_review_count:
-            review_required_count += duplicate_review_count
-            logger.info("duplicate invoice review flags batch=%s count=%d", batch_id, duplicate_review_count)
+        if not provider_baseline_mode:
+            duplicate_review_count = _mark_duplicate_invoice_rows(db, batch_id)
+            if duplicate_review_count:
+                review_required_count += duplicate_review_count
+                logger.info("duplicate invoice review flags batch=%s count=%d", batch_id, duplicate_review_count)
 
         # ── Final status via direct UPDATE (atomic, no ORM stale-state risk) ──
         if processed_files and not failed_files and not partial_files:

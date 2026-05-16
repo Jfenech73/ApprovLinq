@@ -158,3 +158,26 @@ before reaching native text/OCR fallback.
   than writing a cleaned but wrong supplier name.
 - This change is intentionally stricter: it prefers unresolved suppliers over
   false supplier certainty.
+
+## Hotfix 9 Note
+
+- Added temporary `scan_provider_baseline_mode` in `app/config.py`.
+- In baseline mode the provider order is:
+  1. Azure DI
+  2. OCR fallback
+  3. Native text last
+- OpenAI extraction/validation is disabled in baseline mode.
+- If Azure DI fails or returns nothing for a page, extraction falls through
+  immediately to the next provider for that same page.
+- Added `_build_provider_baseline_result()` in `app/services/extractor.py` so
+  DI/fallback output can be returned directly with only light formatting and
+  minimal missing-core review flags.
+- In baseline mode `app/routers/batches.py` skips:
+  - pattern supplier prefill
+  - supplier/account suggestion passes
+  - saved-region replay
+  - saved rules
+  - arbitration
+  - candidate persistence (implicitly, because arbitration is skipped)
+  - duplicate pass
+  - BCRS/deposit split
