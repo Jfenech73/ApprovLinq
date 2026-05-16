@@ -37,7 +37,7 @@ def test_simple_extract_uses_resolved_currency_not_undefined_currency_local():
 
 def test_extractor_has_current_build_tag_log_marker():
     src = read("app/services/extractor.py")
-    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix7"' in src
+    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix8"' in src
     assert 'logger.info("process_pdf_page build=%s page=%d file=%s", EXTRACTOR_BUILD_TAG, page_index, Path(pdf_path).name)' in src
 
 

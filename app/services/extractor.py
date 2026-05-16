@@ -31,7 +31,7 @@ except ImportError as _imp_err:
     _log.getLogger(__name__).warning("New pipeline modules not available: %s", _imp_err)
 
 logger = logging.getLogger(__name__)
-EXTRACTOR_BUILD_TAG = "phase8e_hotfix7"
+EXTRACTOR_BUILD_TAG = "phase8e_hotfix8"
 
 
 def clean_text(text: str) -> str:
@@ -1279,6 +1279,30 @@ def _supplier_source_weight(source: str, supplier_conf: float = 0.0) -> int:
     return 4
 
 
+def _supplier_candidate_is_actionable(candidate: dict[str, Any], supplier_vat: str | None = None) -> bool:
+    norm = candidate.get("norm")
+    source = str(candidate.get("representative_source") or candidate.get("source") or "")
+    final_score = int(candidate.get("final_score") or 0)
+    support = int(candidate.get("support") or 0)
+    strength = int(candidate.get("strength") or 0)
+    if norm is not None:
+        if norm.match_method == "vat_match":
+            return True
+        if norm.match_method == "alias_match":
+            return True
+        if norm.match_method == "fuzzy_match" and float(norm.match_confidence or 0.0) >= 0.86:
+            return True
+    if supplier_vat and strength >= 5 and source in {"header_contact", "header_supplier", "azure_di_structured"}:
+        return True
+    if source == "header_contact" and final_score >= 26:
+        return True
+    if source in {"header_supplier", "azure_di_structured"} and support >= 1 and final_score >= 24:
+        return True
+    if source == "header_candidate" and support >= 2 and final_score >= 28:
+        return True
+    return False
+
+
 def _resolve_supplier_identity(
     base: dict[str, Any],
     ai: dict[str, Any] | None,
@@ -1339,7 +1363,7 @@ def _resolve_supplier_identity(
     for candidate in base.get("_supplier_candidates") or []:
         _add_candidate(candidate, "header_candidate")
 
-    header_text = base.get("_header_text") or ""
+    header_text = base.get("_supplier_header_text") or base.get("_header_text") or ""
     if header_text:
         for candidate in _collect_supplier_candidates(header_text, account_tokens=account_tokens):
             _add_candidate(candidate, "header_supplier")
@@ -1350,8 +1374,11 @@ def _resolve_supplier_identity(
         _add_candidate(ai.get("supplier_name"), ai_source)
         di_fields = ai.get("_di_structured_fields") or {}
         _add_candidate(di_fields.get("supplier_name"), "azure_di_structured")
-        if ai.get("di_page_text"):
-            _add_candidate(find_supplier_name(ai.get("di_page_text"), account_tokens=account_tokens), "full_text_candidate")
+        di_header_text = _header_region_text(ai.get("di_page_text") or "", max_lines=18)
+        if di_header_text:
+            _add_candidate(find_supplier_name(di_header_text, account_tokens=account_tokens), "header_contact")
+            for candidate in _collect_supplier_candidates(di_header_text, account_tokens=account_tokens):
+                _add_candidate(candidate, "header_candidate")
 
     if not raw_candidates:
         return None, None, {"support": 0, "score": 0, "source": None}
@@ -1395,6 +1422,8 @@ def _resolve_supplier_identity(
         reverse=True,
     )
     best = ranked[0]
+    if not _supplier_candidate_is_actionable(best, supplier_vat=supplier_vat):
+        return None, None, {"support": best["support"], "score": best["final_score"], "source": best["representative_source"]}
     return best["representative"], best["representative_source"], {
         "support": best["support"],
         "score": best["final_score"],
@@ -2500,6 +2529,7 @@ def simple_extract(
 ) -> dict[str, Any]:
     account_tokens = _build_account_tokens(account_company_name)
     header_text = _header_region_text(text, max_lines=36)
+    supplier_header_text = _header_region_text(text, max_lines=18)
     totals_text = _totals_region_text(text, tail_lines=28)
     identity_text = header_text or clean_text(text)
 
@@ -2570,11 +2600,10 @@ def simple_extract(
         _deposit_candidate = _labelled_bundle.get("_deposit_candidate")
 
     supplier_candidates = _dedupe_candidates(
-        _collect_supplier_candidates(identity_text, account_tokens=account_tokens)
-        + _collect_supplier_candidates(text, account_tokens=account_tokens)
+        _collect_supplier_candidates(supplier_header_text or identity_text, account_tokens=account_tokens)
     )
     supplier_name = supplier_candidates[0] if supplier_candidates else None
-    supplier_vat = _extract_supplier_vat_number(identity_text) or _extract_supplier_vat_number(text)
+    supplier_vat = _extract_supplier_vat_number(supplier_header_text or identity_text) or _extract_supplier_vat_number(text)
     line_items_raw = extract_candidate_line_items(text)
 
     description = None
@@ -2651,6 +2680,7 @@ def simple_extract(
         "_invoice_candidates": invoice_candidates,
         "_supplier_candidates": supplier_candidates,
         "_header_text": header_text,
+        "_supplier_header_text": supplier_header_text,
         "_totals_text": totals_text,
     }
 
@@ -3558,9 +3588,8 @@ def merge_ai_fields(
         )
         merged["_supplier_resolution"] = supplier_meta
     else:
-        merged["supplier_name"] = normalise_company_name(
-            _clean_ocr_supplier_name(merged.get("supplier_name"))
-        )
+        merged["supplier_name"] = None
+        merged["_supplier_resolution"] = supplier_meta
 
     # -- Invoice number --------------------------------------------------------
     ai_invoice_number = ai.get("invoice_number")

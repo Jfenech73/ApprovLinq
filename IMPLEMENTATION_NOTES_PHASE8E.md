@@ -144,3 +144,17 @@ before reaching native text/OCR fallback.
   solely because they missed the supplier master; they can be promoted to
   `document_header` / `document_header_vat` when the document evidence is
   strong enough.
+
+## Hotfix 8 Note
+
+- Tightened supplier extraction to a header-only path in `simple_extract()`:
+  supplier candidates now come from a short supplier header region instead of
+  mixing in full-page/body text.
+- Removed full-page DI text supplier guessing from the identity resolver; DI
+  vendor name stays a candidate, but supplier identity is now anchored to
+  header/contact-block evidence.
+- Added an actionable-evidence gate to the supplier resolver. If the best
+  supplier candidate lacks strong evidence, the field is left unresolved rather
+  than writing a cleaned but wrong supplier name.
+- This change is intentionally stricter: it prefers unresolved suppliers over
+  false supplier certainty.
