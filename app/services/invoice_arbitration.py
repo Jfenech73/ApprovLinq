@@ -482,7 +482,7 @@ def _field_source_type(payload: dict[str, Any], field_name: str, default_source_
     tag = str(field_sources.get(field_name) or "").strip().lower()
     if tag == "azure_di_structured":
         return "azure_di_structured"
-    if tag in {"header_supplier", "header_identity", "text_rules"}:
+    if tag in {"header_supplier", "header_contact", "header_candidate", "header_identity", "text_rules"}:
         return "header_rule"
     if tag.startswith("openai"):
         return "raw_extraction"

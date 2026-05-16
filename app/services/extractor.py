@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,7 @@ except ImportError as _imp_err:
     _log.getLogger(__name__).warning("New pipeline modules not available: %s", _imp_err)
 
 logger = logging.getLogger(__name__)
-EXTRACTOR_BUILD_TAG = "phase8e_hotfix6b"
+EXTRACTOR_BUILD_TAG = "phase8e_hotfix7"
 
 
 def clean_text(text: str) -> str:
@@ -1220,9 +1221,185 @@ def _document_supplier_evidence_is_strong(
     supplier_conf = float((ai_confidence or {}).get("supplier", 0.0) or 0.0)
     if supplier_vat and score >= 4:
         return True
-    if score >= 10:
+    if score >= 8:
         return True
-    return score >= 7 and supplier_conf >= 0.55
+    return score >= 6 and supplier_conf >= 0.50
+
+
+_GENERIC_SUPPLIER_TOKENS = frozenset({
+    "LTD", "LIMITED", "PLC", "LLC", "INC", "CO", "COMPANY", "GROUP",
+    "TRADING", "SERVICES", "SERVICE", "HOLDINGS", "INTERNATIONAL",
+    "AND", "THE", "OF", "FOR", "MALTA", "MT",
+})
+
+
+def _supplier_identity_tokens(value: str | None) -> tuple[str, ...]:
+    tokens: list[str] = []
+    for token in re.findall(r"[A-Za-z]{2,}", str(value or "").upper()):
+        if token in _GENERIC_SUPPLIER_TOKENS:
+            continue
+        tokens.append(token)
+    return tuple(tokens)
+
+
+def _supplier_candidates_similar(a: str | None, b: str | None) -> bool:
+    aa = normalise_company_name(_clean_ocr_supplier_name(a)) or ""
+    bb = normalise_company_name(_clean_ocr_supplier_name(b)) or ""
+    if not aa or not bb:
+        return False
+    if aa.lower() == bb.lower():
+        return True
+    at = _supplier_identity_tokens(aa)
+    bt = _supplier_identity_tokens(bb)
+    aset = set(at)
+    bset = set(bt)
+    if aset and bset:
+        common = aset & bset
+        if aset.issubset(bset) or bset.issubset(aset):
+            return True
+        if len(common) >= 2:
+            return True
+        if common and at and bt and (at[0] == bt[0] or at[-1] == bt[-1]):
+            return True
+    return SequenceMatcher(None, aa.lower(), bb.lower()).ratio() >= 0.84
+
+
+def _supplier_source_weight(source: str, supplier_conf: float = 0.0) -> int:
+    source_l = (source or "").strip().lower()
+    if source_l == "azure_di_structured":
+        return 16 + int(supplier_conf * 8)
+    if source_l in {"header_supplier", "header_contact"}:
+        return 14
+    if source_l == "header_candidate":
+        return 11
+    if source_l == "full_text_candidate":
+        return 6
+    if source_l == "openai_ai":
+        return 5 + int(supplier_conf * 5)
+    return 4
+
+
+def _resolve_supplier_identity(
+    base: dict[str, Any],
+    ai: dict[str, Any] | None,
+    account_company_name: str | None = None,
+) -> tuple[str | None, str | None, dict[str, Any]]:
+    account_tokens = _build_account_tokens(account_company_name)
+    supplier_conf = float(((ai or {}).get("ai_confidence") or {}).get("supplier", 0.0) or 0.0)
+    supplier_vat = (
+        (ai or {}).get("supplier_vat")
+        or base.get("supplier_vat")
+        or _extract_supplier_vat_number(base.get("_header_text"))
+        or _extract_supplier_vat_number((ai or {}).get("di_page_text"))
+    )
+    field_sources = dict(base.get("_field_sources") or {})
+    raw_candidates: list[dict[str, Any]] = []
+
+    def _blocked_by_account(candidate: str) -> bool:
+        if not account_tokens:
+            return False
+        return any(re.search(r"\b" + re.escape(tok) + r"\b", candidate, re.I) for tok in account_tokens)
+
+    def _add_candidate(value: str | None, source: str) -> None:
+        cleaned = normalise_company_name(_clean_ocr_supplier_name(value))
+        if not cleaned:
+            return
+        if suspicious_supplier_name(cleaned) or bad_supplier_line(cleaned):
+            return
+        if _blocked_by_account(cleaned):
+            return
+        strength = _company_strength_score(cleaned)
+        if strength < 0:
+            return
+        score = strength + _supplier_source_weight(source, supplier_conf=supplier_conf)
+        norm = None
+        if _NEW_MODULES_AVAILABLE:
+            try:
+                norm = _normalize_supplier(cleaned, supplier_vat=supplier_vat)
+            except Exception:
+                norm = None
+        if norm is not None:
+            if norm.match_method == "vat_match":
+                score += 40
+            elif norm.match_method == "alias_match":
+                score += 26
+            elif norm.match_method == "fuzzy_match":
+                score += 8 + int(float(norm.match_confidence or 0.0) * 8)
+        raw_candidates.append({
+            "value": cleaned,
+            "source": source,
+            "score": score,
+            "strength": strength,
+            "norm": norm,
+        })
+
+    base_supplier = base.get("supplier_name")
+    if base_supplier:
+        _add_candidate(base_supplier, field_sources.get("supplier_name") or "header_supplier")
+    for candidate in base.get("_supplier_candidates") or []:
+        _add_candidate(candidate, "header_candidate")
+
+    header_text = base.get("_header_text") or ""
+    if header_text:
+        for candidate in _collect_supplier_candidates(header_text, account_tokens=account_tokens):
+            _add_candidate(candidate, "header_supplier")
+        _add_candidate(find_supplier_name(header_text, account_tokens=account_tokens), "header_contact")
+
+    if ai:
+        ai_source = "azure_di_structured" if ai.get("extraction_source") == "azure_di" else "openai_ai"
+        _add_candidate(ai.get("supplier_name"), ai_source)
+        di_fields = ai.get("_di_structured_fields") or {}
+        _add_candidate(di_fields.get("supplier_name"), "azure_di_structured")
+        if ai.get("di_page_text"):
+            _add_candidate(find_supplier_name(ai.get("di_page_text"), account_tokens=account_tokens), "full_text_candidate")
+
+    if not raw_candidates:
+        return None, None, {"support": 0, "score": 0, "source": None}
+
+    ranked: list[dict[str, Any]] = []
+    for idx, candidate in enumerate(raw_candidates):
+        support = 0
+        representative = candidate["value"]
+        representative_source = candidate["source"]
+        representative_score = candidate["score"]
+        for jdx, other in enumerate(raw_candidates):
+            if idx == jdx:
+                continue
+            if not _supplier_candidates_similar(candidate["value"], other["value"]):
+                continue
+            support += 1
+            other_value = other["value"]
+            other_score = other["score"]
+            if (
+                len(other_value) > len(representative) + 2
+                and other_score >= representative_score - 2
+            ) or other_score > representative_score + 2:
+                representative = other_value
+                representative_source = other["source"]
+                representative_score = other_score
+        ranked.append({
+            **candidate,
+            "support": support,
+            "representative": representative,
+            "representative_source": representative_source,
+            "final_score": candidate["score"] + (support * 6) + min(len(representative), 36) // 12,
+        })
+
+    ranked.sort(
+        key=lambda item: (
+            item["final_score"],
+            item["support"],
+            item["strength"],
+            len(item["representative"]),
+        ),
+        reverse=True,
+    )
+    best = ranked[0]
+    return best["representative"], best["representative_source"], {
+        "support": best["support"],
+        "score": best["final_score"],
+        "source": best["representative_source"],
+    }
 
 
 def bad_supplier_line(line: str) -> bool:
@@ -3368,37 +3545,22 @@ def merge_ai_fields(
         )
         merged["supplier_name"] = None
 
-    ai_supplier_conf = float((ai.get("ai_confidence") or {}).get("supplier", 0.0))
     is_azure_di = ai.get("extraction_source") == "azure_di"
-    rule_supplier_ok = bool(
-        merged.get("supplier_name")
-        and not suspicious_supplier_name(merged.get("supplier_name"))
+    resolved_supplier, resolved_source, supplier_meta = _resolve_supplier_identity(
+        merged,
+        ai,
+        account_company_name=account_company_name,
     )
-
-    if ai_supplier and not suspicious_supplier_name(ai_supplier):
-        ai_supplier = normalise_company_name(_clean_ocr_supplier_name(ai_supplier))
-        rule_supplier = normalise_company_name(_clean_ocr_supplier_name(merged.get("supplier_name")))
-        ai_score = _company_strength_score(ai_supplier) + int(ai_supplier_conf * 5)
-        rule_score = _company_strength_score(rule_supplier)
-        if not rule_supplier_ok:
-            merged["supplier_name"] = ai_supplier
-            field_sources["supplier_name"] = "azure_di_structured" if is_azure_di else "openai_ai"
-        elif is_azure_di:
-            if ai_supplier_conf >= 0.70 and ai_score + 1 >= rule_score:
-                merged["supplier_name"] = ai_supplier
-                field_sources["supplier_name"] = "azure_di_structured"
-            elif ai_score >= rule_score or len(ai_supplier or "") >= len(rule_supplier or "") + 4:
-                merged["supplier_name"] = ai_supplier
-                field_sources["supplier_name"] = "azure_di_structured"
-        else:
-            if ai_supplier_conf >= 0.85 and ai_score >= rule_score:
-                merged["supplier_name"] = ai_supplier
-                field_sources["supplier_name"] = "openai_ai"
-
-    # Clean OCR artefacts (embedded newlines, leading junk chars) then normalise casing.
-    merged["supplier_name"] = normalise_company_name(
-        _clean_ocr_supplier_name(merged.get("supplier_name"))
-    )
+    if resolved_supplier:
+        merged["supplier_name"] = resolved_supplier
+        field_sources["supplier_name"] = resolved_source or (
+            "azure_di_structured" if is_azure_di else "header_supplier"
+        )
+        merged["_supplier_resolution"] = supplier_meta
+    else:
+        merged["supplier_name"] = normalise_company_name(
+            _clean_ocr_supplier_name(merged.get("supplier_name"))
+        )
 
     # -- Invoice number --------------------------------------------------------
     ai_invoice_number = ai.get("invoice_number")
@@ -3756,6 +3918,8 @@ def process_pdf_page(
     if _NEW_MODULES_AVAILABLE and clean_supplier:
         try:
             supplier_vat_s3 = extracted.get("supplier_vat")
+            supplier_resolution = extracted.get("_supplier_resolution") or {}
+            supplier_source = str((extracted.get("_field_sources") or {}).get("supplier_name") or "")
             _snorm = _normalize_supplier(clean_supplier, supplier_vat=supplier_vat_s3)
             if _snorm.match_method == "unmatched" and _document_supplier_evidence_is_strong(
                 clean_supplier,
@@ -3764,6 +3928,15 @@ def process_pdf_page(
             ):
                 _snorm.match_method = "document_header_vat" if supplier_vat_s3 else "document_header"
                 _snorm.match_confidence = max(_snorm.match_confidence, 0.82 if supplier_vat_s3 else 0.74)
+                _snorm.review_reason = None
+            elif (
+                _snorm.match_method == "unmatched"
+                and supplier_source in {"header_supplier", "header_contact", "header_candidate", "azure_di_structured"}
+                and int(supplier_resolution.get("score") or 0) >= 18
+                and int(supplier_resolution.get("support") or 0) >= 1
+            ):
+                _snorm.match_method = "document_header_vat" if supplier_vat_s3 else "document_header"
+                _snorm.match_confidence = max(_snorm.match_confidence, 0.78 if supplier_vat_s3 else 0.72)
                 _snorm.review_reason = None
             extracted["_supplier_norm"] = _snorm
             extracted["_supplier_match_method"] = _snorm.match_method
@@ -4018,7 +4191,8 @@ def process_pdf_page(
     # Clean up internal temp keys
     for _k in ("_supplier_name_raw", "_date_parse_strategy", "_date_ambiguity_flag",
                "_deposit_component", "_validation_reasons", "_inv_validation_obj",
-               "_supplier_norm", "_supplier_match_method", "_totals_reconciliation_status"):
+               "_supplier_norm", "_supplier_match_method", "_totals_reconciliation_status",
+               "_supplier_resolution"):
         extracted.pop(_k, None)
     return extracted
 

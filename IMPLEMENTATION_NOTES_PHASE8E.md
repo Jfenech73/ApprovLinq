@@ -128,3 +128,19 @@ before reaching native text/OCR fallback.
   provenance referenced an undefined local and caused page processing to fail.
 - Added extractor build tag logging (`phase8e_hotfix6b`) at page-processing
   start so deployed logs can confirm the live artifact unambiguously.
+
+## Hotfix 7 Note
+
+- Replaced the old supplier merge preference with a dedicated supplier identity
+  resolver in `app/services/extractor.py`.
+- The resolver now combines header candidates, contact-block/header anchors,
+  raw structured Azure DI vendor name, and existing rule/header candidates,
+  then scores them by source strength, company-name quality, supplier-master
+  match quality, and cross-source consensus.
+- Similar supplier variants are clustered so a longer, cleaner legal-name-like
+  variant can win over a shorter noisy OCR fragment when both point to the same
+  supplier.
+- Strong unmatched document-header suppliers are no longer forced into review
+  solely because they missed the supplier master; they can be promoted to
+  `document_header` / `document_header_vat` when the document evidence is
+  strong enough.

@@ -35,9 +35,9 @@ def test_simple_extract_uses_resolved_currency_not_undefined_currency_local():
     assert 'if currency and "currency" not in _field_sources:' not in fn
 
 
-def test_extractor_has_hotfix6b_build_tag_log_marker():
+def test_extractor_has_current_build_tag_log_marker():
     src = read("app/services/extractor.py")
-    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix6b"' in src
+    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix7"' in src
     assert 'logger.info("process_pdf_page build=%s page=%d file=%s", EXTRACTOR_BUILD_TAG, page_index, Path(pdf_path).name)' in src
 
 
@@ -45,7 +45,7 @@ def test_arbitration_uses_field_level_source_type_and_adds_raw_di_candidates():
     src = read("app/services/invoice_arbitration.py")
     assert 'def _field_source_type(payload: dict[str, Any], field_name: str, default_source_type: str) -> str:' in src
     assert 'if tag == "azure_di_structured":' in src
-    assert 'if tag in {"header_supplier", "header_identity", "text_rules"}:' in src
+    assert 'if tag in {"header_supplier", "header_contact", "header_candidate", "header_identity", "text_rules"}:' in src
     fn = src[src.index("def _raw_candidates("):src.index("def _rule_candidates(", src.index("def _raw_candidates("))]
     assert 'field_source_type = _field_source_type(payload, field_name, source_type)' in fn
     assert 'source_type=field_source_type,' in fn
