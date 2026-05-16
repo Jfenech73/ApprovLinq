@@ -124,3 +124,7 @@ before reaching native text/OCR fallback.
   final selected field in Review and export evidence.
 - Adjusted Azure DI supplier merge policy to prefer the structured vendor name
   more consistently when its confidence is strong enough.
+- Corrected a Hotfix 6 regression in `simple_extract()` where currency
+  provenance referenced an undefined local and caused page processing to fail.
+- Added extractor build tag logging (`phase8e_hotfix6b`) at page-processing
+  start so deployed logs can confirm the live artifact unambiguously.

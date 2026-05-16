@@ -26,6 +26,21 @@ def test_merge_ai_fields_marks_field_level_provenance_and_keeps_di_structured_pa
     assert 'merged["_field_sources"] = field_sources' in fn
 
 
+def test_simple_extract_uses_resolved_currency_not_undefined_currency_local():
+    src = read("app/services/extractor.py")
+    fn = src[src.index("def simple_extract("):src.index("def _clean_amount_token(", src.index("def simple_extract("))]
+    assert 'resolved_currency = _extract_currency_code(text)' in fn
+    assert 'if resolved_currency and "currency" not in _field_sources:' in fn
+    assert '"currency": resolved_currency,' in fn
+    assert 'if currency and "currency" not in _field_sources:' not in fn
+
+
+def test_extractor_has_hotfix6b_build_tag_log_marker():
+    src = read("app/services/extractor.py")
+    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix6b"' in src
+    assert 'logger.info("process_pdf_page build=%s page=%d file=%s", EXTRACTOR_BUILD_TAG, page_index, Path(pdf_path).name)' in src
+
+
 def test_arbitration_uses_field_level_source_type_and_adds_raw_di_candidates():
     src = read("app/services/invoice_arbitration.py")
     assert 'def _field_source_type(payload: dict[str, Any], field_name: str, default_source_type: str) -> str:' in src

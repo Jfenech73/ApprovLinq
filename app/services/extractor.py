@@ -30,6 +30,7 @@ except ImportError as _imp_err:
     _log.getLogger(__name__).warning("New pipeline modules not available: %s", _imp_err)
 
 logger = logging.getLogger(__name__)
+EXTRACTOR_BUILD_TAG = "phase8e_hotfix6b"
 
 
 def clean_text(text: str) -> str:
@@ -2446,13 +2447,14 @@ def simple_extract(
             _field_sources["supplier_name"] = "llm_ranking"
         elif ranked and ranked.get("review_recommended"):
             _field_sources["supplier_name"] = "llm_review"
+    resolved_currency = _extract_currency_code(text)
     if supplier_name and "supplier_name" not in _field_sources:
         _field_sources["supplier_name"] = "header_supplier"
     if invoice_number and "invoice_number" not in _field_sources:
         _field_sources["invoice_number"] = "header_identity"
     if invoice_date and "invoice_date" not in _field_sources:
         _field_sources["invoice_date"] = "header_identity"
-    if currency and "currency" not in _field_sources:
+    if resolved_currency and "currency" not in _field_sources:
         _field_sources["currency"] = "text_rules"
 
     return {
@@ -2465,12 +2467,7 @@ def simple_extract(
         "net_amount": net_amount,
         "vat_amount": vat_amount,
         "total_amount": total_amount,
-        "currency": (
-            "GBP" if ("£" in text or "gbp" in text.lower()) else
-            "EUR" if ("€" in text or "eur" in text.lower()) else
-            "USD" if ("$" in text or "usd" in text.lower()) else
-            None
-        ),
+        "currency": resolved_currency,
         "tax_code": None,
         "_deposit_candidate": _deposit_candidate,
         "_field_sources": _field_sources,
@@ -3530,6 +3527,7 @@ def process_pdf_page(
         review reason code collection, validation_status assignment, and
         header/totals evidence strings for the UI.
     """
+    logger.info("process_pdf_page build=%s page=%d file=%s", EXTRACTOR_BUILD_TAG, page_index, Path(pdf_path).name)
     pdf_path = Path(pdf_path)
 
     # ─────────────────────────────────────────────────────────────────────────
