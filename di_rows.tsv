@@ -1,0 +1,291 @@
+﻿PAGES 1
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerAddress	CustomerAddressRecipient	CustomerId	CustomerName	CustomerPhoneNumber	InvoiceDate	OrderNumber	PaymentDetails	PurchaseOrder	SubTotal	TaxDetails	TotalTax	VendorAddress	VendorAddressRecipient	VendorEmail	VendorFaxNumber	VendorName	VendorPhoneNumber	VendorTaxId
+1	invoice	1	"60, Triq san Bartilmew
+Qormi"	Pinto Confectionary	138687	Pinto Confectionary	79333842	7-APR-2026	1067031	[array: 1]	1067031	55.23	[array: 4]	7.69	The Brewery, Mdina Road, Zone 2, Central Business District, Birkirkara, CBD 2010, Malta	Farsons Beverage Imports Company Limited	fbic@farsons.com	2381 4315	"FARSONS GROUP
+FBIC
+BEVERAGE IMPORTERS"	2381 4400	MT1119 2420
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	Quantity	TaxRate	UnitPrice
+1	1	0.875	50.43	Red Bull 25cl	"1
+2.0"	18	25.29
+1	2	0.647	4.80	"QI0002N
+BCRS Product"			
+
+PAGES 2
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	BillingAddress	BillingAddressRecipient	CustomerId	CustomerName	CustomerTaxId	InvoiceDate	InvoiceId	InvoiceTotal	ShippingAddress	ShippingAddressRecipient	SubTotal	TotalTax	VendorAddress	VendorAddressRecipient	VendorName	VendorTaxId
+1	invoice	1	"60, triq San Bartolomew
+Qormi
+79333842
+( Next to San Bastjan Church )
+C.O.D"	Pinto Confectionery	PINTOCONF	Pinto Confectionery	28435207	07/04/2026	INV1038270	46.44	"60, triq San Bartolomew
+Qormi
+79333842
+( Next to San Bastjan Church )
+C.O.D"	Pinto Confectionery	46.44	0.00	"The Fruit
+Vegetable Centre
+a: Triq L-Idward, Ta' Qali, Limits of Attard"	"Mafimex Ltd.
+and"	"mafimex
+fruit & veg"	MT1301-5322
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	ProductCode	Quantity	TaxRate	UnitPrice
+1	1	0.949	16.00	Iceberg Lettuce	ICEBERG	1.00	0.00	16.00
+1	2	0.949	18.24	Tomatoes	TO001	5.70	0.00	3.20
+1	3	0.949	4.20	Cucumber	CU001	2.10	0.00	2.00
+1	4	0.949	8.00	Onions Yellow	ONIONS	1.00	0.00	8.00
+
+PAGES 3
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerAddress	CustomerAddressRecipient	CustomerId	CustomerName	CustomerTaxId	DueDate	InvoiceDate	InvoiceId	InvoiceTotal	OrderNumber	PaymentTerm	PurchaseOrder	ShippingAddress	SubTotal	TotalTax	VendorAddress	VendorAddressRecipient	VendorName	VendorTaxId
+1	invoice	1	60; ST.BARTHOLOMEO STREET;	PINTO PASTIZZERIA	21239280	PINTO PASTIZZERIA	MT 2843-5207	06/04/2026	6-Apr-2026	BA 10467412	88.78	633963	Cash On Delivery	633963	60; ST.BARTHOLOMEO STREET;	88.78	0.00	"Handaq Road Handaq, Qormi Malta.
+QRM4000"	Borg and Aquilina Ltd. GMF Estate	"BORG & AQUILINA
+LIMITED"	MT 10190403
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	ProductCode	Quantity	Unit	UnitPrice
+1	1	0.924	17.06	LION TEA BAGS 12X250	LT/1008	2.00	EA	8.53
+1	2	0.925	9.35	SUNDALE/SUKERO SUGAR 10X1-KG LIM	MP/6056	1.00	CS	9.35
+1	3	0.925	62.37	SUNNY KUNSERVA 6X2000G	FF/3005	2.00	CS	31.50
+
+PAGES 4
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerAddress	CustomerAddressRecipient	CustomerId	CustomerName	CustomerTaxId	InvoiceDate	InvoiceId	InvoiceTotal	OrderNumber	PaymentTerm	PurchaseOrder	ShippingAddress	SubTotal	TotalTax	VendorAddress	VendorAddressRecipient	VendorName	VendorTaxId
+1	invoice	1	BARTOLOMEW STREET,	PINTO CONFECTIONERY	C995	PINTO CONFECTIONERY	2843-5207	2-Apr-2026	10810633	110.10	1077042	Cod	1077042	BARTOLOMEW STREET,	110.10	0.00	"Time House,
+Dun Bartilmew Attard Street,
+Zebbug ZBG 2712"	Quality Foods (Marketing) Limited	"Q
+QUALITY
+FOODS MARKETING"	MT1686-3536
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	ProductCode	Quantity	Unit	UnitPrice
+1	1	0.901	73.600	"REDELMAR TUNA CHUNKS POUCH 16X1KG(FOOD SERV
+Lot: TSJ2F00926-05, Batch: TSJ2F00926-05, Expiry: 09/01/2030, Qty:"	5044	1.00	CS	4.600
+1	2	0.898	36.500	"BOILED PEELED EGGS 1 X 75PCS
+Lot: 6132303, Batch: 01046, Expiry: 27/04/2026, Qty: 2.0000"	2061	2.00	UNI	18.250
+
+PAGES 5
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerAddress	CustomerAddressRecipient	CustomerId	CustomerName	CustomerPhoneNumber	CustomerTaxId	DueDate	InvoiceDate	InvoiceId	InvoiceTotal	OrderNumber	PaymentDetails	PaymentTerm	PurchaseOrder	ReferenceNumber	ShippingAddress	SubTotal	TaxDetails	TotalTax	VendorAddress	VendorAddressRecipient	VendorName	VendorTaxId
+1	invoice	1	60, ST BARTOLOMEO STREET,	PINTO CATERERS	P024	PINTO CATERERS	21440373/79333842	MT	07/04/2026	7-Apr-2026	10314207	156.59	373690	[array: 1]	Cash On Delivery	373690	18575	60, St Bartolomeo Street	132.70	[array: 2]	23.89	19, 20, 21, Triq il-Farkizzan, Mosta Industrial Estate, Mosta - MST 4000, Malta.	"InSeRV
+PRINTERS PACKAGING DISPOSABLES"	"InSeRV
+PRINTERS PACKAGING DISPOSABLES"	MT 1141-8629
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	ProductCode	Quantity	Unit	UnitPrice
+1	1	0.898	30.85	BOWL SALAD KRAFT 1300ML X 300PCS	JH-H-1300B	1.00	BOX	30.85
+1	2	0.898	50.00	"FORKS 166MM CNC WOOD FIBRE X 80PCS
+NATURELINE REUSABLE 125 CYCLES"	6430077241206	10.00	PKT	5.00
+1	3	0.897	18.85	"LID CLEAR A/FOG FOR JH-H
+1300 × 300"	AFPLID185MM	1.00	BOX	18.85
+1	4	0.898	33.00	"PAPER BAG GP PAROLE 140+70X220MM × 500PCS
+ORANGE"	229.31	3.00	PKT	11.00
+
+PAGES 6
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerAddress	CustomerAddressRecipient	CustomerId	CustomerName	CustomerTaxId	InvoiceDate	InvoiceId	InvoiceTotal	OrderNumber	PurchaseOrder	ShippingAddress	ShippingAddressRecipient	SubTotal	TotalDiscount	VendorAddress	VendorAddressRecipient	VendorFaxNumber	VendorName	VendorTaxId
+1	invoice	1	"Robert Mercieca
+St. Bartoloew 60
+QRM 1000 QORMI"	PINTO Confectionery	6292110	PINTO Confectionery	MT12742105	21.04.2026	1344978617	38.55	381718422	SFAX820044	"Robert Mercieca
+St. Bartoloew 60
+QRM 1000 QORMI"	PINTO Confectionery	38.55	4.39	"PANTAR ROAD, LIJA LJA2021 - MALTA
+BCRS/1/21-01413"	NESTLE' MALTA LIMITED	+356 21423011	Nestlē	MT11835305;
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	ProductCode	Quantity	Tax	Unit	UnitPrice
+1	1	0.841	38.55	3IN1 Original 8(8x16g)	12588638	2	3.05	CS	19.28
+
+PAGES 7
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerId	CustomerName	InvoiceDate	InvoiceId	InvoiceTotal	PaymentDetails	RemittanceAddressRecipient	SubTotal	TotalTax	VendorAddress	VendorAddressRecipient	VendorName	VendorTaxId
+1	invoice	1	C132	Pinto Passtizerija	10-Apr-2026	BR4045	21.71	[array: 1]	BRANRAM LTD	21.71	0.00	9, Triq Kananea, Attard - Malta	"BR SUPPLY CO.
+BRANRAM LTD"	"ER
+BR SUPPLY CO."	MT2960-9308
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	ProductCode	Quantity	UnitPrice
+1	1	0.931	"74.24
+E"	FTIRA X20 150G	135534	1	7.240
+1	2	0.928	"14.47
+E"	BAGUETTE CLASSIC 145g ×50	135000	1	14.470
+
+PAGES 8
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerAddressRecipient	CustomerId	CustomerName	CustomerTaxId	DueDate	InvoiceDate	InvoiceId	InvoiceTotal	OrderNumber	PaymentDetails	PaymentTerm	PurchaseOrder	ShippingAddress	SubTotal	TotalTax	VendorAddress	VendorAddressRecipient	VendorName	VendorTaxId
+1	invoice	1	"PINTO CONFECTIONERY
+(SHOP)"	P029	"PINTO CONFECTIONERY
+(SHOP)"	28435207	08/04/2026	8-Apr-2026	10513562	36.00	433057	[array: 1]	Cash On Delivery	433057	TRIQ SAN BARTOLEMEW	36.00	0.00	"18/19 Anthony John Coleiro Street
+Handaq Industrial Estate"	N.Calleja Trading Ent. Ltd.	N Calleja Trading	MT 1267-7926
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	Quantity	Unit	UnitPrice
+1	1	0.83	36.00	DWN MILK CHOCOLATE COOKIE X 36PCS - 979312/87317	1.00	CS	36.0000
+
+PAGES 9
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	BillingAddress	BillingAddressRecipient	CustomerName	InvoiceDate	InvoiceId	InvoiceTotal	PaymentDetails	SubTotal	TotalTax	VendorAddress	VendorAddressRecipient	VendorName	VendorTaxId
+1	invoice	1	"Triq Ic-Cawsli
+Qormi"	Pinto Caterers	Pinto Caterers	13/04/2026	3800	€70.00	[array: 1]	€70.00	€0.00	"Workshop C12, First Floor
+The Peak Industrial Park
+Triq Daniel Spiteri Sacco, Hal Qormi"	Dolceria D'oro	Dolceria D'oro	MT 1731-3523
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	Quantity	UnitPrice
+1	1	0.935	€ 70.00	Mqaret (box of 200)	2	€ 35.00
+
+PAGES 10
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerAddressRecipient	CustomerId	CustomerName	CustomerTaxId	DueDate	InvoiceDate	InvoiceId	InvoiceTotal	OrderNumber	PaymentDetails	PaymentTerm	PurchaseOrder	ShippingAddress	SubTotal	TotalTax	VendorAddress	VendorAddressRecipient	VendorName
+1	invoice	1	"PINTO CONFECTIONERY
+(SHOP)"	P029	"PINTO CONFECTIONERY
+(SHOP)"	28435207	09/04/2026	9-Apr-2026	10514605	42.50	433872	[array: 1]	Cash On Delivery	433872	TRIQ SAN BARTOLEMEW	42.50	0.00	18/19 Anthony John Coleiro Street	N.Calleja Trading Ent. Ltd.	"N
+N Calleja Trading"
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	Quantity	Unit	UnitPrice
+1	1	0.837	42.50	HIE-POULTRY ROLL X 105G X 50PCS - 888	1.00	CS	42.5000
+
+PAGES 11
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	BillingAddress	BillingAddressRecipient	BillingPhoneNumber	CustomerId	CustomerName	InvoiceDate	InvoiceId	InvoiceTotal	ShippingAddress	ShippingAddressRecipient	SubTotal	TotalDiscount	TotalTax	VendorAddress	VendorAddressRecipient	VendorName	VendorTaxId
+1	invoice	1	"60, triq San Bartolomew
+Qormi
+( Next to San Bastjan Church )"	"Pinto Confectionery
+C. O.D"	79333842	PINTOCONF	"Pinto Confectionery
+C. O.D"	11/04/2026	INV1039186	"(€)
+9.60"	"60, triq San Bartolomew
+79333842
+( Next to San Bastjan Church )"	Pinto Confectionery	18.60	9.00	"(€)
+0.00"	"The Fruit and Vegetable Centre
+a: Triq L-Idward, Ta' Qali, Limits of Attard"	Mafimex Ltd.	"mafimex
+fruit & veg"	MT1301-5322
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	ProductCode	Quantity	TaxRate	UnitPrice
+1	1	0.912	15.00			1.00	0.00	15.00
+1	2	0.57		Capsicum	CAP002			
+1	3	0.913	3.60			1.00	0.00	3.60
+
+PAGES 12
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	BillingAddress	BillingAddressRecipient	CustomerName	CustomerTaxId	DueDate	InvoiceDate	InvoiceId	InvoiceTotal	SubTotal	TaxDetails	TotalTax	VendorAddress	VendorAddressRecipient	VendorName	VendorTaxId
+1	invoice	1	"60
+Triq San Bortolmew"	Pinto Confectionery	Pinto Confectionery	MT28435207	06/04/26	06/04/26	#26099	€3,418.66	€2,897.17	[array: 1]	€521.49	'Il-Fuklar', Triq id-Dahla ta' San Tumas, Zejtun	Dione Busuttil	Dione Busuttil	14958633
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	Quantity	UnitPrice
+1	1	0.902	€251.90	Rothmans Blue	5	€50.38
+1	2	0.902	€503.80	Rothmans Red	10	€50.38
+1	3	0.903	€288.01	Royals Red	6	€48.00
+1	4	0.901	€240.01	Royals Blue	5	€48.00
+1	5	0.902	€141.60	Du Maurir Red	3	€47.20
+1	6	0.908	€50.38	Dunhill Blue	1	€50.38
+1	7	0.904	€50.38	Dunhill Silver	1	€50.38
+1	8	0.902	€266.16	Pall Mall Red	6	€44.36
+1	9	0.9	€177.44	Pall Mall Blue	4	€44.36
+1	10	0.901	€177.44	Pall Mall Silver	4	€44.36
+1	11	0.903	€130.89	Chesterfield Red	3	€43.63
+1	12	0.903	€43.63	Chesterfield Blue	1	€43.63
+1	13	0.903	€49.58	Marlboro Red	1	€49.58
+1	14	0.904	€49.58	Marlboro Gold	1	€49.58
+1	15	0.9	€48.03	Silk Cut Silver	1	€48.03
+1	16	0.904	€52.02	Vogue Blue	1	€52.02
+1	17	0.908	€52.02	Vogue Lilas	1	€52.02
+1	18	0.902	€92.16	Pall Mall SK Blue	2	€46.08
+1	19	0.903	€46.08	Pall Mall SK Red	1	€46.08
+1	20	0.902	€48.83	Old Holborne Yellow	1	€48.83
+1	21	0.908	€34.20	Toscani KS	2	€17.10
+1	22	0.908	€26.12	Domingo Blue	1	€26.12
+1	23	0.908	€63.40	Drum Original	1	€63.40
+1	24	0.901	€13.50	Filters Slim x600	10	€1.35
+
+PAGES 13
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerAddress	CustomerAddressRecipient	CustomerId	CustomerName	CustomerTaxId	InvoiceDate	InvoiceId	InvoiceTotal	PurchaseOrder	ShippingAddress	ShippingAddressRecipient	SubTotal	TotalDiscount	VendorAddress	VendorAddressRecipient	VendorName	VendorTaxId
+1	invoice	1	St. Bartoloew 60	"PINTO Confectionery
+Robert Mercieca"	6292110	"PINTO Confectionery
+Robert Mercieca"	MT12742105	07.04.2026	1344976019	101.18	SFAX817461	St. Bartoloew 60	"PINTO Confectionery
+Robert Mercieca"	101.18	3.00	PANTAR ROAD, LIJA LJA2021 - MALTA	NESTLE' MALTA LIMITED	Nestlē	MT11835305;
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	ProductCode	Quantity	Tax	Unit	UnitPrice
+1	1	0.57	101.18	"GOLD BLEND 10x300g
+N4 XI"	12339268	1	0.01	CS	101.1
+
+PAGES 14
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerAddress	CustomerAddressRecipient	CustomerId	CustomerName	CustomerTaxId	DueDate	InvoiceDate	InvoiceId	InvoiceTotal	OrderNumber	PaymentDetails	PaymentTerm	PurchaseOrder	ReferenceNumber	ShippingAddress	SubTotal	TotalTax	VendorAddress	VendorAddressRecipient	VendorName	VendorTaxId
+1	invoice	1	BARTOLEMEW	"PINTO CONFECTIONERY
+(SHOP)"	P029	"PINTO CONFECTIONERY
+(SHOP)"	28435207	27/04/2026	27-Apr-2026	10522031	27.54	439572	[array: 1]	Cash On Delivery	439572	69384	TRIQ SAN BARTOLEMEW	27.54	0.00	"18-19 Anthony John Coleiro Street
+Handaq industrial Estate
+Qormi"	N. Calleja Trading Ent. Ltd.	"N
+N Calleja Trading"	MT 1267-7926
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	Quantity	Unit	UnitPrice
+1	1	0.821	11.04	MILK SOLAREC SEMI SKIMMED 1.5% 12 X 1 LTR - VUHT21SOI	1.00	CS	11.0400
+1	2	0.819	16.50	SACHETS MAYONNAISE X 300PCS -	1.00	EA	16.5000
+
+PAGES 15
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerAddressRecipient	CustomerId	CustomerName	CustomerTaxId	DueDate	InvoiceDate	InvoiceId	InvoiceTotal	OrderNumber	PaymentDetails	PaymentTerm	PurchaseOrder	ReferenceNumber	ShippingAddress	SubTotal	TotalTax	VendorAddress	VendorAddressRecipient	VendorName	VendorPhoneNumber
+1	invoice	1	"PINTO CONFECTIONERY
+(SHOP)"	P029	"PINTO CONFECTIONERY
+(SHOP)"	28435207	27/04/2026	27-Apr-2026	10522324	42.50	439572	[array: 1]	Cash On Delivery	439572	69389	TRIQ SAN BARTOLEMEW	42.50	0.00	18/19 Anthony John Coleiro Street	N.Calleja Trading Ent. Ltd.	N Calleja Trading	21462227
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	Quantity	Unit	UnitPrice
+1	1	0.825	42.50	HIE-POULTRY ROLL X 105G X 50PCS - 888	1.00	CS	42.5000
+
+PAGES 16
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerId	CustomerName	InvoiceDate	InvoiceId	InvoiceTotal	PaymentDetails	RemittanceAddressRecipient	SubTotal	TotalTax	VendorAddress	VendorAddressRecipient	VendorName	VendorTaxId
+1	invoice	1	C132	Pinto Passtizerija	27-Apr-2026	BR4873	14.47	[array: 1]	BRANRAM LTD	14.47	0,00	9, Triq Kananea, Attard - Malta	BRANRAM LTD	"฿
+BR SUPPLY CO."	MT2960-9308
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	ProductCode	Quantity	UnitPrice
+1	1	0.942	14.47	BAGUETTE CLASSIC 145g x50	135000	1	14.470
+
+PAGES 17
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerAddress	CustomerAddressRecipient	CustomerId	CustomerName	CustomerTaxId	InvoiceDate	InvoiceId	InvoiceTotal	ShippingAddress	ShippingAddressRecipient	SubTotal	TaxDetails	TotalDiscount	TotalTax	VendorAddress	VendorAddressRecipient	VendorName	VendorTaxId
+1	invoice	1	"60,
+TRIQ SAN BARTOLOMEW
+QORMI
+Malta"	"Pinto Past. & Confectionery
+Miriane Muscat (529892M)"	PIN002	"Pinto Past. & Confectionery
+Miriane Muscat (529892M)"	MT2843-5207	24/04/26	649278	80.12	"60,
+TRIQ SAN BARTOLOMEW
+QORMI"	Pinto Past. & Confectionery	61.80	[array: 1]	0.00	11.12	Schembri Building; Valletta Road; Qormi, QRM 3618	Schembri Import & Export Ltd.	Schembri Import & Export Ltd.	MT10103934;
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	ProductCode	Quantity	Tax	Unit	UnitPrice
+1	1	0.925	12.360	RAUCH Bravo S/Strawberry 50cl PET	JBRVSNYSTR	1	"1.33
+F18"	X12	1.030
+1	2	0.925	12.360	RAUCH Bravo Paradise Peach 50cl PET	JBRVPCH50C	1	"1.33
+F18"	X12	1.030
+1	3	0.925	12.360	RAUCH Bravo Coconut-Pineapl 50cl	JBRVCCNPN5	1	"1.33
+F18"	X12	1.030
+1	4	0.925	12.360	RAUCH Bravo Green Apple 50cl PET	JBRVGRNAP	1	"1.33
+F18"	X12	1.030
+1	5	0.924	12.360	RAUCH Bravo Multivit ACE 50cl PET	JBRVMLTACE	1	"1.33
+F18"	X12	1.030
+1	6	0.924	0.000	RAUCH Bravo S/Orange BCE 50cl PET	JBRVSNYOR	1	"1.33
+F18"	X12	
+
+PAGES 18
+HEADER DOCUMENT 1
+DocumentNumber	DocType	DocumentConfidence	CustomerId	CustomerName	DueDate	InvoiceDate	InvoiceId	InvoiceTotal	OrderNumber	PaymentDetails	PaymentTerm	PurchaseOrder	SubTotal	TaxDetails	TotalTax	VendorAddress	VendorName	VendorTaxId
+1	invoice	1	2665	PINTO CONFECTIONERY	27/04/2026	27/04/2026	78115456	170.16	8028161	[array: 2]	C.O.D.	8028161	132.00	[array: 2]	23.76	"Zachary House, Marsa Industrial Estate
+Marsa MRS3000"	"AMSM
+Alf Mizzi & Sons Marketing Group"	MT12742105
+
+DETAILS DOCUMENT 1
+DocumentNumber	LineNumber	LineConfidence	Amount	Description	ProductCode	Quantity	TaxRate	Unit	UnitPrice
+1	1	0.937	120.00	GO AND FUN ORIGINAL GF 24X250ML	33200	5	18	CASE	24.00
+1	2	0.937	12.00	GO AND FUN ORIGINAL ZERO GF 24X250ML	33203	1	18	CASE	12.00
+

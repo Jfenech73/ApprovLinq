@@ -10,7 +10,12 @@ def read(rel: str) -> str:
 
 def test_extractor_serialises_di_arrays_and_objects_and_build_tag():
     src = read("app/services/extractor.py")
-    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix10b"' in src
+    assert 'EXTRACTOR_BUILD_TAG = "phase8e_hotfix10c"' in src
+    assert '"%d-%b-%Y"' in src
+    assert "total_amount = round(float(net_amount) + float(vat_amount), 2)" in src
+    assert "def _di_field_content_text(field: Any) -> str | None:" in src
+    assert 'supplier_name = _di_field_content_text(fields.get("VendorName")) or supplier_name' in src
+    assert 'raw_vendor_name = _di_field_content_text(raw_di_fields.get("VendorName"))' in src
     assert 'payload["value_array"] = [_serialise_di_field(item) for item in value_array]' in src
     assert 'payload["value_object"] = {' in src
 

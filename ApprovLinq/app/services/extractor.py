@@ -31,7 +31,7 @@ except ImportError as _imp_err:
     _log.getLogger(__name__).warning("New pipeline modules not available: %s", _imp_err)
 
 logger = logging.getLogger(__name__)
-EXTRACTOR_BUILD_TAG = "phase8e_hotfix10b"
+EXTRACTOR_BUILD_TAG = "phase8e_hotfix10c"
 
 
 def clean_text(text: str) -> str:
@@ -995,6 +995,10 @@ def parse_date(value: str | None):
         "%d-%m-%y",
         "%d %B %Y",
         "%d %b %Y",
+        "%d-%B-%Y",
+        "%d-%b-%Y",
+        "%d.%B.%Y",
+        "%d.%b.%Y",
         "%B %d, %Y",
         "%b %d, %Y",
         "%B %d %Y",
@@ -1954,6 +1958,25 @@ def extract_candidate_line_items(text: str) -> str:
 def limit_to_20_words(text: str) -> str:
     words = re.findall(r"\S+", (text or "").strip())
     return " ".join(words[:20]).strip()
+
+
+def _collapse_ws(value: str | None) -> str | None:
+    if value is None:
+        return None
+    collapsed = re.sub(r"\s+", " ", str(value)).strip()
+    return collapsed or None
+
+
+def _di_field_content_text(field: Any) -> str | None:
+    if field is None:
+        return None
+    try:
+        content = getattr(field, "content", None)
+    except Exception:
+        content = None
+    if content is None and isinstance(field, dict):
+        content = field.get("content")
+    return _collapse_ws(content)
 
 
 def _clean_ocr_supplier_name(name: str | None) -> str | None:
@@ -3219,6 +3242,7 @@ def azure_di_extract_invoice(
 
     # ── Core fields ────────────────────────────────────────────────────────
     supplier_name, s_conf     = _str(fields.get("VendorName"))
+    supplier_name = _di_field_content_text(fields.get("VendorName")) or supplier_name
     supplier_addr, _          = _str(fields.get("VendorAddress"))
     if not supplier_addr:
         supplier_addr = _addr(fields.get("VendorAddress"))
@@ -3243,6 +3267,9 @@ def azure_di_extract_invoice(
     total_amount, t_conf_tot  = _num(fields.get("InvoiceTotal"))
     if total_amount is None:
         total_amount, _       = _num(fields.get("AmountDue"))
+    if total_amount is None and net_amount is not None and vat_amount is not None:
+        total_amount = round(float(net_amount) + float(vat_amount), 2)
+        t_conf_tot = round(max(t_conf_sub, t_conf_tax) * 0.95, 2)
 
     currency, _               = _str(fields.get("CurrencyCode"))
 
@@ -3808,7 +3835,9 @@ def _build_provider_baseline_result(
     cleaned_text = clean_text(page_text or out.get("di_page_text") or "")
     header_text = out.get("_header_text") or _header_region_text(cleaned_text, max_lines=24)
     totals_text = out.get("_totals_text") or _totals_region_text(cleaned_text, tail_lines=24)
-    out["supplier_name"] = normalise_company_name(_clean_ocr_supplier_name(out.get("supplier_name")))
+    raw_di_fields = out.get("_di_raw_fields") or {}
+    raw_vendor_name = _di_field_content_text(raw_di_fields.get("VendorName")) if isinstance(raw_di_fields, dict) else None
+    out["supplier_name"] = raw_vendor_name or _collapse_ws(out.get("supplier_name"))
     if out.get("invoice_date") is not None:
         out["invoice_date"] = parse_date(out.get("invoice_date"))
     if out.get("due_date") is not None:
