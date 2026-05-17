@@ -16,6 +16,9 @@ def test_extractor_serialises_di_arrays_and_objects_and_build_tag():
     assert "def _di_field_content_text(field: Any) -> str | None:" in src
     assert "def _di_direct_field_value(field: Any) -> Any:" in src
     assert "def _build_direct_di_page_rows(" in src
+    assert "def _apply_direct_blank_field_fallbacks(" in src
+    assert "filled_blank_after_direct_di" in src
+    assert "fallback_used_for_critical_field" in src
     assert '"extraction_source": "azure_di_direct",' in src
     assert '"review_required": False,' in src
     assert 'supplier_name = _di_field_content_text(fields.get("VendorName")) or supplier_name' in src
@@ -50,6 +53,12 @@ def test_batches_persist_microsoft_named_fields_from_raw_di():
     assert 'Amount=_di_field_scalar_value(item_fields.get("Amount")),' in src
     assert 'InvoiceReadHeader(**_filter_existing_columns(db, "invoice_read_headers", header_values))' in src
     assert 'InvoiceReadDetail(**_filter_existing_columns(db, "invoice_read_details", detail_values))' in src
+    assert "def _persist_selected_field_candidates(" in src
+    assert "def _apply_blank_saved_regions_as_candidates(" in src
+    assert "filled_blank_from_saved_region" in src
+    assert "def _apply_blank_field_stable_rules(" in src
+    assert "filled_blank_from_stable_identifier_rule" in src
+    assert "selected_from_fallback_provider" in src
 
 
 def test_migration_adds_microsoft_named_columns():

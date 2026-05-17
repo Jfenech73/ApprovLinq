@@ -20,10 +20,15 @@ This build avoids Tesseract by default.
 
 Use the direct connection for migrations/schema setup and the pooled connection for the live app.
 
-If a previous failed release already created `invoice_read_headers` or
-`invoice_read_details` incorrectly, run
-`sql/one_time_rebuild_invoice_read_tables.sql` once before deploying the fixed
-app. This script drops and recreates only those two read snapshot tables.
+The app now creates and extends `invoice_read_headers` and
+`invoice_read_details` idempotently on startup. Do not configure Koyeb to run
+SQL files on every deploy or reload.
+
+If a previous failed release created those two tables with an unrecoverable
+shape, first back up any data you need, then manually rename and run
+`sql/one_time_rebuild_invoice_read_tables.sql.disabled` once only. That script
+drops and recreates only the two read snapshot tables, so it must never be part
+of a Koyeb startup/reload command.
 
 ---
 
@@ -56,6 +61,20 @@ SCAN_PROVIDER_BASELINE_MODE=true
 USE_OPENAI=false
 OCR_PROVIDER=none
 ```
+
+For DI-first field fallback, keep DI baseline mode on and enable the fallback
+provider you want for blank fields:
+
+```env
+USE_AZURE_DI=true
+SCAN_PROVIDER_BASELINE_MODE=true
+OCR_PROVIDER=ocr_space
+USE_OPENAI=false
+```
+
+Set `USE_OPENAI=true` only when blank-field AI fallback is required. DI values
+remain primary; fallback values are only applied to blank fields and are saved
+as field-candidate evidence.
 
 If you want to test only native PDF extraction and no OCR fallback:
 
@@ -178,6 +197,9 @@ Then add PaddleOCR to `requirements.txt` and rebuild the image.
 - Verify the pooled Neon connection string
 - Confirm `sslmode=require`
 - Test the schema in Neon SQL editor first
+- Make sure Koyeb is not running `sql/*.sql` or the disabled one-time rebuild
+  script on every reload. The running app applies safe startup schema checks by
+  itself.
 
 ### OpenAI extraction fails
 - Set `USE_OPENAI=false` to test pure native/OCR extraction first

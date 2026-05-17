@@ -2011,6 +2011,190 @@ def _di_direct_text(field: Any) -> str | None:
     return _collapse_ws(value)
 
 
+_DIRECT_FIELD_TO_DI_FIELD = {
+    "supplier_name": "VendorName",
+    "invoice_number": "InvoiceId",
+    "invoice_date": "InvoiceDate",
+    "due_date": "DueDate",
+    "net_amount": "SubTotal",
+    "vat_amount": "TotalTax",
+    "total_amount": "InvoiceTotal",
+    "currency": "CurrencyCode",
+    "customer_name": "CustomerName",
+    "customer_vat": "CustomerTaxId",
+    "supplier_vat": "VendorTaxId",
+    "purchase_order": "PurchaseOrder",
+    "order_number": "OrderNumber",
+    "description": "Items",
+}
+
+
+def _value_blank(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    return False
+
+
+def _candidate_value_for_field(field_name: str, value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    text = str(value).strip()
+    return text or None
+
+
+def _candidate_confidence(source_payload: dict[str, Any], field_name: str) -> float | None:
+    conf = ((source_payload.get("ai_confidence") or {}) if isinstance(source_payload, dict) else {}).get(
+        "totals" if field_name in {"net_amount", "vat_amount", "total_amount"} else "supplier"
+    )
+    try:
+        return float(conf) if conf is not None else None
+    except Exception:
+        return None
+
+
+def _append_field_candidate(
+    candidates: list[dict[str, Any]],
+    *,
+    field_name: str,
+    value: Any,
+    source_type: str,
+    source_id: str,
+    confidence: float | None,
+    evidence: str | None,
+    reason: str,
+    selected: bool,
+    applied: bool,
+    conflict: bool = False,
+) -> None:
+    candidate_value = _candidate_value_for_field(field_name, value)
+    if candidate_value is None:
+        return
+    candidates.append({
+        "field_name": field_name,
+        "candidate_value": candidate_value,
+        "normalised_value": candidate_value,
+        "source_type": source_type,
+        "source_id": source_id,
+        "confidence": confidence,
+        "evidence": (evidence or candidate_value)[:2000],
+        "reason": reason,
+        "selected": selected,
+        "applied": applied,
+        "conflict": conflict,
+    })
+
+
+def _apply_direct_blank_field_fallbacks(
+    row: dict[str, Any],
+    *,
+    pdf_path: str | Path,
+    page_index: int,
+    native_text: str | None,
+    openai_api_key: str | None,
+    account_company_name: str | None,
+) -> None:
+    blank_fields = [
+        field_name
+        for field_name in (
+            "supplier_name", "invoice_number", "invoice_date", "net_amount",
+            "vat_amount", "total_amount", "currency", "description",
+        )
+        if _value_blank(row.get(field_name))
+    ]
+    candidates: list[dict[str, Any]] = list(row.get("_field_candidates") or [])
+    fallback_text = None
+    fallback_method = None
+    fallback_payload: dict[str, Any] | None = None
+    ai_payload: dict[str, Any] | None = None
+    if blank_fields:
+        fallback_text, fallback_method = _get_fallback_ocr_text(pdf_path, page_index, native_text)
+        if fallback_text and count_meaningful_chars(fallback_text) >= 10:
+            fallback_payload = simple_extract(
+                fallback_text,
+                openai_api_key=None,
+                account_company_name=account_company_name,
+            )
+            fallback_payload["page_text_raw"] = fallback_text
+
+        if openai_api_key and fallback_text and count_meaningful_chars(fallback_text) >= 20:
+            ai_payload = openai_extract_invoice_fields(
+                fallback_text,
+                openai_api_key,
+                model=settings.openai_model,
+                account_company_name=account_company_name,
+            )
+
+    filled_critical: list[str] = []
+    fallback_sources = [
+        ("ocr_field_fallback", fallback_method or "ocr_fallback", fallback_payload),
+        ("ai_field_fallback", "openai_text", ai_payload),
+    ]
+    for field_name in blank_fields:
+        for source_type, source_id, source_payload in fallback_sources:
+            if not source_payload:
+                continue
+            value = source_payload.get(field_name)
+            if _value_blank(value):
+                continue
+            row[field_name] = value
+            if field_name in {"supplier_name", "invoice_number", "invoice_date", "total_amount"}:
+                filled_critical.append(field_name)
+            _append_field_candidate(
+                candidates,
+                field_name=field_name,
+                value=value,
+                source_type=source_type,
+                source_id=source_id,
+                confidence=_candidate_confidence(source_payload, field_name),
+                evidence=(source_payload.get("_header_text") or source_payload.get("_totals_text") or fallback_text or "")[:2000],
+                reason="filled_blank_after_direct_di",
+                selected=True,
+                applied=True,
+            )
+            break
+
+    row["_field_candidates"] = candidates
+    row["_provider_status"] = "di_success_field_fallback" if candidates else ("di_success_with_blanks" if blank_fields else "di_success")
+    row["_fallback_used"] = bool(candidates)
+    review_reasons: list[str] = []
+    if filled_critical:
+        review_reasons.append("fallback_used_for_critical_field")
+    missing_core = [
+        field_name
+        for field_name in ("supplier_name", "invoice_number", "invoice_date", "total_amount")
+        if _value_blank(row.get(field_name))
+    ]
+    if missing_core:
+        review_reasons.append("missing_required_field")
+    try:
+        conf = row.get("confidence_score")
+        if conf is not None and float(conf) < 0.60:
+            review_reasons.append("low_confidence")
+    except Exception:
+        pass
+    if row.get("_di_raw_invoice_date") and row.get("invoice_date") is None:
+        review_reasons.append("invalid_date")
+    try:
+        net = row.get("net_amount")
+        vat = row.get("vat_amount")
+        total = row.get("total_amount")
+        if net is not None and vat is not None and total is not None:
+            if abs((float(net) + float(vat)) - float(total)) > 0.03:
+                review_reasons.append("total_mismatch")
+    except Exception:
+        review_reasons.append("total_mismatch")
+    if review_reasons:
+        row["review_required"] = True
+        row["auto_approved"] = False
+        row["validation_status"] = "review_" + review_reasons[0]
+        row["review_reasons"] = "|".join(dict.fromkeys(review_reasons))
+        row["review_fields"] = "|".join(sorted(set(filled_critical + missing_core)))
+
+
 def _clean_ocr_supplier_name(name: str | None) -> str | None:
     """Strip common OCR artefacts from a raw supplier name.
 
@@ -4683,6 +4867,8 @@ def _build_rows_from_ai_items(
 def _build_direct_di_page_rows(
     pdf_path: str | Path,
     page_index: int,
+    openai_api_key: str | None = None,
+    account_company_name: str | None = None,
 ) -> list[dict[str, Any]] | None:
     _di_ok, _di_reason = azure_di_available()
     if not _di_ok:
@@ -4741,7 +4927,7 @@ def _build_direct_di_page_rows(
         direct_confidence = None
     page_text = raw_payload.get("content") if isinstance(raw_payload, dict) else ""
 
-    return [{
+    row = {
         "page_no": page_index + 1,
         "supplier_name": field("VendorName"),
         "supplier_vat": field("VendorTaxId"),
@@ -4753,6 +4939,7 @@ def _build_direct_di_page_rows(
         "customer_address_recipient": field("CustomerAddressRecipient"),
         "invoice_number": field("InvoiceId"),
         "invoice_date": parse_date(field("InvoiceDate")),
+        "_di_raw_invoice_date": field("InvoiceDate"),
         "due_date": parse_date(field("DueDate")),
         "order_number": field("OrderNumber"),
         "purchase_order": field("PurchaseOrder"),
@@ -4774,6 +4961,8 @@ def _build_direct_di_page_rows(
         "review_fields": None,
         "auto_approved": True,
         "page_quality_score": None,
+        "provider_status": "di_success",
+        "fallback_used": False,
         "supplier_match_method": "di_direct",
         "totals_reconciliation_status": None,
         "document_type": (document or {}).get("doc_type") or "invoice",
@@ -4803,7 +4992,22 @@ def _build_direct_di_page_rows(
         "header_raw": page_text,
         "totals_raw": "",
         "page_text_raw": page_text,
-    }]
+    }
+    try:
+        native_text = extract_native_pdf_page(pdf_path, page_index)
+    except Exception:
+        native_text = None
+    _apply_direct_blank_field_fallbacks(
+        row,
+        pdf_path=pdf_path,
+        page_index=page_index,
+        native_text=native_text,
+        openai_api_key=openai_api_key if settings.use_openai else None,
+        account_company_name=account_company_name,
+    )
+    row["provider_status"] = row.get("_provider_status") or row.get("provider_status")
+    row["fallback_used"] = bool(row.get("_fallback_used", row.get("fallback_used")))
+    return [row]
 
 
 def process_pdf_page_rows(
@@ -4814,7 +5018,12 @@ def process_pdf_page_rows(
     account_company_name: str | None = None,
 ) -> list[dict[str, Any]]:
     if bool(getattr(settings, "scan_provider_baseline_mode", False)) and bool(getattr(settings, "use_azure_di", False)):
-        direct_rows = _build_direct_di_page_rows(pdf_path, page_index)
+        direct_rows = _build_direct_di_page_rows(
+            pdf_path,
+            page_index,
+            openai_api_key=openai_api_key,
+            account_company_name=account_company_name,
+        )
         if direct_rows is not None:
             return direct_rows
 
@@ -4824,6 +5033,12 @@ def process_pdf_page_rows(
         openai_api_key=openai_api_key,
         account_company_name=account_company_name,
     )
+    if bool(getattr(settings, "scan_provider_baseline_mode", False)) and bool(getattr(settings, "use_azure_di", False)):
+        page_result["provider_status"] = "di_failed_fallback_used"
+        page_result["fallback_used"] = True
+        page_result.setdefault("review_required", True)
+        page_result.setdefault("validation_status", "review_di_failed_fallback_used")
+        page_result.setdefault("review_reasons", "di_failed_fallback_used")
 
     if (scan_mode or "summary").lower() == "lines":
         # ── Line-item extraction priority (tallest accuracy first) ─────────

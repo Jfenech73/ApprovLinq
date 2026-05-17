@@ -229,6 +229,8 @@ def _persist_invoice_read_snapshot(
         page_text=payload.get("di_page_text") or payload.get("page_text_raw"),
         raw_provider_fields=_json_safe(payload.get("_di_structured_fields") or {}),
         raw_provider_payload=_json_safe({
+            "provider_status": payload.get("provider_status"),
+            "fallback_used": payload.get("fallback_used"),
             "extraction_source": payload.get("extraction_source"),
             "method_used": payload.get("method_used"),
             "document_type": payload.get("document_type"),
@@ -384,6 +386,9 @@ def _persist_selected_field_candidates(
         evidence = raw_field.get("content") if isinstance(raw_field, dict) else None
         if evidence is None:
             evidence = candidate_value
+        source_type = payload.get("extraction_source") or "field_selected"
+        source_id = f"DI.{di_name}" if raw_field else f"{source_type}.{field_name}"
+        reason = "selected_from_direct_di_raw_field" if raw_field else "selected_from_fallback_provider"
         db.add(InvoiceFieldCandidate(
             tenant_id=batch.tenant_id,
             company_id=batch.company_id,
@@ -393,15 +398,224 @@ def _persist_selected_field_candidates(
             field_name=field_name,
             candidate_value=candidate_value,
             normalised_value=candidate_value,
-            source_type=payload.get("extraction_source") or "azure_di_direct",
-            source_id=f"DI.{di_name}",
+            source_type=source_type,
+            source_id=source_id,
             confidence=confidence,
             evidence=_candidate_text(evidence),
-            reason="selected_from_direct_di_raw_field",
+            reason=reason,
             selected=True,
             applied=True,
             conflict=False,
         ))
+
+    for extra in payload.get("_field_candidates") or []:
+        if not isinstance(extra, dict):
+            continue
+        field_name = _candidate_text(extra.get("field_name"))
+        candidate_value = _candidate_text(extra.get("candidate_value"))
+        if not field_name or candidate_value is None:
+            continue
+        db.add(InvoiceFieldCandidate(
+            tenant_id=batch.tenant_id,
+            company_id=batch.company_id,
+            batch_id=batch.id,
+            row_id=row.id,
+            source_file_id=invoice_file.id,
+            field_name=field_name,
+            candidate_value=candidate_value,
+            normalised_value=_candidate_text(extra.get("normalised_value")) or candidate_value,
+            source_type=_candidate_text(extra.get("source_type")) or "field_fallback",
+            source_id=_candidate_text(extra.get("source_id")),
+            confidence=extra.get("confidence"),
+            evidence=_candidate_text(extra.get("evidence")),
+            reason=_candidate_text(extra.get("reason")) or "field_candidate",
+            selected=bool(extra.get("selected", False)),
+            applied=bool(extra.get("applied", False)),
+            rejected_reason=_candidate_text(extra.get("rejected_reason")),
+            conflict=bool(extra.get("conflict", False)),
+        ))
+
+
+def _coerce_rule_target(field_name: str, value: object) -> object:
+    text = _candidate_text(value)
+    if text is None:
+        return None
+    if field_name == "invoice_date":
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y", "%d-%m-%y", "%d-%b-%Y", "%d-%B-%Y"):
+            try:
+                return datetime.strptime(text, fmt).date()
+            except ValueError:
+                pass
+        return text
+    if field_name in {"net_amount", "vat_amount", "total_amount", "confidence_score"}:
+        try:
+            return float(text.replace(",", ""))
+        except ValueError:
+            return text
+    if field_name == "review_required":
+        return text.lower() in {"1", "true", "yes", "y"}
+    return text
+
+
+def _stable_identifier_evidence(payload: dict, row: InvoiceRow) -> str:
+    raw_fields = payload.get("_di_raw_fields") or {}
+    pieces: list[str] = []
+    if isinstance(raw_fields, dict):
+        for name in (
+            "VendorTaxId", "CustomerId", "CustomerTaxId", "PurchaseOrder",
+            "OrderNumber", "InvoiceId", "VendorAddress", "CustomerAddress",
+            "PaymentTerm", "ReferenceNumber",
+        ):
+            field = raw_fields.get(name) or {}
+            if isinstance(field, dict):
+                for key in ("content", "value_string", "value_date", "value_number"):
+                    val = field.get(key)
+                    if val not in (None, ""):
+                        pieces.append(str(val))
+    for val in (
+        payload.get("supplier_vat"),
+        payload.get("customer_vat"),
+        payload.get("purchase_order"),
+        payload.get("order_number"),
+        payload.get("invoice_number"),
+        row.source_filename,
+        payload.get("header_raw"),
+        payload.get("page_text_raw"),
+        payload.get("di_page_text"),
+    ):
+        if val not in (None, ""):
+            pieces.append(str(val))
+    return "\n".join(pieces)
+
+
+def _apply_blank_field_stable_rules(
+    db: Session,
+    *,
+    batch: InvoiceBatch,
+    row: InvoiceRow,
+    payload: dict,
+) -> None:
+    evidence = _stable_identifier_evidence(payload, row)
+    evidence_norm = _normalize_rule_value(evidence)
+    if not evidence_norm:
+        return
+    rules_q = db.query(CorrectionRule).filter(
+        CorrectionRule.active.is_(True),
+        or_(CorrectionRule.tenant_id == batch.tenant_id, CorrectionRule.is_global.is_(True)),
+    )
+    if batch.company_id:
+        rules_q = rules_q.filter(
+            (CorrectionRule.company_id == batch.company_id)
+            | (CorrectionRule.company_id.is_(None))
+            | (CorrectionRule.is_global.is_(True))
+        )
+    else:
+        rules_q = rules_q.filter((CorrectionRule.company_id.is_(None)) | (CorrectionRule.is_global.is_(True)))
+
+    candidates = list(payload.get("_field_candidates") or [])
+    critical_filled: list[str] = []
+    for rule in rules_q.order_by(CorrectionRule.is_global.asc(), CorrectionRule.id.asc()).all():
+        field_name = (rule.field_name or "").strip()
+        if not field_name or not hasattr(row, field_name):
+            continue
+        current = getattr(row, field_name)
+        if _candidate_text(current) is not None:
+            continue
+        pattern = _normalize_rule_value(rule.source_pattern)
+        if not pattern or pattern not in evidence_norm:
+            continue
+        target = _coerce_rule_target(field_name, rule.target_value)
+        if _candidate_text(target) is None:
+            continue
+        setattr(row, field_name, target)
+        payload[field_name] = target
+        if field_name in {"supplier_name", "invoice_number", "invoice_date", "total_amount"}:
+            critical_filled.append(field_name)
+        candidates.append({
+            "field_name": field_name,
+            "candidate_value": _candidate_text(target),
+            "normalised_value": _candidate_text(target),
+            "source_type": "stable_rule_fallback",
+            "source_id": f"rule:{rule.id}",
+            "confidence": None,
+            "evidence": evidence[:2000],
+            "reason": "filled_blank_from_stable_identifier_rule",
+            "selected": True,
+            "applied": True,
+            "conflict": False,
+        })
+        _audit_rule_application(
+            db,
+            batch,
+            row,
+            field_name,
+            None,
+            target,
+            rule,
+            "blank field filled by stable identifier rule",
+        )
+
+    if candidates:
+        payload["_field_candidates"] = candidates
+    if critical_filled:
+        row.review_required = True
+        row.auto_approved = False
+        row.validation_status = "review_stable_rule_fallback_used"
+        existing_reasons = row.review_reasons or ""
+        reason = "stable_rule_used_for_critical_field"
+        row.review_reasons = reason if not existing_reasons else f"{existing_reasons}|{reason}"
+        row.review_fields = "|".join(sorted(set((row.review_fields or "").split("|") + critical_filled) - {""}))
+
+
+def _apply_blank_saved_regions_as_candidates(
+    db: Session,
+    *,
+    batch: InvoiceBatch,
+    row: InvoiceRow,
+    payload: dict,
+    perf_ctx: ScanPerformanceContext | None = None,
+) -> None:
+    tracked_fields = (
+        "supplier_name", "invoice_number", "invoice_date", "net_amount",
+        "vat_amount", "total_amount", "description", "nominal_account_code",
+    )
+    before = {field: getattr(row, field, None) for field in tracked_fields}
+    blank_before = {field for field, value in before.items() if _candidate_text(value) is None}
+    if not blank_before:
+        return
+    _apply_remap_hints(db, batch, row, perf_ctx=perf_ctx)
+    candidates = list(payload.get("_field_candidates") or [])
+    critical_filled: list[str] = []
+    for field_name in sorted(blank_before):
+        after = getattr(row, field_name, None)
+        if _candidate_text(after) is None:
+            continue
+        payload[field_name] = after
+        if field_name in {"supplier_name", "invoice_number", "invoice_date", "total_amount"}:
+            critical_filled.append(field_name)
+        candidates.append({
+            "field_name": field_name,
+            "candidate_value": _candidate_text(after),
+            "normalised_value": _candidate_text(after),
+            "source_type": "saved_region_fallback",
+            "source_id": "remap_hint",
+            "confidence": None,
+            "evidence": _candidate_text(after),
+            "reason": "filled_blank_from_saved_region",
+            "selected": True,
+            "applied": True,
+            "conflict": False,
+        })
+    if candidates:
+        payload["_field_candidates"] = candidates
+    if critical_filled:
+        row.review_required = True
+        row.auto_approved = False
+        row.validation_status = "review_saved_region_fallback_used"
+        existing_reasons = row.review_reasons or ""
+        reason = "saved_region_used_for_critical_field"
+        row.review_reasons = reason if not existing_reasons else f"{existing_reasons}|{reason}"
+        row.review_fields = "|".join(sorted(set((row.review_fields or "").split("|") + critical_filled) - {""}))
 
 
 def _audit_rule_application(
@@ -3324,6 +3538,20 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             )
                             db.add(row)
                             db.flush()
+                            if provider_baseline_mode:
+                                _apply_blank_saved_regions_as_candidates(
+                                    db,
+                                    batch=batch,
+                                    row=row,
+                                    payload=r,
+                                    perf_ctx=perf_ctx,
+                                )
+                                _apply_blank_field_stable_rules(
+                                    db,
+                                    batch=batch,
+                                    row=row,
+                                    payload=r,
+                                )
                             _persist_invoice_read_snapshot(
                                 db,
                                 batch=batch,
