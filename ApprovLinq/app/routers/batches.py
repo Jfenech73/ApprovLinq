@@ -33,7 +33,7 @@ from app.services.corrected_exporter import build_corrected_rows, export_batch_c
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
 from app.services.invoice_arbitration import arbitrate_invoice_row
 from app.services.scan_performance import ScanPerformanceContext
-from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
+from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceFieldCandidate, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
 from app.services.template_render_service import render_template_sheet, resolve_effective_template
 from app.utils.storage import batch_upload_folder, batch_export_folder, resolve_upload_path
 from app.utils.persistent_files import attach_invoice_file_bytes, materialize_invoice_file
@@ -331,6 +331,77 @@ def _persist_invoice_read_snapshot(
             raw_detail=_json_safe(item),
         )
         db.add(InvoiceReadDetail(**_filter_existing_columns(db, "invoice_read_details", detail_values)))
+
+
+def _candidate_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _persist_selected_field_candidates(
+    db: Session,
+    *,
+    batch: InvoiceBatch,
+    invoice_file: InvoiceFile,
+    row: InvoiceRow,
+    payload: dict,
+) -> None:
+    if not batch.tenant_id:
+        return
+    raw_di_fields = payload.get("_di_raw_fields") or {}
+    if not isinstance(raw_di_fields, dict):
+        raw_di_fields = {}
+    direct_sources = payload.get("_direct_di_field_sources") or {}
+    if not isinstance(direct_sources, dict):
+        direct_sources = {}
+
+    field_map = {
+        "supplier_name": ("VendorName", row.supplier_name),
+        "invoice_number": ("InvoiceId", row.invoice_number),
+        "invoice_date": ("InvoiceDate", row.invoice_date),
+        "due_date": ("DueDate", payload.get("due_date")),
+        "net_amount": ("SubTotal", row.net_amount),
+        "vat_amount": ("TotalTax", row.vat_amount),
+        "total_amount": ("InvoiceTotal", row.total_amount),
+        "currency": ("CurrencyCode", row.currency),
+        "customer_name": ("CustomerName", payload.get("customer_name")),
+        "customer_vat": ("CustomerTaxId", payload.get("customer_vat")),
+        "supplier_vat": ("VendorTaxId", payload.get("supplier_vat")),
+        "purchase_order": ("PurchaseOrder", payload.get("purchase_order")),
+        "order_number": ("OrderNumber", payload.get("order_number")),
+        "description": ("Items", row.description),
+    }
+
+    for field_name, (di_name, selected_value) in field_map.items():
+        di_name = direct_sources.get(field_name) or di_name
+        candidate_value = _candidate_text(selected_value)
+        if candidate_value is None:
+            continue
+        raw_field = raw_di_fields.get(di_name) or {}
+        confidence = raw_field.get("confidence") if isinstance(raw_field, dict) else None
+        evidence = raw_field.get("content") if isinstance(raw_field, dict) else None
+        if evidence is None:
+            evidence = candidate_value
+        db.add(InvoiceFieldCandidate(
+            tenant_id=batch.tenant_id,
+            company_id=batch.company_id,
+            batch_id=batch.id,
+            row_id=row.id,
+            source_file_id=invoice_file.id,
+            field_name=field_name,
+            candidate_value=candidate_value,
+            normalised_value=candidate_value,
+            source_type=payload.get("extraction_source") or "azure_di_direct",
+            source_id=f"DI.{di_name}",
+            confidence=confidence,
+            evidence=_candidate_text(evidence),
+            reason="selected_from_direct_di_raw_field",
+            selected=True,
+            applied=True,
+            conflict=False,
+        ))
 
 
 def _audit_rule_application(
@@ -3260,6 +3331,13 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 row=row,
                                 payload=r,
                                 baseline_mode=provider_baseline_mode,
+                            )
+                            _persist_selected_field_candidates(
+                                db,
+                                batch=batch,
+                                invoice_file=invoice_file,
+                                row=row,
+                                payload=r,
                             )
                             if not provider_baseline_mode:
                                 with perf_ctx.timed("supplier_resolver"):

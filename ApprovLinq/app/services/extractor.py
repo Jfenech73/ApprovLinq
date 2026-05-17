@@ -4725,7 +4725,14 @@ def _build_direct_di_page_rows(
         if desc:
             descriptions.append(desc)
 
-    direct_total = field("InvoiceTotal") or field("SubTotal") or field("AmountDue")
+    direct_total_source = "InvoiceTotal"
+    direct_total = field("InvoiceTotal")
+    if direct_total in (None, ""):
+        direct_total_source = "SubTotal"
+        direct_total = field("SubTotal")
+    if direct_total in (None, ""):
+        direct_total_source = "AmountDue"
+        direct_total = field("AmountDue")
     direct_confidence = None
     try:
         if document_confidence is not None:
@@ -4775,6 +4782,22 @@ def _build_direct_di_page_rows(
         "_di_structured_fields": {},
         "_di_raw_fields": raw_fields,
         "_di_raw_payload": raw_payload,
+        "_direct_di_field_sources": {
+            "supplier_name": "VendorName",
+            "invoice_number": "InvoiceId",
+            "invoice_date": "InvoiceDate",
+            "due_date": "DueDate",
+            "net_amount": "SubTotal",
+            "vat_amount": "TotalTax",
+            "total_amount": direct_total_source,
+            "currency": "CurrencyCode",
+            "customer_name": "CustomerName",
+            "customer_vat": "CustomerTaxId",
+            "supplier_vat": "VendorTaxId",
+            "purchase_order": "PurchaseOrder",
+            "order_number": "OrderNumber",
+            "description": "Items",
+        },
         "_header_text": page_text,
         "_totals_text": "",
         "header_raw": page_text,

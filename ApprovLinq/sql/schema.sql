@@ -402,6 +402,45 @@ create table if not exists invoice_read_details (
 create index if not exists ix_invoice_read_details_header on invoice_read_details(header_id);
 
 
+-- ---------------------------------------------------------------------------
+-- INVOICE FIELD CANDIDATES  (field evidence for resolver/review/learning)
+-- ---------------------------------------------------------------------------
+create table if not exists invoice_field_candidates (
+    id               bigserial   primary key,
+    tenant_id        uuid        not null references tenants(id) on delete cascade,
+    company_id       uuid        references companies(id) on delete set null,
+    batch_id         uuid        not null references invoice_batches(id) on delete cascade,
+    row_id           bigint      not null references invoice_rows(id) on delete cascade,
+    source_file_id   bigint      references invoice_files(id) on delete set null,
+    field_name       varchar(80) not null,
+    candidate_value  text,
+    normalised_value text,
+    source_type      varchar(80) not null,
+    source_id        text,
+    confidence       numeric(6,4),
+    evidence         text,
+    reason           text,
+    selected         boolean     not null default false,
+    applied          boolean     not null default false,
+    rejected_reason  text,
+    conflict         boolean     not null default false,
+    user_accepted    boolean     not null default false,
+    user_corrected   boolean     not null default false,
+    final_value      text,
+    finalised_at     timestamptz,
+    finalised_by     uuid references users(id),
+    outcome_source   varchar(40),
+    created_at       timestamptz not null default now()
+);
+
+create index if not exists ix_field_candidates_tenant_company on invoice_field_candidates(tenant_id, company_id);
+create index if not exists ix_field_candidates_batch_row     on invoice_field_candidates(batch_id, row_id);
+create index if not exists ix_field_candidates_field_name    on invoice_field_candidates(field_name);
+create index if not exists ix_field_candidates_source_type   on invoice_field_candidates(source_type);
+create index if not exists ix_field_candidates_selected      on invoice_field_candidates(selected);
+create index if not exists ix_field_candidates_created_at    on invoice_field_candidates(created_at);
+
+
 -- =============================================================================
 -- End of schema
 -- =============================================================================
