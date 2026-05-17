@@ -47,6 +47,16 @@ If you do not want LLM support yet:
 USE_OPENAI=false
 ```
 
+For a direct Microsoft Document Intelligence read with no review/arbitration
+layer, use:
+
+```env
+USE_AZURE_DI=true
+SCAN_PROVIDER_BASELINE_MODE=true
+USE_OPENAI=false
+OCR_PROVIDER=none
+```
+
 If you want to test only native PDF extraction and no OCR fallback:
 
 ```env

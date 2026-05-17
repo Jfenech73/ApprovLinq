@@ -1979,6 +1979,38 @@ def _di_field_content_text(field: Any) -> str | None:
     return _collapse_ws(content)
 
 
+def _di_direct_field_value(field: Any) -> Any:
+    """Match the standalone DI dump script: return raw DI content first."""
+    if not isinstance(field, dict):
+        return None
+    for key in (
+        "content",
+        "value_string",
+        "value_date",
+        "value_time",
+        "value_phone_number",
+        "value_number",
+        "value_integer",
+        "value_currency",
+        "value_address",
+        "value_selection_mark",
+    ):
+        if key in field and field.get(key) not in (None, ""):
+            return field.get(key)
+    if isinstance(field.get("value_array"), list):
+        return f"[array: {len(field['value_array'])}]"
+    if isinstance(field.get("value_object"), dict):
+        return f"[object: {len(field['value_object'])} keys]"
+    return None
+
+
+def _di_direct_text(field: Any) -> str | None:
+    value = _di_direct_field_value(field)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return _collapse_ws(value)
+
+
 def _clean_ocr_supplier_name(name: str | None) -> str | None:
     """Strip common OCR artefacts from a raw supplier name.
 
@@ -4648,6 +4680,109 @@ def _build_rows_from_ai_items(
     return rows
 
 
+def _build_direct_di_page_rows(
+    pdf_path: str | Path,
+    page_index: int,
+) -> list[dict[str, Any]] | None:
+    _di_ok, _di_reason = azure_di_available()
+    if not _di_ok:
+        logger.warning("Direct DI mode skipped: %s", _di_reason)
+        return None
+    try:
+        jpeg_bytes = OCRBackend.render_pdf_page_to_jpeg_bytes(
+            Path(pdf_path), page_index, scale=1.5, quality=80
+        )
+    except Exception as exc:
+        logger.warning("Direct DI render failed p%d: %s", page_index, exc)
+        return None
+    payload = azure_di_extract_invoice(
+        jpeg_bytes,
+        settings.azure_di_endpoint,
+        settings.azure_di_key,
+    )
+    if not payload:
+        return None
+
+    raw_fields = payload.get("_di_raw_fields") or {}
+    if not isinstance(raw_fields, dict):
+        raw_fields = {}
+    raw_payload = payload.get("_di_raw_payload") or {}
+    document = raw_payload.get("document") if isinstance(raw_payload, dict) else {}
+    document_confidence = (document or {}).get("confidence")
+
+    def field(name: str) -> str | None:
+        return _di_direct_text(raw_fields.get(name))
+
+    items = raw_fields.get("Items", {}).get("value_array", [])
+    if not isinstance(items, list):
+        items = []
+    descriptions: list[str] = []
+    for item in items:
+        item_fields = item.get("value_object") if isinstance(item, dict) else None
+        if not isinstance(item_fields, dict):
+            continue
+        desc = _di_direct_text(item_fields.get("Description"))
+        if desc:
+            descriptions.append(desc)
+
+    direct_total = field("InvoiceTotal") or field("SubTotal") or field("AmountDue")
+    direct_confidence = None
+    try:
+        if document_confidence is not None:
+            direct_confidence = round(float(document_confidence), 2)
+    except Exception:
+        direct_confidence = None
+    page_text = raw_payload.get("content") if isinstance(raw_payload, dict) else ""
+
+    return [{
+        "page_no": page_index + 1,
+        "supplier_name": field("VendorName"),
+        "supplier_vat": field("VendorTaxId"),
+        "supplier_address": field("VendorAddress"),
+        "supplier_address_recipient": field("VendorAddressRecipient"),
+        "customer_name": field("CustomerName"),
+        "customer_vat": field("CustomerTaxId"),
+        "customer_address": field("CustomerAddress"),
+        "customer_address_recipient": field("CustomerAddressRecipient"),
+        "invoice_number": field("InvoiceId"),
+        "invoice_date": parse_date(field("InvoiceDate")),
+        "due_date": parse_date(field("DueDate")),
+        "order_number": field("OrderNumber"),
+        "purchase_order": field("PurchaseOrder"),
+        "description": "; ".join(descriptions),
+        "line_items_structured": [],
+        "line_items_raw": "\n".join(descriptions),
+        "net_amount": parse_amount(field("SubTotal")),
+        "vat_amount": parse_amount(field("TotalTax")),
+        "total_amount": parse_amount(direct_total),
+        "currency": field("CurrencyCode"),
+        "tax_code": None,
+        "method_used": "DI",
+        "extraction_source": "azure_di_direct",
+        "confidence_score": direct_confidence,
+        "validation_status": "ok",
+        "review_required": False,
+        "review_priority": None,
+        "review_reasons": None,
+        "review_fields": None,
+        "auto_approved": True,
+        "page_quality_score": None,
+        "supplier_match_method": "di_direct",
+        "totals_reconciliation_status": None,
+        "document_type": (document or {}).get("doc_type") or "invoice",
+        "raw_di_document_confidence": document_confidence,
+        "di_page_text": page_text,
+        "_di_structured_fields": {},
+        "_di_raw_fields": raw_fields,
+        "_di_raw_payload": raw_payload,
+        "_header_text": page_text,
+        "_totals_text": "",
+        "header_raw": page_text,
+        "totals_raw": "",
+        "page_text_raw": page_text,
+    }]
+
+
 def process_pdf_page_rows(
     pdf_path: str | Path,
     page_index: int,
@@ -4655,6 +4790,11 @@ def process_pdf_page_rows(
     openai_api_key: str | None = None,
     account_company_name: str | None = None,
 ) -> list[dict[str, Any]]:
+    if bool(getattr(settings, "scan_provider_baseline_mode", False)) and bool(getattr(settings, "use_azure_di", False)):
+        direct_rows = _build_direct_di_page_rows(pdf_path, page_index)
+        if direct_rows is not None:
+            return direct_rows
+
     page_result = process_pdf_page(
         pdf_path,
         page_index=page_index,
