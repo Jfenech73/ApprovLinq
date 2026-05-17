@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     use_azure_di: bool = False
     azure_di_endpoint: str | None = None
     azure_di_key: str | None = None
-    azure_di_page_timeout_s: float = 45.0
+    azure_di_page_timeout_s: float = 25.0
 
     # Temporary extraction-baseline mode:
     # DI first, immediate fallback, and no downstream rule/arbitration mutation.

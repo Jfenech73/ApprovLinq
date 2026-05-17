@@ -70,6 +70,7 @@ USE_AZURE_DI=true
 SCAN_PROVIDER_BASELINE_MODE=true
 OCR_PROVIDER=ocr_space
 USE_OPENAI=false
+AZURE_DI_PAGE_TIMEOUT_S=25
 ```
 
 Set `USE_OPENAI=true` only when blank-field AI fallback is required. DI values
@@ -85,6 +86,10 @@ candidate evidence and marked for review when it conflicts with the DI value.
 If DI fails for a page, the row is marked `DI_FAILED+...`, review is required,
 and fallback confidence is capped so OCR/native text cannot look like a clean
 100% DI read.
+
+If Azure DI quota/rate limit is reached mid-batch, the DI circuit breaker opens
+for the rest of that batch and remaining pages move to fallback instead of
+waiting on the DI poller.
 
 If you want to test only native PDF extraction and no OCR fallback:
 

@@ -3395,26 +3395,34 @@ def azure_di_extract_invoice(
             "prebuilt-invoice",
             body=jpeg_bytes,
             content_type="image/jpeg",
+            polling_interval=1,
+            connection_timeout=min(float(getattr(settings, "azure_di_page_timeout_s", 45)), 20.0),
+            read_timeout=min(float(getattr(settings, "azure_di_page_timeout_s", 45)), 20.0),
         )
         # ── Per-page timeout safeguard ─────────────────────────────────────
         # poller.result() can block indefinitely if Azure DI hangs.  We run
         # it in a daemon thread so we can enforce a wall-clock timeout and
         # fall back cleanly rather than leaving the batch stuck at 0 %.
-        # Default: 45 s per page (configurable via AZURE_DI_PAGE_TIMEOUT_S).
+        # Default: 25 s per page (configurable via AZURE_DI_PAGE_TIMEOUT_S).
         import concurrent.futures as _cf
         _page_timeout = float(getattr(settings, "azure_di_page_timeout_s", 45))
-        with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
-            _future = _pool.submit(poller.result)
-            try:
-                result = _future.result(timeout=_page_timeout)
-            except _cf.TimeoutError:
+        _pool = _cf.ThreadPoolExecutor(max_workers=1)
+        _future = _pool.submit(poller.result)
+        try:
+            result = _future.result(timeout=_page_timeout)
+        except _cf.TimeoutError:
                 logger.warning(
                     "Azure DI page timeout after %.0fs — opening circuit breaker, "
                     "falling back to OpenAI vision for remaining pages",
                     _page_timeout,
                 )
                 _azure_di_error = f"Page timeout after {_page_timeout:.0f}s"
+                _future.cancel()
+                _pool.shutdown(wait=False, cancel_futures=True)
                 return None
+        finally:
+            if _future.done():
+                _pool.shutdown(wait=False, cancel_futures=True)
     except Exception as exc:
         exc_str = str(exc)
         # Classify the real failure and open the circuit-breaker for permanent errors.
@@ -3428,9 +3436,9 @@ def azure_di_extract_invoice(
         elif "404" in exc_str:
             cause = "endpoint or model not found (HTTP 404) — check AZURE_DI_ENDPOINT"
             is_permanent = True
-        elif "429" in exc_str:
+        elif any(token in exc_str.lower() for token in ("429", "quota", "rate limit", "ratelimit", "too many requests", "exceeded")):
             cause = "throttled / rate-limited (HTTP 429) — retry later or reduce concurrency"
-            is_permanent = False
+            is_permanent = True
         elif any(token in exc_str for token in ("500", "502", "503", "504")):
             cause = f"Azure service-side error — {exc_str[:120]}"
             is_permanent = False
