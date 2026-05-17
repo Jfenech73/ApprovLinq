@@ -76,6 +76,16 @@ Set `USE_OPENAI=true` only when blank-field AI fallback is required. DI values
 remain primary; fallback values are only applied to blank fields and are saved
 as field-candidate evidence.
 
+When you save a supplier-name region from review, the saved region is now linked
+to the strongest stable DI identifier on that row, starting with `VendorTaxId`.
+On future scans, the saved supplier zone can correct a wrong supplier-name area
+when the same stable identifier is found. The correction is still stored as
+candidate evidence and marked for review when it conflicts with the DI value.
+
+If DI fails for a page, the row is marked `DI_FAILED+...`, review is required,
+and fallback confidence is capped so OCR/native text cannot look like a clean
+100% DI read.
+
 If you want to test only native PDF extraction and no OCR fallback:
 
 ```env

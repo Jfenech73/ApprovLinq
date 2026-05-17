@@ -488,6 +488,95 @@ def _stable_identifier_evidence(payload: dict, row: InvoiceRow) -> str:
     return "\n".join(pieces)
 
 
+def _normalise_stable_anchor_value(anchor_type: str | None, value: object) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    kind = (anchor_type or "").strip()
+    if kind in {"VendorTaxId", "CustomerTaxId", "CustomerId", "PurchaseOrder", "OrderNumber", "InvoiceId"}:
+        return re.sub(r"[^A-Z0-9]", "", text.upper())
+    return re.sub(r"\s+", " ", text.upper()).strip()
+
+
+def _stable_identifiers_for_row(db: Session, row: InvoiceRow, payload: dict | None = None) -> set[tuple[str, str]]:
+    identifiers: set[tuple[str, str]] = set()
+
+    def add(anchor_type: str, value: object) -> None:
+        normalised = _normalise_stable_anchor_value(anchor_type, value)
+        if normalised:
+            identifiers.add((anchor_type, normalised))
+
+    payload = payload or {}
+    raw_fields = payload.get("_di_raw_fields") or {}
+    if isinstance(raw_fields, dict):
+        for anchor_type, field_name in (
+            ("VendorTaxId", "VendorTaxId"),
+            ("CustomerId", "CustomerId"),
+            ("CustomerTaxId", "CustomerTaxId"),
+            ("PurchaseOrder", "PurchaseOrder"),
+            ("OrderNumber", "OrderNumber"),
+            ("InvoiceId", "InvoiceId"),
+        ):
+            add(anchor_type, _di_field_scalar_value(raw_fields.get(field_name)))
+
+    for anchor_type, value in (
+        ("VendorTaxId", payload.get("supplier_vat")),
+        ("CustomerTaxId", payload.get("customer_vat")),
+        ("PurchaseOrder", payload.get("purchase_order")),
+        ("OrderNumber", payload.get("order_number")),
+        ("InvoiceId", payload.get("invoice_number") or getattr(row, "invoice_number", None)),
+    ):
+        add(anchor_type, value)
+
+    try:
+        headers = (
+            db.query(InvoiceReadHeader)
+            .filter(InvoiceReadHeader.row_id == row.id)
+            .order_by(InvoiceReadHeader.id.desc())
+            .limit(2)
+            .all()
+        )
+    except Exception:
+        headers = []
+    for header in headers:
+        for anchor_type, attr in (
+            ("VendorTaxId", "VendorTaxId"),
+            ("CustomerId", "CustomerId"),
+            ("CustomerTaxId", "CustomerTaxId"),
+            ("PurchaseOrder", "PurchaseOrder"),
+            ("OrderNumber", "order_number"),
+            ("InvoiceId", "InvoiceId"),
+        ):
+            add(anchor_type, getattr(header, attr, None))
+    return identifiers
+
+
+def _stable_identifiers_for_hint(db: Session, hint: RemapHint) -> set[tuple[str, str]]:
+    identifiers: set[tuple[str, str]] = set()
+    stored_type = getattr(hint, "stable_anchor_type", None)
+    stored_value = getattr(hint, "stable_anchor_value", None)
+    normalised = _normalise_stable_anchor_value(stored_type, stored_value)
+    if stored_type and normalised:
+        identifiers.add((stored_type, normalised))
+    source_row_id = getattr(hint, "source_row_id", None)
+    if source_row_id:
+        try:
+            source_row = db.get(InvoiceRow, source_row_id)
+        except Exception:
+            source_row = None
+        if source_row:
+            identifiers.update(_stable_identifiers_for_row(db, source_row))
+    return identifiers
+
+
+def _stable_anchor_matches_hint(db: Session, row: InvoiceRow, hint: RemapHint, row_identifiers: set[tuple[str, str]] | None = None) -> bool:
+    row_identifiers = row_identifiers if row_identifiers is not None else _stable_identifiers_for_row(db, row)
+    if not row_identifiers:
+        return False
+    hint_identifiers = _stable_identifiers_for_hint(db, hint)
+    return bool(hint_identifiers and row_identifiers.intersection(hint_identifiers))
+
+
 def _apply_blank_field_stable_rules(
     db: Session,
     *,
@@ -616,6 +705,67 @@ def _apply_blank_saved_regions_as_candidates(
         reason = "saved_region_used_for_critical_field"
         row.review_reasons = reason if not existing_reasons else f"{existing_reasons}|{reason}"
         row.review_fields = "|".join(sorted(set((row.review_fields or "").split("|") + critical_filled) - {""}))
+
+
+def _apply_stable_anchor_saved_regions_as_candidates(
+    db: Session,
+    *,
+    batch: InvoiceBatch,
+    row: InvoiceRow,
+    payload: dict,
+    perf_ctx: ScanPerformanceContext | None = None,
+) -> None:
+    row_identifiers = _stable_identifiers_for_row(db, row, payload)
+    if not row_identifiers:
+        return
+    all_hints = _get_active_saved_regions_for_batch(db, batch, perf_ctx=perf_ctx)
+    if not any(_stable_anchor_matches_hint(db, row, h, row_identifiers) for h in all_hints):
+        return
+    tracked_fields = (
+        "supplier_name", "invoice_number", "invoice_date", "net_amount",
+        "vat_amount", "total_amount", "description", "nominal_account_code",
+    )
+    before = {field: getattr(row, field, None) for field in tracked_fields}
+    _apply_remap_hints(db, batch, row, perf_ctx=perf_ctx)
+    candidates = list(payload.get("_field_candidates") or [])
+    changed_critical: list[str] = []
+    conflict_fields: list[str] = []
+    for field_name in tracked_fields:
+        before_val = before.get(field_name)
+        after_val = getattr(row, field_name, None)
+        if str(before_val or "").strip() == str(after_val or "").strip():
+            continue
+        payload[field_name] = after_val
+        if field_name in {"supplier_name", "invoice_number", "invoice_date", "total_amount"}:
+            changed_critical.append(field_name)
+        if _candidate_text(before_val) is not None:
+            conflict_fields.append(field_name)
+        candidates.append({
+            "field_name": field_name,
+            "candidate_value": _candidate_text(after_val),
+            "normalised_value": _candidate_text(after_val),
+            "source_type": "saved_region_stable_anchor",
+            "source_id": "remap_hint:stable_anchor",
+            "confidence": None,
+            "evidence": "; ".join(f"{k}={v}" for k, v in sorted(row_identifiers))[:2000],
+            "reason": "applied_saved_region_matched_by_stable_identifier",
+            "selected": True,
+            "applied": True,
+            "conflict": field_name in conflict_fields,
+        })
+    if candidates:
+        payload["_field_candidates"] = candidates
+    if changed_critical:
+        row.review_required = True
+        row.auto_approved = False
+        row.validation_status = "review_saved_region_stable_anchor_used"
+        reasons = [x for x in re.split(r"[|]", row.review_reasons or "") if x]
+        if conflict_fields and "stable_anchor_saved_region_conflict" not in reasons:
+            reasons.append("stable_anchor_saved_region_conflict")
+        if "stable_anchor_saved_region_used_for_critical_field" not in reasons:
+            reasons.append("stable_anchor_saved_region_used_for_critical_field")
+        row.review_reasons = "|".join(reasons)
+        row.review_fields = "|".join(sorted(set((row.review_fields or "").split("|") + changed_critical) - {""}))
 
 
 def _audit_rule_application(
@@ -1672,6 +1822,12 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
     all_hints = _get_active_saved_regions_for_batch(db, batch, perf_ctx=perf_ctx)
     if not all_hints:
         return
+    row_stable_identifiers = _stable_identifiers_for_row(db, row)
+    stable_anchor_hint_ids = {
+        int(h.id)
+        for h in all_hints
+        if _stable_anchor_matches_hint(db, row, h, row_stable_identifiers)
+    }
 
     # If the row was produced by DI/OCR/AI with less-than-high confidence, every
     # active saved region for this tenant/page is allowed to compete with the
@@ -1691,6 +1847,8 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
     if supplier_hints_all and "supplier_name" not in target_fields:
         current_supplier = getattr(row, "supplier_name", None)
         if any(_supplier_name_needs_saved_region_confirmation(current_supplier, h.supplier_name_snapshot) for h in supplier_hints_all):
+            target_fields.add("supplier_name")
+        elif any(int(h.id) in stable_anchor_hint_ids for h in supplier_hints_all):
             target_fields.add("supplier_name")
 
     if not target_fields:
@@ -1718,7 +1876,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
     for h in all_hints:
         if h in matched:
             continue
-        if _saved_region_supplier_matches_row(row, h, row_norm, supplier_id):
+        if int(h.id) in stable_anchor_hint_ids or _saved_region_supplier_matches_row(row, h, row_norm, supplier_id):
             matched.append(h)
 
     supplier_matched_fields = {h.field_name for h in matched if h.field_name in _REMAP_FIELDS}
@@ -1754,12 +1912,15 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
                 continue
             # Low-confidence arbitration: if the hint belongs to the same supplier
             # or same layout signature, allow the coordinate re-read to compete.
-            if _saved_region_supplier_matches_row(row, h, row_norm, supplier_id):
+            if int(h.id) in stable_anchor_hint_ids or _saved_region_supplier_matches_row(row, h, row_norm, supplier_id):
                 matched.append(h)
 
     if not matched or "supplier_name" in target_fields:
         supplier_hints = [h for h in all_hints if h.field_name == "supplier_name" and h not in matched]
-        supplier_hints = [h for h in supplier_hints if _supplier_hint_candidate_matches_row(row, h)]
+        supplier_hints = [
+            h for h in supplier_hints
+            if int(h.id) in stable_anchor_hint_ids or _supplier_hint_candidate_matches_row(row, h)
+        ]
         # Add deterministic matches.  If multiple saved regions match, the final
         # write guard still requires a usable region read/snapshot confirmation.
         matched.extend(supplier_hints)
@@ -1797,6 +1958,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
         if hint.field_name not in target_fields:
             continue
         try:
+            stable_anchor_matched = int(hint.id) in stable_anchor_hint_ids
             text, used_page_no, tried_pages = _read_saved_region_on_candidate_pages(
                 pdf_path, hint, row.page_no, hint.field_name, perf_ctx=perf_ctx
             )
@@ -1835,7 +1997,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
                         # still useful when current crop OCR is blank.  Only use it
                         # when it can be tied back to this row by name/signature.
                         snap = (hint.supplier_name_snapshot or "").strip()
-                        if snap and _supplier_snapshot_matches_current(getattr(row, "supplier_name", None), snap):
+                        if snap and (stable_anchor_matched or _supplier_snapshot_matches_current(getattr(row, "supplier_name", None), snap)):
                             text = snap
                         else:
                             _audit_saved_region_action(
@@ -1870,7 +2032,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
                 # only fill blanks, clean suspect values, or confirm/complete the
                 # same supplier relationship.
                 if hint.field_name == "supplier_name" and str(existing or "").strip():
-                    if not _should_replace_supplier_with_region(existing, hint.supplier_name_snapshot, text):
+                    if not stable_anchor_matched and not _should_replace_supplier_with_region(existing, hint.supplier_name_snapshot, text):
                         if str(existing or "").strip().lower() == str(text or "").strip().lower():
                             _audit_saved_region_action(
                                 db, batch, row, hint.field_name, existing, text, hint,
@@ -1892,12 +2054,17 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
                                 perf_ctx=perf_ctx,
                             )
                         continue
+                    if stable_anchor_matched and str(existing or "").strip().lower() != str(text or "").strip().lower():
+                        _append_review_marker(row, hint.field_name, f"saved_region_conflict:{hint.field_name}")
+                        _append_method_tag(row, f"stable_anchor_region:{hint.field_name}")
 
                 strong_existing = _is_strong_existing_saved_region_value(
                     row, hint.field_name, existing, _review_fields, _low_confidence
                 )
                 if strong_existing:
-                    if hint.field_name == "supplier_name" and _should_replace_supplier_with_region(existing, hint.supplier_name_snapshot, text):
+                    if hint.field_name == "supplier_name" and (
+                        stable_anchor_matched or _should_replace_supplier_with_region(existing, hint.supplier_name_snapshot, text)
+                    ):
                         pass
                     elif str(existing or "").strip() == str(text or "").strip():
                         _audit_saved_region_action(
@@ -1954,7 +2121,7 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
                 _audit_saved_region_action(
                     db, batch, row, hint.field_name, old_val, text, hint,
                     "saved_region_apply",
-                    f"Applied supplier-linked saved region during scan; confidence=medium; saved_page={hint.page_no}; used_page={used_page_no}; reason=supplier_match_page_independent_region",
+                    f"Applied supplier-linked saved region during scan; confidence=medium; saved_page={hint.page_no}; used_page={used_page_no}; reason={'stable_identifier_anchor' if stable_anchor_matched else 'supplier_match_page_independent_region'}",
                     perf_ctx=perf_ctx,
                 )
                 target_fields.discard(hint.field_name)
@@ -3539,6 +3706,13 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             db.add(row)
                             db.flush()
                             if provider_baseline_mode:
+                                _apply_stable_anchor_saved_regions_as_candidates(
+                                    db,
+                                    batch=batch,
+                                    row=row,
+                                    payload=r,
+                                    perf_ctx=perf_ctx,
+                                )
                                 _apply_blank_saved_regions_as_candidates(
                                     db,
                                     batch=batch,

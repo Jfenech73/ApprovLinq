@@ -386,6 +386,9 @@ def ensure_runtime_schema() -> None:
             created_by UUID REFERENCES users(id),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
         "ALTER TABLE remap_hints ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE remap_hints ADD COLUMN IF NOT EXISTS stable_anchor_type VARCHAR(80)",
+        "ALTER TABLE remap_hints ADD COLUMN IF NOT EXISTS stable_anchor_value TEXT",
+        "ALTER TABLE remap_hints ADD COLUMN IF NOT EXISTS stable_anchor_evidence TEXT",
         "ALTER TABLE remap_hints ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE remap_hints ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ",
         "ALTER TABLE remap_hints ADD COLUMN IF NOT EXISTS archived_by UUID REFERENCES users(id)",
@@ -405,6 +408,7 @@ def ensure_runtime_schema() -> None:
         "CREATE INDEX IF NOT EXISTS ix_remap_lookup ON remap_hints(supplier_id, field_name, active)",
         "CREATE INDEX IF NOT EXISTS ix_remap_governance ON remap_hints(tenant_id, company_id, supplier_id, field_name, active, archived, is_primary)",
         "CREATE INDEX IF NOT EXISTS ix_remap_lifecycle ON remap_hints(active, archived, deleted_at)",
+        "CREATE INDEX IF NOT EXISTS ix_remap_stable_anchor ON remap_hints(tenant_id, company_id, stable_anchor_type, stable_anchor_value, field_name, active)",
         """CREATE TABLE IF NOT EXISTS batch_export_events (
             id BIGSERIAL PRIMARY KEY,
             batch_id UUID NOT NULL REFERENCES invoice_batches(id) ON DELETE CASCADE,

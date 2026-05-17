@@ -5036,9 +5036,21 @@ def process_pdf_page_rows(
     if bool(getattr(settings, "scan_provider_baseline_mode", False)) and bool(getattr(settings, "use_azure_di", False)):
         page_result["provider_status"] = "di_failed_fallback_used"
         page_result["fallback_used"] = True
-        page_result.setdefault("review_required", True)
-        page_result.setdefault("validation_status", "review_di_failed_fallback_used")
-        page_result.setdefault("review_reasons", "di_failed_fallback_used")
+        page_result["review_required"] = True
+        page_result["auto_approved"] = False
+        page_result["validation_status"] = "review_di_failed_fallback_used"
+        reasons = [x for x in re.split(r"[|]", str(page_result.get("review_reasons") or "")) if x]
+        if "di_failed_fallback_used" not in reasons:
+            reasons.append("di_failed_fallback_used")
+        page_result["review_reasons"] = "|".join(reasons)
+        existing_method = str(page_result.get("method_used") or "fallback")
+        if not existing_method.startswith("DI_FAILED"):
+            page_result["method_used"] = f"DI_FAILED+{existing_method}"
+        try:
+            if page_result.get("confidence_score") is not None:
+                page_result["confidence_score"] = min(float(page_result["confidence_score"]), 0.75)
+        except Exception:
+            page_result["confidence_score"] = 0.75
 
     if (scan_mode or "summary").lower() == "lines":
         # ── Line-item extraction priority (tallest accuracy first) ─────────

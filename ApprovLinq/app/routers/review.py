@@ -1560,6 +1560,41 @@ def _same_remap_group(a: RemapHint, b: RemapHint) -> bool:
     return _normalise_remap_group_supplier(a.supplier_name_snapshot) == _normalise_remap_group_supplier(b.supplier_name_snapshot)
 
 
+def _normalise_stable_anchor_value(anchor_type: str | None, value: object) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    kind = (anchor_type or "").strip()
+    if kind in {"VendorTaxId", "CustomerTaxId", "CustomerId", "PurchaseOrder", "OrderNumber", "InvoiceId"}:
+        return re.sub(r"[^A-Z0-9]", "", text.upper())
+    return re.sub(r"\s+", " ", text.upper()).strip()
+
+
+def _row_stable_anchor(db: Session, row: M.InvoiceRow) -> tuple[str | None, str | None, str | None]:
+    """Return the strongest stable identifier saved from DI for a review row."""
+    header = db.execute(
+        select(M.InvoiceReadHeader)
+        .where(M.InvoiceReadHeader.row_id == row.id)
+        .order_by(desc(M.InvoiceReadHeader.id))
+        .limit(1)
+    ).scalar_one_or_none()
+    if not header:
+        return None, None, None
+    for anchor_type, attr in (
+        ("VendorTaxId", "VendorTaxId"),
+        ("CustomerId", "CustomerId"),
+        ("CustomerTaxId", "CustomerTaxId"),
+        ("PurchaseOrder", "PurchaseOrder"),
+        ("OrderNumber", "order_number"),
+        ("InvoiceId", "InvoiceId"),
+    ):
+        raw = getattr(header, attr, None)
+        value = _normalise_stable_anchor_value(anchor_type, raw)
+        if value:
+            return anchor_type, value, f"{anchor_type}={raw}"
+    return None, None, None
+
+
 def _get_remap_hint_for_user(hint_id: int, db: Session, user, x_tenant_id: str | None = None) -> RemapHint:
     tenant_id = None if getattr(user, "role", None) == "admin" and not x_tenant_id else _active_tenant_id_for_user(db, user, x_tenant_id)
     hint = db.get(RemapHint, hint_id)
@@ -1648,6 +1683,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
         supplier = db.execute(supplier_q).scalar_one_or_none()
 
     _snapshot_supplier_name = row.supplier_name
+    stable_anchor_type, stable_anchor_value, stable_anchor_evidence = _row_stable_anchor(db, row)
 
     # Governance grouping: saved regions are supplier + field instructions.
     # Page number is reference evidence only and must not create a separate
@@ -1693,6 +1729,10 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
             existing_hint.supplier_id = supplier.id
         if _snapshot_supplier_name:
             existing_hint.supplier_name_snapshot = _snapshot_supplier_name
+        if stable_anchor_type and stable_anchor_value:
+            existing_hint.stable_anchor_type = stable_anchor_type
+            existing_hint.stable_anchor_value = stable_anchor_value
+            existing_hint.stable_anchor_evidence = stable_anchor_evidence
         hint = existing_hint
         logger.debug("save_remap: updated existing RemapHint id=%d", hint.id)
     else:
@@ -1701,6 +1741,9 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
             company_id=batch.company_id,
             supplier_id=supplier.id if supplier else None,
             supplier_name_snapshot=_snapshot_supplier_name,
+            stable_anchor_type=stable_anchor_type,
+            stable_anchor_value=stable_anchor_value,
+            stable_anchor_evidence=stable_anchor_evidence,
             field_name=payload.field_name,
             page_no=payload.page_no,
             x=payload.x, y=payload.y, w=payload.w, h=payload.h,
@@ -2509,6 +2552,9 @@ def list_remap_hints(
         g = group_counts.setdefault(key, {
             "company_id": str(h.company_id) if h.company_id else None,
             "supplier_name_snapshot": h.supplier_name_snapshot,
+            "stable_anchor_type": getattr(h, "stable_anchor_type", None),
+            "stable_anchor_value": getattr(h, "stable_anchor_value", None),
+            "stable_anchor_evidence": getattr(h, "stable_anchor_evidence", None),
             "field_name": h.field_name,
             "active_count": 0,
             "fallback_count": 0,
@@ -2553,6 +2599,9 @@ def list_remap_hints(
             "field_name": h.field_name,
             "supplier_id": h.supplier_id,
             "supplier_name_snapshot": h.supplier_name_snapshot,
+            "stable_anchor_type": getattr(h, "stable_anchor_type", None),
+            "stable_anchor_value": getattr(h, "stable_anchor_value", None),
+            "stable_anchor_evidence": getattr(h, "stable_anchor_evidence", None),
             "page_no": h.page_no,
             "reference_page_no": h.page_no,
             "x": x, "y": y, "w": w, "h": hh,

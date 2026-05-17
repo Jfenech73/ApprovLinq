@@ -136,6 +136,9 @@ class RemapHint(Base):
     company_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=True)
     supplier_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("tenant_suppliers.id", ondelete="CASCADE"), nullable=True)
     supplier_name_snapshot: Mapped[str | None] = mapped_column(Text)
+    stable_anchor_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    stable_anchor_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stable_anchor_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
     field_name: Mapped[str] = mapped_column(String(80), nullable=False)
     page_no: Mapped[int | None] = mapped_column(Integer)  # reference page only; not identity
     x: Mapped[float | None] = mapped_column(Numeric(8, 4))
