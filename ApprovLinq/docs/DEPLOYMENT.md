@@ -73,6 +73,7 @@ USE_OPENAI=false
 AZURE_DI_PAGE_TIMEOUT_S=25
 OCR_SPACE_TIMEOUT_SECONDS=45
 EXTRACTION_PAGE_TIMEOUT_S=120
+EXTRACTION_CONSECUTIVE_TIMEOUT_LIMIT=3
 ```
 
 Set `USE_OPENAI=true` only when blank-field AI fallback is required. DI values
@@ -95,7 +96,9 @@ waiting on the DI poller.
 
 Each page also has a hard `EXTRACTION_PAGE_TIMEOUT_S` guard. If DI, OCR,
 PDF rendering, or a crop read stalls below the provider layer, that page is
-marked for review and the batch continues to the next page.
+marked as `page_timeout` for review and the batch continues to the next page.
+If `EXTRACTION_CONSECUTIVE_TIMEOUT_LIMIT` pages time out in a row, the current
+file exits with a clear error instead of looping through a broken provider.
 
 If you want to test only native PDF extraction and no OCR fallback:
 
@@ -167,6 +170,7 @@ OCR_SPACE_OCR_ENGINE=2
 OCR_SPACE_TIMEOUT_SECONDS=45
 AZURE_DI_PAGE_TIMEOUT_S=25
 EXTRACTION_PAGE_TIMEOUT_S=120
+EXTRACTION_CONSECUTIVE_TIMEOUT_LIMIT=3
 ```
 
 8. Deploy the service.

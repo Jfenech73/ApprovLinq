@@ -3667,6 +3667,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 invoice_file.error_message = None
                 db.commit()
                 page_count = invoice_file.page_count or 0
+                consecutive_page_timeouts = 0
                 for page_index in range(page_count):
                     try:
                         _page_perf_start = __import__("time").perf_counter()
@@ -3895,10 +3896,16 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                         perf_ctx.timings["total_page_processing"] = perf_ctx.timings.get("total_page_processing", 0.0) + (__import__("time").perf_counter() - _page_perf_start)
                         with perf_ctx.timed("db_commit"):
                             db.commit()
+                        consecutive_page_timeouts = 0
                     except Exception as page_error:
                         if "_page_perf_start" in locals():
                             perf_ctx.timings["total_page_processing"] = perf_ctx.timings.get("total_page_processing", 0.0) + (__import__("time").perf_counter() - _page_perf_start)
                         db.rollback()
+                        is_page_timeout = isinstance(page_error, TimeoutError) or "timed out" in str(page_error).lower()
+                        if is_page_timeout:
+                            consecutive_page_timeouts += 1
+                        else:
+                            consecutive_page_timeouts = 0
                         page_failures += 1
                         processed_pages += 1
                         logger.warning(
@@ -3915,10 +3922,12 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             page_no=page_index + 1,
                             description=f"Page processing error: {str(page_error)[:180]}",
                             currency="EUR",
-                            method_used="page_error",
+                            method_used="page_timeout" if is_page_timeout else "page_error",
                             confidence_score=0.0,
-                            validation_status="review",
+                            validation_status="review_page_timeout" if is_page_timeout else "review",
                             review_required=True,
+                            review_reasons="page_timeout" if is_page_timeout else "page_error",
+                            review_fields="page",
                             page_text_raw=f"PAGE_ERROR={str(page_error)}",
                         )
                         db.add(fallback_row)
@@ -3941,6 +3950,12 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             db.commit()
                         total_rows += 1
                         inserted_rows += 1
+                        timeout_limit = int(getattr(settings, "extraction_consecutive_timeout_limit", 3) or 3)
+                        if is_page_timeout and consecutive_page_timeouts >= timeout_limit:
+                            raise RuntimeError(
+                                f"Stopped file after {consecutive_page_timeouts} consecutive page timeouts "
+                                f"(limit={timeout_limit}, timeout={getattr(settings, 'extraction_page_timeout_s', 120)}s)."
+                            )
                 if inserted_rows == 0:
                     invoice_file.status = "failed"
                     invoice_file.error_message = "No pages could be processed."

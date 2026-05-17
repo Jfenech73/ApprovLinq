@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     azure_di_key: str | None = None
     azure_di_page_timeout_s: float = 25.0
     extraction_page_timeout_s: float = 120.0
+    extraction_consecutive_timeout_limit: int = 3
 
     # Temporary extraction-baseline mode:
     # DI first, immediate fallback, and no downstream rule/arbitration mutation.
@@ -80,6 +81,7 @@ class Settings(BaseSettings):
             "azure_di_key_present": bool(self.azure_di_key),
             "azure_di_page_timeout_s": self.azure_di_page_timeout_s,
             "extraction_page_timeout_s": self.extraction_page_timeout_s,
+            "extraction_consecutive_timeout_limit": self.extraction_consecutive_timeout_limit,
             "scan_provider_baseline_mode": self.scan_provider_baseline_mode,
             "upload_dir": self.upload_dir,
             "export_dir": self.export_dir,
