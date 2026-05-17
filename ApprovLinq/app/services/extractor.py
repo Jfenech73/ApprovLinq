@@ -1101,6 +1101,10 @@ def _get_fallback_ocr_text(pdf_path: str | Path, page_index: int, native_text: s
     Returns (text, method_tag).  The caller decides whether the OCR result is
     strong enough to replace native text.
     """
+    global _ocr_fallback_error
+    if _ocr_fallback_error:
+        logger.warning("OCR fallback skipped for page %d: %s", page_index, _ocr_fallback_error)
+        return None, None
     ocr_backend = get_ocr_backend()
     if ocr_backend is None:
         return None, None
@@ -1116,10 +1120,14 @@ def _get_fallback_ocr_text(pdf_path: str | Path, page_index: int, native_text: s
             return None, None
         return ocr_text, f"ocr_{ocr_backend.name}"
     except Exception as e:
+        if _ocr_error_is_batch_terminal(e):
+            _ocr_fallback_error = f"OCR fallback disabled for this batch: {str(e)[:160]}"
         logger.warning("OCR fallback failed for page %d: %s", page_index, e)
         return None, None
 
 def get_ocr_backend():
+    if _ocr_fallback_error:
+        return None
     provider = (settings.ocr_provider or "none").strip().lower()
     if provider == "ocr_space":
         return OCRSpaceBackend()
@@ -3187,6 +3195,7 @@ def openai_extract_invoice_vision(
 # hits a permanent failure (403 VNet, 401 bad key, etc.) so subsequent pages in
 # the same batch don't retry and waste time.
 _azure_di_error: str | None = None
+_ocr_fallback_error: str | None = None
 
 
 def _reset_azure_di_error() -> None:
@@ -3199,6 +3208,20 @@ def _reset_azure_di_error() -> None:
     """
     global _azure_di_error
     _azure_di_error = None
+
+
+def _reset_ocr_fallback_error() -> None:
+    """Clear the OCR fallback circuit-breaker for a new batch."""
+    global _ocr_fallback_error
+    _ocr_fallback_error = None
+
+
+def _ocr_error_is_batch_terminal(error: Exception) -> bool:
+    text = str(error or "").lower()
+    return any(token in text for token in (
+        "quota", "rate limit", "ratelimit", "too many requests", "exceeded",
+        "maximum", "limit reached", "insufficient", "subscription",
+    ))
 
 
 def azure_di_available() -> tuple[bool, str | None]:

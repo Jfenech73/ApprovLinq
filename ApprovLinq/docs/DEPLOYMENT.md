@@ -71,6 +71,8 @@ SCAN_PROVIDER_BASELINE_MODE=true
 OCR_PROVIDER=ocr_space
 USE_OPENAI=false
 AZURE_DI_PAGE_TIMEOUT_S=25
+OCR_SPACE_TIMEOUT_SECONDS=45
+EXTRACTION_PAGE_TIMEOUT_S=120
 ```
 
 Set `USE_OPENAI=true` only when blank-field AI fallback is required. DI values
@@ -90,6 +92,10 @@ and fallback confidence is capped so OCR/native text cannot look like a clean
 If Azure DI quota/rate limit is reached mid-batch, the DI circuit breaker opens
 for the rest of that batch and remaining pages move to fallback instead of
 waiting on the DI poller.
+
+Each page also has a hard `EXTRACTION_PAGE_TIMEOUT_S` guard. If DI, OCR,
+PDF rendering, or a crop read stalls below the provider layer, that page is
+marked for review and the batch continues to the next page.
 
 If you want to test only native PDF extraction and no OCR fallback:
 
@@ -158,7 +164,9 @@ OCR_SPACE_LANGUAGE=eng
 OCR_SPACE_OVERLAY_REQUIRED=false
 OCR_SPACE_SCALE=true
 OCR_SPACE_OCR_ENGINE=2
-OCR_SPACE_TIMEOUT_SECONDS=90
+OCR_SPACE_TIMEOUT_SECONDS=45
+AZURE_DI_PAGE_TIMEOUT_S=25
+EXTRACTION_PAGE_TIMEOUT_S=120
 ```
 
 8. Deploy the service.

@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     ocr_space_ocr_engine: int = 2
     ocr_space_overlay_required: bool = False
     ocr_space_scale: bool = True
-    ocr_space_timeout_seconds: int = 90
+    ocr_space_timeout_seconds: int = 45
 
     # OpenAI
     use_openai: bool = False
@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     azure_di_endpoint: str | None = None
     azure_di_key: str | None = None
     azure_di_page_timeout_s: float = 25.0
+    extraction_page_timeout_s: float = 120.0
 
     # Temporary extraction-baseline mode:
     # DI first, immediate fallback, and no downstream rule/arbitration mutation.
@@ -78,6 +79,7 @@ class Settings(BaseSettings):
             "azure_di_endpoint": self.azure_di_endpoint,
             "azure_di_key_present": bool(self.azure_di_key),
             "azure_di_page_timeout_s": self.azure_di_page_timeout_s,
+            "extraction_page_timeout_s": self.extraction_page_timeout_s,
             "scan_provider_baseline_mode": self.scan_provider_baseline_mode,
             "upload_dir": self.upload_dir,
             "export_dir": self.export_dir,

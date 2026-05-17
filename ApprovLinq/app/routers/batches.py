@@ -68,6 +68,42 @@ def _clear_active(batch_id: UUID) -> None:
         _ACTIVE_BATCHES.discard(str(batch_id))
 
 
+def _process_page_rows_with_timeout(
+    pdf_path: str,
+    *,
+    page_index: int,
+    scan_mode: str,
+    openai_api_key: str | None,
+    account_company_name: str | None,
+) -> list[dict]:
+    """Run page extraction with a hard batch-progress timeout.
+
+    Provider libraries can occasionally block below their own timeout layer.
+    This wrapper lets the batch mark the page for review and continue.
+    """
+    import concurrent.futures as _cf
+
+    timeout_s = float(getattr(settings, "extraction_page_timeout_s", 120) or 120)
+    pool = _cf.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(
+        process_pdf_page_rows,
+        pdf_path,
+        page_index=page_index,
+        scan_mode=scan_mode,
+        openai_api_key=openai_api_key,
+        account_company_name=account_company_name,
+    )
+    try:
+        return future.result(timeout=timeout_s)
+    except _cf.TimeoutError as exc:
+        future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise TimeoutError(f"Page extraction timed out after {timeout_s:.0f}s") from exc
+    finally:
+        if future.done():
+            pool.shutdown(wait=False, cancel_futures=True)
+
+
 
 def _safe_log_value(value: object, *, max_len: int = 80) -> str:
     """Return a short, content-safe value for operational logs.
@@ -3571,7 +3607,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         # Only selects azure_di if the readiness check passes — "configured"
         # is not the same as "ready".
         from app.services.preflight import run_preflight_checks, ExtractionBackend
-        from app.services.extractor import _reset_azure_di_error
+        from app.services.extractor import _reset_azure_di_error, _reset_ocr_fallback_error
 
         preflight = run_preflight_checks()   # skip_readiness_check=False by default
         logger.info(
@@ -3603,6 +3639,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 preflight.readiness_state,
                 preflight.failure_reason or "disabled",
             )
+        _reset_ocr_fallback_error()
 
         # Look up the company name so the extractor can hard-block it as the
         # customer name and never return it as a supplier.
@@ -3633,9 +3670,10 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 for page_index in range(page_count):
                     try:
                         _page_perf_start = __import__("time").perf_counter()
+                        pdf_path = str(materialize_invoice_file(invoice_file))
                         with perf_ctx.timed("extraction_provider"):
-                            row_payloads = process_pdf_page_rows(
-                                str(materialize_invoice_file(invoice_file)),
+                            row_payloads = _process_page_rows_with_timeout(
+                                pdf_path,
                                 page_index=page_index,
                                 scan_mode=batch.scan_mode or "summary",
                                 openai_api_key=settings.openai_api_key if settings.use_openai else None,
