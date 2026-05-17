@@ -20,6 +20,11 @@ This build avoids Tesseract by default.
 
 Use the direct connection for migrations/schema setup and the pooled connection for the live app.
 
+If a previous failed release already created `invoice_read_headers` or
+`invoice_read_details` incorrectly, run
+`sql/one_time_rebuild_invoice_read_tables.sql` once before deploying the fixed
+app. This script drops and recreates only those two read snapshot tables.
+
 ---
 
 ## 3. Prepare the project locally
