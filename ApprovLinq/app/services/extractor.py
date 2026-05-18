@@ -3677,6 +3677,59 @@ def azure_di_extract_invoice(
     }
 
 
+def azure_di_extract_read_text(
+    jpeg_bytes: bytes,
+    endpoint: str,
+    key: str,
+) -> dict[str, Any] | None:
+    """Read page OCR text with Azure DI when invoice extraction has no fields."""
+    if not jpeg_bytes or not endpoint or not key:
+        return None
+    try:
+        from azure.ai.documentintelligence import DocumentIntelligenceClient
+        from azure.core.credentials import AzureKeyCredential
+        import concurrent.futures as _cf
+
+        client = DocumentIntelligenceClient(
+            endpoint=endpoint.rstrip("/"),
+            credential=AzureKeyCredential(key),
+        )
+        poller = client.begin_analyze_document(
+            "prebuilt-read",
+            body=jpeg_bytes,
+            content_type="image/jpeg",
+            polling_interval=1,
+            connection_timeout=min(float(getattr(settings, "azure_di_page_timeout_s", 45)), 20.0),
+            read_timeout=min(float(getattr(settings, "azure_di_page_timeout_s", 45)), 20.0),
+        )
+        timeout_s = float(getattr(settings, "azure_di_page_timeout_s", 45))
+        pool = _cf.ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(poller.result)
+        try:
+            result = future.result(timeout=timeout_s)
+        except _cf.TimeoutError:
+            future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+            logger.warning("Azure DI read fallback timeout after %.0fs", timeout_s)
+            return None
+        finally:
+            if future.done():
+                pool.shutdown(wait=False, cancel_futures=True)
+        content = clean_text(getattr(result, "content", None) or "")
+        if count_meaningful_chars(content) < 10:
+            return None
+        return {
+            "extraction_source": "azure_di_read",
+            "document_type": "read",
+            "di_page_text": content,
+            "_di_raw_fields": {},
+            "_di_raw_payload": _serialise_di_document(result),
+        }
+    except Exception as exc:
+        logger.warning("Azure DI read fallback failed: %s", exc)
+        return None
+
+
 def openai_extract_invoice_fields(
     page_text: str,
     api_key: str,
@@ -4202,15 +4255,26 @@ def process_pdf_page(
     use_vision = bool(settings.use_openai and openai_api_key and not provider_baseline_mode)
     final_text = "(page text unavailable)"
     ai_fields = None
+    di_read_payload = None
     raw_jpeg = None
     jpeg_bytes = None
 
     _di_ok, _di_reason = azure_di_available()
     use_azure_di = _di_ok
+    use_azure_di_read_fallback = bool(
+        settings.use_azure_di
+        and settings.azure_di_endpoint
+        and settings.azure_di_key
+        and (
+            _di_ok
+            or ("timeout" in str(_di_reason or "").lower())
+            or ("timed out" in str(_di_reason or "").lower())
+        )
+    )
     if not _di_ok and settings.use_azure_di:
         logger.debug("Azure DI skipped: %s", _di_reason)
 
-    if use_azure_di or use_vision:
+    if use_azure_di or use_azure_di_read_fallback or use_vision:
         try:
             raw_jpeg = OCRBackend.render_pdf_page_to_jpeg_bytes(
                 pdf_path, page_index, scale=1.5, quality=80
@@ -4243,6 +4307,26 @@ def process_pdf_page(
             if count_meaningful_chars(_di_text) >= 10:
                 final_text = _di_text
             logger.info("Azure DI extraction succeeded for page %d", page_index)
+
+    # If the invoice model fails or returns too little text, use Azure DI Read
+    # OCR on the same upright rendered page before falling back to native text.
+    if use_azure_di_read_fallback and jpeg_bytes and (
+        ai_fields is None
+        or count_meaningful_chars((ai_fields or {}).get("di_page_text") or "") < 20
+        or not _extraction_has_minimum_invoice_fields(ai_fields)
+    ):
+        di_read_payload = azure_di_extract_read_text(
+            jpeg_bytes,
+            settings.azure_di_endpoint,
+            settings.azure_di_key,
+        )
+        _read_text = (di_read_payload or {}).get("di_page_text") or ""
+        if count_meaningful_chars(_read_text) >= 10:
+            if final_text == "(page text unavailable)" or count_meaningful_chars(final_text) < count_meaningful_chars(_read_text):
+                final_text = _read_text
+            if ai_fields is None:
+                method = "azure_di_read"
+            logger.info("Azure DI Read fallback supplied OCR text for page %d", page_index)
 
     if provider_baseline_mode:
         # Provider-baseline mode: DI first, immediate OCR fallback, native text last.
@@ -4279,6 +4363,25 @@ def process_pdf_page(
     logger.debug("Stage 2: field extraction for page %d", page_index)
 
     if provider_baseline_mode:
+        if ai_fields and di_read_payload and not _extraction_has_minimum_invoice_fields(ai_fields):
+            fallback_extracted = simple_extract(
+                di_read_payload.get("di_page_text") or "",
+                openai_api_key=None,
+                account_company_name=account_company_name,
+            )
+            changed = False
+            for field in (
+                "supplier_name", "supplier_vat", "invoice_number", "invoice_date",
+                "description", "net_amount", "vat_amount", "total_amount", "currency",
+            ):
+                if ai_fields.get(field) in (None, "", []) and fallback_extracted.get(field) not in (None, "", []):
+                    ai_fields[field] = fallback_extracted[field]
+                    changed = True
+            if changed:
+                ai_fields["extraction_source"] = "azure_di+azure_di_read_text_fallback"
+                ai_fields["di_page_text"] = di_read_payload.get("di_page_text") or ai_fields.get("di_page_text") or ""
+                ai_fields["_di_read_raw_payload"] = di_read_payload.get("_di_raw_payload")
+                method = f"{method}+di_read_text_fallback"
         if ai_fields:
             return _build_provider_baseline_result(
                 ai_fields,
@@ -4286,6 +4389,23 @@ def process_pdf_page(
                 page_index=page_index,
                 page_quality_score=page_quality_score,
                 page_text=ai_fields.get("di_page_text") or final_text,
+            )
+        if di_read_payload:
+            extracted = simple_extract(
+                di_read_payload.get("di_page_text") or final_text,
+                openai_api_key=None,
+                account_company_name=account_company_name,
+            )
+            extracted["extraction_source"] = "azure_di_read"
+            extracted["di_page_text"] = di_read_payload.get("di_page_text") or ""
+            extracted["_di_raw_fields"] = {}
+            extracted["_di_raw_payload"] = di_read_payload.get("_di_raw_payload")
+            return _build_provider_baseline_result(
+                extracted,
+                method="azure_di_read",
+                page_index=page_index,
+                page_quality_score=page_quality_score,
+                page_text=di_read_payload.get("di_page_text") or final_text,
             )
         extracted = simple_extract(
             final_text,
@@ -5034,6 +5154,38 @@ def _build_direct_di_page_rows(
         "totals_raw": "",
         "page_text_raw": page_text,
     }
+    if not _extraction_has_minimum_invoice_fields(row):
+        di_read_payload = azure_di_extract_read_text(
+            jpeg_bytes,
+            settings.azure_di_endpoint,
+            settings.azure_di_key,
+        )
+        di_read_text = (di_read_payload or {}).get("di_page_text") or ""
+        if di_read_text:
+            fallback = simple_extract(
+                di_read_text,
+                openai_api_key=None,
+                account_company_name=account_company_name,
+            )
+            changed = False
+            for name in (
+                "supplier_name", "supplier_vat", "invoice_number", "invoice_date",
+                "description", "net_amount", "vat_amount", "total_amount", "currency",
+            ):
+                if row.get(name) in (None, "", []) and fallback.get(name) not in (None, "", []):
+                    row[name] = fallback.get(name)
+                    row["_direct_di_field_sources"][name] = "azure_di_read_text_fallback"
+                    changed = True
+            row["di_page_text"] = di_read_text
+            row["page_text_raw"] = di_read_text
+            row["header_raw"] = fallback.get("_header_text") or _header_region_text(di_read_text, max_lines=24)
+            row["totals_raw"] = fallback.get("_totals_text") or _totals_region_text(di_read_text, tail_lines=24)
+            row["_di_read_raw_payload"] = (di_read_payload or {}).get("_di_raw_payload")
+            if changed:
+                row["method_used"] = "DI+DI_READ_TEXT_FALLBACK"
+                row["extraction_source"] = "azure_di_direct+azure_di_read_text_fallback"
+                row["provider_status"] = "di_success_field_fallback_used"
+                row["fallback_used"] = True
     try:
         native_text = extract_native_pdf_page(pdf_path, page_index)
     except Exception:
