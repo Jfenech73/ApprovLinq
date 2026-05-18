@@ -220,7 +220,8 @@ async function loadRows() {
     const tr = document.createElement("tr");
     const toolBadge = (() => {
       const m = (row.method_used || "").toLowerCase();
-      if (m.includes("azure_di") || m.includes("_di")) return "DI";
+      const directDi = /(^|[+|,])di($|[+|,])/.test(m);
+      if (!m.startsWith("di_failed") && (directDi || m.includes("azure_di") || m.includes("_di"))) return "DI";
       if (m.includes("openai") || m.includes("vision") || m.includes("_ai")) return "AI";
       if (m.includes("ocr")) return "OCR";
       if (m) return "TXT";

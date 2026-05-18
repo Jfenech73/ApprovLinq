@@ -233,7 +233,8 @@ function render() {
 
     const toolBadge = (() => {
       const m = (r.method_used || "").toLowerCase();
-      if (m.includes("azure_di") || m.includes("_di")) return '<span class="tool-badge tool-di">DI</span>';
+      const directDi = /(^|[+|,])di($|[+|,])/.test(m);
+      if (!m.startsWith("di_failed") && (directDi || m.includes("azure_di") || m.includes("_di"))) return '<span class="tool-badge tool-di">DI</span>';
       if (m.includes("openai") || m.includes("vision") || m.includes("_ai")) return '<span class="tool-badge tool-ai">AI</span>';
       if (m.includes("ocr")) return '<span class="tool-badge tool-ocr">OCR</span>';
       if (m) return '<span class="tool-badge tool-native">TXT</span>';
@@ -319,7 +320,8 @@ function renderEditor() {
   let header = '';
   const toolLabel = (() => {
     const m = (r.method_used || "").toLowerCase();
-    if (m.includes("azure_di") || m.includes("_di"))           return "Azure Document Intelligence (DI)";
+    const directDi = /(^|[+|,])di($|[+|,])/.test(m);
+    if (!m.startsWith("di_failed") && (directDi || m.includes("azure_di") || m.includes("_di"))) return "Azure Document Intelligence (DI)";
     if (m.includes("openai") || m.includes("vision") || m.includes("_ai")) return "AI (OpenAI / Vision)";
     if (m.includes("ocr"))  return "OCR";
     if (m)                  return "Native text extraction";
