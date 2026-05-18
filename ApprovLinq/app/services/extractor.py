@@ -5064,7 +5064,13 @@ def process_pdf_page_rows(
         openai_api_key=openai_api_key,
         account_company_name=account_company_name,
     )
-    if bool(getattr(settings, "scan_provider_baseline_mode", False)) and bool(getattr(settings, "use_azure_di", False)):
+    method_text = str(page_result.get("method_used") or "")
+    should_mark_di_failed = (
+        bool(getattr(settings, "use_azure_di", False))
+        and "azure_di" not in method_text.lower()
+        and not method_text.startswith("DI")
+    )
+    if should_mark_di_failed:
         page_result["provider_status"] = "di_failed_fallback_used"
         page_result["fallback_used"] = True
         page_result["review_required"] = True

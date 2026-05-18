@@ -29,4 +29,12 @@ def health():
         "status": "ok",
         "active_extraction_engine": active_engine,
         "engines": engines,
+        "scan_provider_baseline_mode": settings.scan_provider_baseline_mode,
+        "ocr_provider": settings.ocr_provider,
+        "timeouts": {
+            "azure_di_page_timeout_s": settings.azure_di_page_timeout_s,
+            "ocr_space_timeout_seconds": settings.ocr_space_timeout_seconds,
+            "extraction_page_timeout_s": settings.extraction_page_timeout_s,
+            "extraction_consecutive_timeout_limit": settings.extraction_consecutive_timeout_limit,
+        },
     }

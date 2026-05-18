@@ -804,6 +804,85 @@ def _apply_stable_anchor_saved_regions_as_candidates(
         row.review_fields = "|".join(sorted(set((row.review_fields or "").split("|") + changed_critical) - {""}))
 
 
+def _apply_supplier_name_rules_as_candidates(
+    db: Session,
+    *,
+    batch: InvoiceBatch,
+    row: InvoiceRow,
+    payload: dict,
+) -> None:
+    """Apply explicit user supplier-name rules in DI/TXT baseline mode.
+
+    Baseline mode preserves provider evidence, but user-confirmed supplier
+    aliases still need to trigger. Restrict this helper to supplier_name so
+    dynamic fields like invoice number/date are never replayed from old text.
+    """
+    current_norm = _normalize_rule_value(row.supplier_name)
+    if not current_norm:
+        return
+    rules_q = db.query(CorrectionRule).filter(
+        CorrectionRule.active.is_(True),
+        CorrectionRule.field_name == "supplier_name",
+        CorrectionRule.rule_type.in_(("supplier_alias", "remap_field_value", "text_correction")),
+        or_(CorrectionRule.tenant_id == batch.tenant_id, CorrectionRule.is_global.is_(True)),
+    )
+    if batch.company_id:
+        rules_q = rules_q.filter(
+            (CorrectionRule.company_id == batch.company_id)
+            | (CorrectionRule.company_id.is_(None))
+            | (CorrectionRule.is_global.is_(True))
+        )
+    else:
+        rules_q = rules_q.filter((CorrectionRule.company_id.is_(None)) | (CorrectionRule.is_global.is_(True)))
+
+    candidates = list(payload.get("_field_candidates") or [])
+    for rule in rules_q.order_by(CorrectionRule.is_global.asc(), CorrectionRule.id.desc()).all():
+        src = _normalize_rule_value(rule.source_pattern)
+        target = (rule.target_value or "").strip()
+        if not src or src != current_norm or not _saved_region_value_is_valid("supplier_name", target):
+            continue
+        old_val = row.supplier_name
+        if str(old_val or "").strip() == target:
+            return
+        row.supplier_name = target
+        payload["supplier_name"] = target
+        _append_method_tag(row, f"rule:{rule.rule_type}:supplier_name")
+        _audit_rule_application(
+            db,
+            batch,
+            row,
+            "supplier_name",
+            old_val,
+            target,
+            rule,
+            "Applied explicit supplier-name rule during baseline scan",
+        )
+        candidates.append({
+            "field_name": "supplier_name",
+            "candidate_value": target,
+            "normalised_value": target,
+            "source_type": f"rule_{rule.rule_type}",
+            "source_id": f"rule:{rule.id}",
+            "confidence": None,
+            "evidence": str(old_val or "")[:2000],
+            "reason": "applied_explicit_supplier_name_rule",
+            "selected": True,
+            "applied": True,
+            "conflict": True,
+        })
+        payload["_field_candidates"] = candidates
+        row.review_required = True
+        row.auto_approved = False
+        reasons = [x for x in re.split(r"[|]", row.review_reasons or "") if x]
+        if "supplier_rule_applied" not in reasons:
+            reasons.append("supplier_rule_applied")
+        row.review_reasons = "|".join(reasons)
+        fields = set(x for x in re.split(r"[|,]", row.review_fields or "") if x)
+        fields.add("supplier_name")
+        row.review_fields = "|".join(sorted(fields))
+        return
+
+
 def _audit_rule_application(
     db: Session,
     batch: InvoiceBatch,
@@ -3751,6 +3830,12 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                     row=row,
                                     payload=r,
                                     perf_ctx=perf_ctx,
+                                )
+                                _apply_supplier_name_rules_as_candidates(
+                                    db,
+                                    batch=batch,
+                                    row=row,
+                                    payload=r,
                                 )
                                 _apply_blank_saved_regions_as_candidates(
                                     db,
