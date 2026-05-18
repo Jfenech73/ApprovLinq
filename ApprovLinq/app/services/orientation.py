@@ -19,11 +19,72 @@ def _parse_orientation_angle(value: Any) -> int | None:
     text = str(value or "").strip()
     if not text:
         return None
-    m = re.search(r"\b(0|90|180|270)\b", text)
+    m = re.search(r"-?\d+(?:\.\d+)?", text)
     if not m:
         return None
-    angle = int(m.group(1))
-    return angle if angle in {0, 90, 180, 270} else None
+    try:
+        raw = float(m.group(0))
+    except Exception:
+        return None
+    normalised = int(round(raw / 90.0) * 90) % 360
+    return normalised if normalised in {0, 90, 180, 270} else None
+
+
+def _as_correction_from_content_angle(value: Any) -> int | None:
+    """Convert a detected content angle into a clockwise correction angle."""
+    angle = _parse_orientation_angle(value)
+    if angle is None:
+        return None
+    return (360 - angle) % 360
+
+
+def _detect_with_azure_di(jpeg_bytes: bytes, page_no: int) -> int | None:
+    """Use Azure Document Intelligence page.angle as orientation signal."""
+    if not (settings.use_azure_di and settings.azure_di_endpoint and settings.azure_di_key):
+        return None
+    try:
+        from azure.ai.documentintelligence import DocumentIntelligenceClient
+        from azure.core.credentials import AzureKeyCredential
+        import concurrent.futures as _cf
+
+        client = DocumentIntelligenceClient(
+            endpoint=settings.azure_di_endpoint.rstrip("/"),
+            credential=AzureKeyCredential(settings.azure_di_key),
+        )
+        poller = client.begin_analyze_document(
+            "prebuilt-read",
+            body=jpeg_bytes,
+            content_type="image/jpeg",
+            polling_interval=1,
+            connection_timeout=min(float(getattr(settings, "azure_di_page_timeout_s", 25)), 20.0),
+            read_timeout=min(float(getattr(settings, "azure_di_page_timeout_s", 25)), 20.0),
+        )
+        timeout_s = min(float(getattr(settings, "azure_di_page_timeout_s", 25)), 25.0)
+        pool = _cf.ThreadPoolExecutor(max_workers=1)
+        fut = pool.submit(poller.result)
+        try:
+            result = fut.result(timeout=timeout_s)
+        except _cf.TimeoutError:
+            fut.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+            logger.warning("Azure DI orientation timeout after %.0fs on page %d", timeout_s, page_no)
+            return None
+        finally:
+            if fut.done():
+                pool.shutdown(wait=False, cancel_futures=True)
+        pages = getattr(result, "pages", None) or []
+        if pages:
+            raw_angle = getattr(pages[0], "angle", None)
+            correction = _as_correction_from_content_angle(raw_angle)
+            if correction is not None:
+                logger.info(
+                    "Azure DI orientation page %d: content_angle=%s correction=%s",
+                    page_no, raw_angle, correction,
+                )
+                return correction
+    except Exception as exc:
+        logger.debug("Azure DI orientation detection skipped for page %d: %s", page_no, exc)
+    return None
 
 
 def _detect_with_tesseract(jpeg_bytes: bytes) -> int | None:
@@ -96,6 +157,9 @@ def _detect_with_ocr_space(jpeg_bytes: bytes, page_no: int) -> int | None:
 
 def _detect_page_rotation(jpeg_bytes: bytes, page_no: int) -> int:
     """Return clockwise rotation needed to make the rendered page upright."""
+    angle = _detect_with_azure_di(jpeg_bytes, page_no)
+    if angle is not None:
+        return angle
     angle = _detect_with_tesseract(jpeg_bytes)
     if angle is not None:
         return angle

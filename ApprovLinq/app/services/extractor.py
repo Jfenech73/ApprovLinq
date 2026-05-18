@@ -3307,9 +3307,19 @@ def _serialise_di_document(result: Any) -> dict[str, Any]:
     document = documents[0] if documents else None
     fields = getattr(document, "fields", None) or {}
     raw_fields = {str(name): _serialise_di_field(field) for name, field in fields.items()}
+    pages = []
+    for page in (getattr(result, "pages", None) or []):
+        pages.append({
+            "page_number": _json_safe(getattr(page, "page_number", None)),
+            "angle": _json_safe(getattr(page, "angle", None)),
+            "width": _json_safe(getattr(page, "width", None)),
+            "height": _json_safe(getattr(page, "height", None)),
+            "unit": _json_safe(getattr(page, "unit", None)),
+        })
     return {
         "model_id": _json_safe(getattr(result, "model_id", None)),
         "content": _json_safe(getattr(result, "content", None)),
+        "pages": pages,
         "document_count": len(documents),
         "document": {
             "doc_type": _json_safe(getattr(document, "doc_type", None)) if document is not None else None,
