@@ -839,7 +839,7 @@ def _apply_supplier_name_rules_as_candidates(
     for rule in rules_q.order_by(CorrectionRule.is_global.asc(), CorrectionRule.id.desc()).all():
         src = _normalize_rule_value(rule.source_pattern)
         target = (rule.target_value or "").strip()
-        if not src or src != current_norm or not _saved_region_value_is_valid("supplier_name", target):
+        if not src or not _supplier_rule_source_matches(current_norm, src) or not _saved_region_value_is_valid("supplier_name", target):
             continue
         old_val = row.supplier_name
         if str(old_val or "").strip() == target:
@@ -1248,6 +1248,21 @@ def _normalize_rule_value(value: str | None) -> str:
     return _re.sub(r"\s+", " ", n).strip()
 
 
+def _supplier_rule_source_matches(current_norm: str | None, source_norm: str | None) -> bool:
+    """Match supplier rules even when OCR prepends a short stray fragment."""
+    current = _normalize_rule_value(current_norm)
+    source = _normalize_rule_value(source_norm)
+    if not current or not source:
+        return False
+    if current == source:
+        return True
+    if len(source) >= 8 and f" {source} " in f" {current} ":
+        return True
+    current_tokens = {t for t in current.split() if len(t) > 1}
+    source_tokens = {t for t in source.split() if len(t) > 1}
+    return len(source_tokens) >= 2 and source_tokens <= current_tokens
+
+
 def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
     """Apply active CorrectionRules to this row.
 
@@ -1290,7 +1305,7 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             continue
         if rule.rule_type == "supplier_alias":
             current = _normalize_rule_value(row.supplier_name)
-            if current and current == src and rule.target_value:
+            if current and _supplier_rule_source_matches(current, src) and rule.target_value:
                 logger.debug(
                     "_apply_saved_rules: supplier_alias %r→%r row=%d",
                     row.supplier_name, rule.target_value, row.id,
@@ -1443,7 +1458,12 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 current_raw = str(getattr(row, field, "") or "").strip()
                 current_norm = _normalize_rule_value(current_raw)
                 rule_pattern = _normalize_rule_value(chosen_rule.source_pattern)
-                if current_norm and rule_pattern and current_norm == rule_pattern:
+                rule_matches = (
+                    _supplier_rule_source_matches(current_norm, rule_pattern)
+                    if field == "supplier_name"
+                    else current_norm == rule_pattern
+                )
+                if current_norm and rule_pattern and rule_matches:
                     val = (chosen_rule.target_value or "").strip()
                     if val and _value_is_appropriate_for_field(field, val):
                         old_val = getattr(row, field, None)
@@ -1565,6 +1585,19 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                     rule.id,
                 )
                 continue
+
+            if field == "supplier_name":
+                try:
+                    from app.routers.review import _promote_supplier_remap_text
+                    fresh_text = _promote_supplier_remap_text(
+                        _pdf_path, used_page_no or hint.page_no or row.page_no or 1, fresh_text
+                    )
+                except Exception:
+                    fresh_text = (fresh_text or "").strip()
+                fresh_text = _prefer_saved_supplier_snapshot(
+                    fresh_text, getattr(hint, "supplier_name_snapshot", None)
+                )
+            fresh_text = _normalise_saved_region_value(field, fresh_text)
 
             if not _value_is_appropriate_for_field(field, fresh_text):
                 logger.debug(
@@ -1719,6 +1752,21 @@ def _supplier_snapshot_matches_current(current: object, snapshot: object) -> boo
     if not cur_tokens or not snap_tokens:
         return False
     return len(cur_tokens & snap_tokens) / max(len(cur_tokens), 1) >= 0.67
+
+
+def _prefer_saved_supplier_snapshot(region_text: object, snapshot: object) -> str:
+    """Trim OCR noise when a saved supplier crop contains the approved snapshot."""
+    text = str(region_text or "").strip()
+    snap = str(snapshot or "").strip()
+    if not text or not snap:
+        return text
+    if _supplier_rule_source_matches(text, snap):
+        return snap
+    text_display = _supplier_name_display_norm(text)
+    snap_display = _supplier_name_display_norm(snap)
+    if snap_display and f" {snap_display} " in f" {text_display} ":
+        return snap
+    return text
 
 
 def _supplier_name_needs_saved_region_confirmation(current: object, snapshot: object | None = None) -> bool:
@@ -2125,6 +2173,8 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
                             continue
 
                 text = _normalise_saved_region_value(hint.field_name, text)
+                if hint.field_name == "supplier_name":
+                    text = _prefer_saved_supplier_snapshot(text, getattr(hint, "supplier_name_snapshot", None))
                 if not _saved_region_value_is_valid(hint.field_name, text):
                     _audit_saved_region_action(
                         db, batch, row, hint.field_name,

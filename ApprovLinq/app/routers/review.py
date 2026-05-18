@@ -1480,6 +1480,14 @@ def _current_value_better_than_region_read(field_name: str, read_text: str | Non
     ngot = _norm_for_region_fallback(got)
     if not ncur or not ngot:
         return False
+    if field_name == "supplier_name":
+        cur_tokens = {t for t in ncur.split() if len(t) > 1}
+        got_tokens = {t for t in ngot.split() if len(t) > 1}
+        if len(ncur) >= 6 and (
+            f" {ncur} " in f" {ngot} "
+            or (len(cur_tokens) >= 2 and cur_tokens <= got_tokens)
+        ):
+            return True
     if ngot in ncur and len(ncur) >= len(ngot) + 3:
         return True
     ccur = ncur.replace(" ", "")
