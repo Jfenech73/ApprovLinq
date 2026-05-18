@@ -1095,6 +1095,24 @@ def _extraction_has_minimum_invoice_fields(extracted: dict[str, Any] | None) -> 
     return amount_count >= 2
 
 
+def _fallback_extraction_is_usable(extracted: dict[str, Any] | None) -> bool:
+    """Guard against OCR text fallback becoming a low-quality full extraction."""
+    if not extracted:
+        return False
+    supplier = str(extracted.get("supplier_name") or "").strip().lower()
+    if supplier in {"", "no supplier", "unknown", "n/a", "none"}:
+        return False
+    has_identity = bool(
+        extracted.get("supplier_name")
+        and (extracted.get("invoice_number") or extracted.get("invoice_date"))
+    )
+    has_amount = any(
+        extracted.get(field) not in (None, "")
+        for field in ("net_amount", "vat_amount", "total_amount")
+    )
+    return bool(has_identity and has_amount)
+
+
 def _get_fallback_ocr_text(pdf_path: str | Path, page_index: int, native_text: str | None = None) -> tuple[str | None, str | None]:
     """Read a page with OCR when the native text layer is weak or non-invoice-like.
 
@@ -4262,6 +4280,8 @@ def process_pdf_page(
     _di_ok, _di_reason = azure_di_available()
     use_azure_di = _di_ok
     use_azure_di_read_fallback = bool(
+        getattr(settings, "azure_di_read_text_fallback", False)
+        and
         settings.use_azure_di
         and settings.azure_di_endpoint
         and settings.azure_di_key
@@ -4370,13 +4390,14 @@ def process_pdf_page(
                 account_company_name=account_company_name,
             )
             changed = False
-            for field in (
-                "supplier_name", "supplier_vat", "invoice_number", "invoice_date",
-                "description", "net_amount", "vat_amount", "total_amount", "currency",
-            ):
-                if ai_fields.get(field) in (None, "", []) and fallback_extracted.get(field) not in (None, "", []):
-                    ai_fields[field] = fallback_extracted[field]
-                    changed = True
+            if _fallback_extraction_is_usable(fallback_extracted):
+                for field in (
+                    "supplier_name", "supplier_vat", "invoice_number", "invoice_date",
+                    "description", "net_amount", "vat_amount", "total_amount", "currency",
+                ):
+                    if ai_fields.get(field) in (None, "", []) and fallback_extracted.get(field) not in (None, "", []):
+                        ai_fields[field] = fallback_extracted[field]
+                        changed = True
             if changed:
                 ai_fields["extraction_source"] = "azure_di+azure_di_read_text_fallback"
                 ai_fields["di_page_text"] = di_read_payload.get("di_page_text") or ai_fields.get("di_page_text") or ""
@@ -4396,6 +4417,20 @@ def process_pdf_page(
                 openai_api_key=None,
                 account_company_name=account_company_name,
             )
+            if not _fallback_extraction_is_usable(extracted):
+                extracted = {
+                    "extraction_source": "azure_di_read_unusable",
+                    "di_page_text": di_read_payload.get("di_page_text") or "",
+                    "_di_raw_fields": {},
+                    "_di_raw_payload": di_read_payload.get("_di_raw_payload"),
+                }
+                return _build_provider_baseline_result(
+                    extracted,
+                    method="azure_di_read_unusable",
+                    page_index=page_index,
+                    page_quality_score=page_quality_score,
+                    page_text=di_read_payload.get("di_page_text") or final_text,
+                )
             extracted["extraction_source"] = "azure_di_read"
             extracted["di_page_text"] = di_read_payload.get("di_page_text") or ""
             extracted["_di_raw_fields"] = {}
@@ -5154,7 +5189,7 @@ def _build_direct_di_page_rows(
         "totals_raw": "",
         "page_text_raw": page_text,
     }
-    if not _extraction_has_minimum_invoice_fields(row):
+    if bool(getattr(settings, "azure_di_read_text_fallback", False)) and not _extraction_has_minimum_invoice_fields(row):
         di_read_payload = azure_di_extract_read_text(
             jpeg_bytes,
             settings.azure_di_endpoint,
@@ -5168,14 +5203,15 @@ def _build_direct_di_page_rows(
                 account_company_name=account_company_name,
             )
             changed = False
-            for name in (
-                "supplier_name", "supplier_vat", "invoice_number", "invoice_date",
-                "description", "net_amount", "vat_amount", "total_amount", "currency",
-            ):
-                if row.get(name) in (None, "", []) and fallback.get(name) not in (None, "", []):
-                    row[name] = fallback.get(name)
-                    row["_direct_di_field_sources"][name] = "azure_di_read_text_fallback"
-                    changed = True
+            if _fallback_extraction_is_usable(fallback):
+                for name in (
+                    "supplier_name", "supplier_vat", "invoice_number", "invoice_date",
+                    "description", "net_amount", "vat_amount", "total_amount", "currency",
+                ):
+                    if row.get(name) in (None, "", []) and fallback.get(name) not in (None, "", []):
+                        row[name] = fallback.get(name)
+                        row["_direct_di_field_sources"][name] = "azure_di_read_text_fallback"
+                        changed = True
             row["di_page_text"] = di_read_text
             row["page_text_raw"] = di_read_text
             row["header_raw"] = fallback.get("_header_text") or _header_region_text(di_read_text, max_lines=24)

@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     azure_di_endpoint: str | None = None
     azure_di_key: str | None = None
     azure_di_page_timeout_s: float = 25.0
+    azure_di_read_text_fallback: bool = False
     extraction_page_timeout_s: float = 120.0
     extraction_consecutive_timeout_limit: int = 3
     normalize_page_orientation: bool = True
@@ -81,6 +82,7 @@ class Settings(BaseSettings):
             "azure_di_endpoint": self.azure_di_endpoint,
             "azure_di_key_present": bool(self.azure_di_key),
             "azure_di_page_timeout_s": self.azure_di_page_timeout_s,
+            "azure_di_read_text_fallback": self.azure_di_read_text_fallback,
             "extraction_page_timeout_s": self.extraction_page_timeout_s,
             "extraction_consecutive_timeout_limit": self.extraction_consecutive_timeout_limit,
             "normalize_page_orientation": self.normalize_page_orientation,
