@@ -2424,10 +2424,10 @@ def apply_saved_regions_to_row(
     ) or 0
 
     try:
-        from app.routers.batches import _apply_remap_hints, _apply_account_suggestions
+        from app.routers.batches import _apply_remap_hints, _apply_master_data_enrichment
         _apply_remap_hints(db, batch, row)
         if row.supplier_name != supplier_before:
-            _apply_account_suggestions(db, batch.tenant_id, batch.company_id, row)
+            _apply_master_data_enrichment(db, batch.tenant_id, batch.company_id, row)
     except Exception as exc:
         logger.warning("apply_saved_regions_to_row failed row_id=%s: %s", row_id, exc)
         raise HTTPException(500, f"Saved region replay failed: {exc}")

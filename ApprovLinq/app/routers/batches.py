@@ -2966,6 +2966,71 @@ def _match_supplier_fuzzy(
     return best if best_score >= 0.50 else None
 
 
+def _match_supplier_master_safe(
+    db: Session,
+    tenant_id,
+    company_id,
+    supplier_name: str | None,
+    supplier_vat: str | None = None,
+) -> tuple[TenantSupplier | None, str, float]:
+    """Return a supplier master match only when the evidence is deterministic."""
+    if not tenant_id or not company_id:
+        return None, "missing_scope", 0.0
+    suppliers = (
+        db.query(TenantSupplier)
+        .filter(
+            TenantSupplier.tenant_id == tenant_id,
+            TenantSupplier.company_id == company_id,
+            TenantSupplier.is_active.is_(True),
+        )
+        .all()
+    )
+    if not suppliers:
+        return None, "no_supplier_master", 0.0
+
+    vat_clean = re.sub(r"\s+", "", supplier_vat or "").upper()
+    if vat_clean:
+        matches = [
+            s for s in suppliers
+            if s.vat_number and re.sub(r"\s+", "", s.vat_number or "").upper() == vat_clean
+        ]
+        if len(matches) == 1:
+            return matches[0], "vat_exact", 0.99
+        if len(matches) > 1:
+            return None, "vat_ambiguous", 0.0
+
+    raw = str(supplier_name or "").strip()
+    if not raw:
+        return None, "blank_supplier_name", 0.0
+    raw_norm = _normalise_supplier(raw)
+    if not raw_norm:
+        return None, "blank_supplier_name", 0.0
+
+    exact = [s for s in suppliers if _normalise_supplier(s.supplier_name) == raw_norm]
+    if len(exact) == 1:
+        return exact[0], "name_exact", 0.96
+    if len(exact) > 1:
+        return None, "name_ambiguous", 0.0
+
+    raw_tokens = {t for t in raw_norm.split() if len(t) > 2}
+    contained: list[TenantSupplier] = []
+    for supplier in suppliers:
+        supplier_norm = _normalise_supplier(supplier.supplier_name)
+        supplier_tokens = {t for t in supplier_norm.split() if len(t) > 2}
+        if not supplier_norm or not supplier_tokens:
+            continue
+        if (
+            (supplier_norm in raw_norm or raw_norm in supplier_norm)
+            and (len(supplier_tokens) >= 2 or len(raw_tokens) >= 2 or min(len(supplier_norm), len(raw_norm)) >= 6)
+        ):
+            contained.append(supplier)
+    if len(contained) == 1:
+        return contained[0], "name_containment", 0.90
+    if len(contained) > 1:
+        return None, "name_containment_ambiguous", 0.0
+    return None, "no_safe_match", 0.0
+
+
 def _resolve_supplier_identity(
     db: Session,
     tenant_id,
@@ -3136,6 +3201,90 @@ def _get_supplier_historical_nominal(
     return None
 
 
+def _active_nominal_accounts(db: Session, tenant_id, company_id) -> list[TenantNominalAccount]:
+    if not tenant_id or not company_id:
+        return []
+    return (
+        db.query(TenantNominalAccount)
+        .filter(
+            TenantNominalAccount.tenant_id == tenant_id,
+            TenantNominalAccount.company_id == company_id,
+            TenantNominalAccount.is_active.is_(True),
+        )
+        .all()
+    )
+
+
+def _nominal_code_is_active(db: Session, tenant_id, company_id, code: object) -> bool:
+    text = str(code or "").strip()
+    if not text:
+        return False
+    return (
+        db.query(TenantNominalAccount.id)
+        .filter(
+            TenantNominalAccount.tenant_id == tenant_id,
+            TenantNominalAccount.company_id == company_id,
+            TenantNominalAccount.account_code == text,
+            TenantNominalAccount.is_active.is_(True),
+        )
+        .first()
+        is not None
+    )
+
+
+_NOMINAL_GENERIC_WORDS = {
+    "account", "accounts", "nominal", "code", "cost", "costs", "expense",
+    "expenses", "purchase", "purchases", "sales", "goods", "services",
+    "general", "other", "misc", "miscellaneous", "ap", "pl",
+}
+
+
+def _nominal_text_tokens(value: object) -> set[str]:
+    text = re.sub(r"[^a-z0-9 ]", " ", str(value or "").lower())
+    return {
+        t for t in re.sub(r"\s+", " ", text).split()
+        if len(t) >= 3 and t not in _NOMINAL_GENERIC_WORDS and not t.isdigit()
+    }
+
+
+def _match_nominal_from_description(
+    accounts: list[TenantNominalAccount],
+    description: object,
+    line_items_raw: object = None,
+) -> tuple[TenantNominalAccount | None, str, float]:
+    search = " ".join(str(x or "") for x in (description, line_items_raw)).strip()
+    if not search or not accounts:
+        return None, "no_description", 0.0
+    search_lower = search.lower()
+    search_tokens = _nominal_text_tokens(search)
+    scored: list[tuple[TenantNominalAccount, str, float]] = []
+    for account in accounts:
+        code = str(account.account_code or "").strip()
+        name_tokens = _nominal_text_tokens(account.account_name)
+        if code and re.search(rf"(?<![a-z0-9]){re.escape(code.lower())}(?![a-z0-9])", search_lower):
+            scored.append((account, "nominal_code_in_description", 0.96))
+            continue
+        if not name_tokens:
+            continue
+        overlap = name_tokens & search_tokens
+        if name_tokens <= search_tokens:
+            scored.append((account, "nominal_name_tokens_in_description", 0.90))
+        elif len(overlap) >= 2:
+            scored.append((account, "nominal_name_partial_description", 0.82))
+        elif len(overlap) == 1:
+            token = next(iter(overlap))
+            if len(token) >= 5:
+                scored.append((account, "nominal_keyword_description", 0.74))
+    if not scored:
+        return None, "no_description_match", 0.0
+    scored.sort(key=lambda item: item[2], reverse=True)
+    best = scored[0]
+    second_score = scored[1][2] if len(scored) > 1 else 0.0
+    if best[2] >= 0.82 or (best[2] >= 0.74 and best[2] - second_score >= 0.12):
+        return best
+    return None, "description_match_ambiguous", 0.0
+
+
 def _apply_account_suggestions(
     db: Session,
     tenant_id,
@@ -3299,6 +3448,164 @@ def _apply_account_suggestions(
         )
         if default_account:
             row.nominal_account_code = default_account.account_code
+
+
+def _apply_master_data_enrichment(
+    db: Session,
+    tenant_id,
+    company_id,
+    row: InvoiceRow,
+    supplier_vat: str | None = None,
+    payload: dict | None = None,
+) -> list[dict]:
+    """Apply supplier/nominal company master data with no blind defaults."""
+    candidates: list[dict] = []
+
+    def add_candidate(field_name: str, value: object, source_type: str, source_id: str, confidence: float, evidence: str, reason: str) -> None:
+        candidate = {
+            "field_name": field_name,
+            "candidate_value": _candidate_text(value),
+            "normalised_value": _candidate_text(value),
+            "source_type": source_type,
+            "source_id": source_id,
+            "confidence": confidence,
+            "evidence": evidence[:2000],
+            "reason": reason,
+            "selected": True,
+            "applied": True,
+            "conflict": False,
+        }
+        candidates.append(candidate)
+        if payload is not None:
+            payload.setdefault("_field_candidates", []).append(candidate)
+            payload[field_name] = value
+
+    matched_supplier_name = None
+    supplier, match_method, match_confidence = _match_supplier_master_safe(
+        db, tenant_id, company_id, row.supplier_name, supplier_vat=supplier_vat
+    )
+    if supplier:
+        matched_supplier_name = supplier.supplier_name
+        old_supplier = row.supplier_name
+        if row.supplier_name != supplier.supplier_name:
+            row.supplier_name = supplier.supplier_name
+            _append_method_tag(row, f"supplier_master:{match_method}")
+            add_candidate(
+                "supplier_name",
+                supplier.supplier_name,
+                "supplier_master",
+                f"supplier:{supplier.id}",
+                match_confidence,
+                f"extracted={old_supplier}; master={supplier.supplier_name}; vat={supplier_vat or ''}",
+                f"Canonical supplier selected from company supplier master using {match_method}",
+            )
+        supplier_code = supplier.supplier_account_code or supplier.posting_account
+        if supplier_code and row.supplier_posting_account != supplier_code:
+            row.supplier_posting_account = supplier_code
+            _append_method_tag(row, "supplier_master:posting_account")
+            add_candidate(
+                "supplier_posting_account",
+                supplier_code,
+                "supplier_master",
+                f"supplier:{supplier.id}",
+                match_confidence,
+                f"supplier={supplier.supplier_name}; account_code={supplier_code}",
+                "Supplier posting account applied from matched company supplier master record",
+            )
+        if (
+            not row.nominal_account_code
+            and supplier.default_nominal
+            and _nominal_code_is_active(db, tenant_id, company_id, supplier.default_nominal)
+        ):
+            row.nominal_account_code = supplier.default_nominal
+            row.classification_method = "supplier_default_nominal"
+            _append_method_tag(row, "nominal:supplier_default")
+            add_candidate(
+                "nominal_account_code",
+                supplier.default_nominal,
+                "supplier_master_default_nominal",
+                f"supplier:{supplier.id}",
+                0.95,
+                f"supplier={supplier.supplier_name}; default_nominal={supplier.default_nominal}",
+                "Default nominal applied from matched supplier master record",
+            )
+
+    if not row.nominal_account_code and matched_supplier_name:
+        hist_nominal = _get_supplier_historical_nominal(db, tenant_id, company_id, matched_supplier_name)
+        if hist_nominal and _nominal_code_is_active(db, tenant_id, company_id, hist_nominal):
+            row.nominal_account_code = hist_nominal
+            row.classification_method = "supplier_history"
+            _append_method_tag(row, "nominal:supplier_history")
+            add_candidate(
+                "nominal_account_code",
+                hist_nominal,
+                "supplier_history",
+                f"supplier:{matched_supplier_name}",
+                0.80,
+                f"supplier={matched_supplier_name}; historical_nominal={hist_nominal}",
+                "Historical nominal applied only after repeated prior use for the matched supplier",
+            )
+
+    if not row.nominal_account_code:
+        accounts = _active_nominal_accounts(db, tenant_id, company_id)
+        matched_account, desc_method, desc_confidence = _match_nominal_from_description(
+            accounts, row.description, row.line_items_raw
+        )
+        if matched_account:
+            row.nominal_account_code = matched_account.account_code
+            row.classification_method = desc_method
+            _append_method_tag(row, f"nominal:{desc_method}")
+            add_candidate(
+                "nominal_account_code",
+                matched_account.account_code,
+                "nominal_description_match",
+                f"nominal:{matched_account.id}",
+                desc_confidence,
+                f"description={row.description or ''}; line_items={row.line_items_raw or ''}; account={matched_account.account_name}",
+                "Nominal applied from company nominal master because the description matched the account name/code",
+            )
+        elif _CLASSIFY_AVAILABLE and accounts:
+            accts_dicts = [
+                {
+                    "account_code": a.account_code,
+                    "account_name": a.account_name,
+                    "is_default": False,
+                }
+                for a in accounts
+            ]
+            try:
+                cl = _classify_line(
+                    description=row.description,
+                    line_items_raw=row.line_items_raw,
+                    supplier_norm=None,
+                    nominal_accounts=accts_dicts,
+                    historical_hook=None,
+                    openai_api_key=None,
+                )
+                if (
+                    cl.nominal_account_code
+                    and cl.classification_method != "default"
+                    and cl.classification_confidence >= 0.65
+                    and _nominal_code_is_active(db, tenant_id, company_id, cl.nominal_account_code)
+                ):
+                    row.nominal_account_code = cl.nominal_account_code
+                    row.classification_method = cl.classification_method
+                    _append_method_tag(row, f"nominal:{cl.classification_method}")
+                    add_candidate(
+                        "nominal_account_code",
+                        cl.nominal_account_code,
+                        f"nominal_{cl.classification_method}",
+                        f"nominal:{cl.nominal_account_code}",
+                        cl.classification_confidence,
+                        cl.classification_reason,
+                        "Nominal applied from deterministic classifier using existing company nominal master data",
+                    )
+            except Exception as exc:
+                logger.warning("master-data nominal classifier failed: %s", exc)
+
+    if not row.nominal_account_code and _active_nominal_accounts(db, tenant_id, company_id):
+        _append_review_marker(row, "nominal_account_code", "nominal_mapping_uncertain")
+    return candidates
 
 
 # Brand taxonomy: maps known brand/product keywords to accounting category hints.
@@ -3930,13 +4237,6 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 payload=r,
                                 baseline_mode=provider_baseline_mode,
                             )
-                            _persist_selected_field_candidates(
-                                db,
-                                batch=batch,
-                                invoice_file=invoice_file,
-                                row=row,
-                                payload=r,
-                            )
                             if not provider_baseline_mode:
                                 with perf_ctx.timed("supplier_resolver"):
                                     _resolve_supplier_identity(
@@ -3945,9 +4245,10 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                         batch=batch,
                                     )
                                 with perf_ctx.timed("supplier_history_lookup"):
-                                    _apply_account_suggestions(
+                                    _apply_master_data_enrichment(
                                         db, tenant_id, batch.company_id, row,
                                         supplier_vat=supplier_vat,
+                                        payload=r,
                                     )
                                 _supplier_before_remap = row.supplier_name
                                 with perf_ctx.timed("saved_region_replay"):
@@ -3957,9 +4258,10 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 # so posting account / supplier match data follow the corrected name.
                                 if row.supplier_name != _supplier_before_remap:
                                     with perf_ctx.timed("supplier_history_lookup"):
-                                        _apply_account_suggestions(
+                                        _apply_master_data_enrichment(
                                             db, tenant_id, batch.company_id, row,
                                             supplier_vat=supplier_vat,
+                                            payload=r,
                                         )
                                 with perf_ctx.timed("rule_application"):
                                     _apply_saved_rules(db, batch, row)
@@ -3969,7 +4271,21 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 with perf_ctx.timed("arbitration"):
                                     arbitrate_invoice_row(db, batch, row, r, context={"scan_mode": batch.scan_mode or "summary", "perf_ctx": perf_ctx})
                             else:
+                                with perf_ctx.timed("supplier_history_lookup"):
+                                    _apply_master_data_enrichment(
+                                        db, tenant_id, batch.company_id, row,
+                                        supplier_vat=supplier_vat,
+                                        payload=r,
+                                    )
                                 _append_method_tag(row, "provider_baseline_mode")
+
+                            _persist_selected_field_candidates(
+                                db,
+                                batch=batch,
+                                invoice_file=invoice_file,
+                                row=row,
+                                payload=r,
+                            )
 
                             _method_text = row.method_used or ""
                             if "rule:" in _method_text or "arbitrated:correction_rule" in _method_text or "arbitrated:admin_global_rule" in _method_text:

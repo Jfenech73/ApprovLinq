@@ -85,6 +85,7 @@ def apply_field_changes(
             continue
 
         force_added_flag = False
+        matched_supplier = None
         if field == "supplier_name" and new_val:
             # Enforce supplier master-list membership only when a master list actually exists
             # for this tenant/company scope. If no supplier master data has been configured yet,
@@ -115,6 +116,7 @@ def apply_field_changes(
                         "company_id and posting_account. Add the supplier via the "
                         "master-data management page first."
                     )
+                matched_supplier = exists
         if field == "nominal_account_code" and new_val:
             # Same principle as suppliers: enforce against master data only when a nominal
             # list exists for this tenant/company scope.
@@ -198,6 +200,27 @@ def apply_field_changes(
         )
         db.add(a)
         audits.append(a)
+
+        if field == "supplier_name" and matched_supplier is not None:
+            supplier_code = matched_supplier.supplier_account_code or matched_supplier.posting_account
+            old_code = effective_value(row, correction, "supplier_posting_account")
+            if supplier_code and str(old_code or "") != str(supplier_code):
+                setattr(correction, "supplier_posting_account", supplier_code)
+                code_audit = InvoiceRowFieldAudit(
+                    batch_id=batch.id,
+                    row_id=row.id,
+                    field_name="supplier_posting_account",
+                    old_value=None if old_code is None else str(old_code),
+                    new_value=str(supplier_code),
+                    action="master_data_apply",
+                    note="Applied supplier account code from matched company supplier master after supplier name correction.",
+                    rule_created=False,
+                    force_added=False,
+                    user_id=user.id,
+                    username=getattr(user, "email", None) or getattr(user, "full_name", None),
+                )
+                db.add(code_audit)
+                audits.append(code_audit)
 
     correction.updated_at = datetime.utcnow()
     correction.updated_by = user.id
