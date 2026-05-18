@@ -3720,11 +3720,33 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         total_target_pages = 0
         for invoice_file in files:
             try:
-                page_count = get_pdf_page_count(materialize_invoice_file(invoice_file))
+                file_path = materialize_invoice_file(invoice_file)
+                try:
+                    from app.services.orientation import normalise_pdf_orientation
+                    oriented_path, rotations = normalise_pdf_orientation(file_path)
+                    if rotations and oriented_path != file_path:
+                        oriented_bytes = oriented_path.read_bytes()
+                        invoice_file.file_path = str(oriented_path)
+                        invoice_file.stored_filename = oriented_path.name
+                        invoice_file.file_bytes = oriented_bytes
+                        invoice_file.file_size_bytes = len(oriented_bytes)
+                        invoice_file.storage_backend = "database+local"
+                        file_path = oriented_path
+                        logger.info(
+                            "_process_batch_job: normalised orientation for file_id=%s rotations=%s",
+                            invoice_file.id, rotations,
+                        )
+                except Exception as orient_exc:
+                    logger.warning(
+                        "_process_batch_job: orientation normalisation skipped for file_id=%s: %s",
+                        invoice_file.id, orient_exc,
+                    )
+                page_count = get_pdf_page_count(file_path)
             except Exception:
                 page_count = 0
             invoice_file.page_count = page_count
             total_target_pages += page_count
+        db.commit()
 
         batch.status = "processing"
         batch.page_count = 0

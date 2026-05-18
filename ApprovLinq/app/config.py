@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     azure_di_page_timeout_s: float = 25.0
     extraction_page_timeout_s: float = 120.0
     extraction_consecutive_timeout_limit: int = 3
+    normalize_page_orientation: bool = True
 
     # Temporary extraction-baseline mode:
     # DI first, immediate fallback, and no downstream rule/arbitration mutation.
@@ -82,6 +83,7 @@ class Settings(BaseSettings):
             "azure_di_page_timeout_s": self.azure_di_page_timeout_s,
             "extraction_page_timeout_s": self.extraction_page_timeout_s,
             "extraction_consecutive_timeout_limit": self.extraction_consecutive_timeout_limit,
+            "normalize_page_orientation": self.normalize_page_orientation,
             "scan_provider_baseline_mode": self.scan_provider_baseline_mode,
             "upload_dir": self.upload_dir,
             "export_dir": self.export_dir,
