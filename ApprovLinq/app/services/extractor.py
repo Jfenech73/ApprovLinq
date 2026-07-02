@@ -2180,7 +2180,6 @@ def _apply_direct_di_content_blank_fallbacks(
         return
 
     candidates: list[dict[str, Any]] = list(row.get("_field_candidates") or [])
-    filled_critical: list[str] = list(row.get("_field_fallback_critical_fields") or [])
     field_sources = dict(row.get("_direct_di_field_sources") or {})
     changed = False
 
@@ -2200,8 +2199,6 @@ def _apply_direct_di_content_blank_fallbacks(
         row[field_name] = value
         field_sources[field_name] = "azure_di_content_text_fallback"
         changed = True
-        if field_name in {"supplier_name", "invoice_number", "invoice_date", "total_amount"}:
-            filled_critical.append(field_name)
         _append_field_candidate(
             candidates,
             field_name=field_name,
@@ -2217,7 +2214,6 @@ def _apply_direct_di_content_blank_fallbacks(
 
     if changed:
         row["_field_candidates"] = candidates
-        row["_field_fallback_critical_fields"] = sorted(set(filled_critical))
         row["_direct_di_field_sources"] = field_sources
         row["_provider_status"] = "di_success_field_fallback"
         row["_fallback_used"] = True
