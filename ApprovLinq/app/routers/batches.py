@@ -4,6 +4,7 @@ import logging
 import re
 import urllib.parse
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from threading import Lock
 from uuid import UUID, uuid4
@@ -1037,6 +1038,23 @@ def _append_review_marker(row: InvoiceRow, field_name: str, reason: str) -> None
     row.review_reasons = "|".join(reasons)[:500] if reasons else row.review_reasons
 
 
+def _clear_review_marker(row: InvoiceRow, field_name: str, reason: str) -> None:
+    fields = [f.strip() for f in re.split(r"[|,]", row.review_fields or "") if f.strip()]
+    reasons = [r.strip() for r in re.split(r"[|]", row.review_reasons or "") if r.strip()]
+    if reason in reasons:
+        reasons = [r for r in reasons if r != reason]
+    if field_name == "nominal_account_code":
+        has_nominal_reason = any(("nominal" in r or "classification" in r) for r in reasons)
+        if not has_nominal_reason:
+            fields = [f for f in fields if f != field_name]
+    elif field_name and field_name in fields and not reasons:
+        fields = [f for f in fields if f != field_name]
+    row.review_reasons = "|".join(reasons)[:500] if reasons else None
+    row.review_fields = "|".join(fields)[:500] if fields else None
+    if not reasons:
+        row.review_required = False
+
+
 def _parse_region_money(value: object) -> float | None:
     """Conservative money parser for validating saved-region amount reads."""
     text = str(value or "").strip()
@@ -1261,7 +1279,17 @@ def _supplier_rule_source_matches(current_norm: str | None, source_norm: str | N
         return True
     current_tokens = {t for t in current.split() if len(t) > 1}
     source_tokens = {t for t in source.split() if len(t) > 1}
-    return len(source_tokens) >= 2 and source_tokens <= current_tokens
+    if len(source_tokens) >= 2 and source_tokens <= current_tokens:
+        return True
+    meaningful_current = {t for t in current_tokens if len(t) >= 3}
+    meaningful_source = {t for t in source_tokens if len(t) >= 3}
+    overlap = meaningful_current & meaningful_source
+    if len(overlap) >= 2:
+        similarity = SequenceMatcher(None, current, source).ratio()
+        coverage = len(overlap) / max(min(len(meaningful_current), len(meaningful_source)), 1)
+        if similarity >= 0.78 and coverage >= 0.50:
+            return True
+    return False
 
 
 def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
@@ -3262,6 +3290,72 @@ _NOMINAL_GENERIC_WORDS = {
     "general", "other", "misc", "miscellaneous", "ap", "pl",
 }
 
+_NOMINAL_HINT_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "Food": (
+        "food", "foods", "catering", "kitchen", "grocery", "groceries",
+        "produce", "fresh produce", "bakery", "meat", "fish", "dairy",
+    ),
+    "Beverages": (
+        "beverage", "beverages", "drink", "drinks", "soft drink",
+        "soft drinks", "water", "juice", "energy drink",
+    ),
+    "Alcohol": (
+        "alcohol", "beer", "wine", "spirits", "liquor", "beers", "wines",
+    ),
+    "Tobacco": (
+        "tobacco", "cigarette", "cigarettes", "smoking", "vape", "vaping",
+    ),
+    "Cleaning": (
+        "cleaning", "detergent", "detergents", "hygiene", "sanitary",
+        "chemicals", "chemical", "dishwash", "soap",
+    ),
+    "Packaging": (
+        "packaging", "disposable", "disposables", "paper", "plastic",
+        "bags", "containers", "cutlery", "cups", "napkins",
+    ),
+}
+
+_NOMINAL_CONTEXT_TERMS: dict[str, tuple[str, ...]] = {
+    "Tobacco": (
+        "rothmans", "pall mall", "royals", "dunhill", "marlboro",
+        "chesterfield", "lucky strike", "camel cigarette", "cigarette",
+        "cigarettes", "tobacco", "vape", "hqd", "elfbar",
+    ),
+    "Alcohol": (
+        "heineken", "carlsberg", "amstel", "corona", "guinness", "peroni",
+        "cisk", "hopleaf", "beer", "lager", "wine", "prosecco", "vodka",
+        "whisky", "whiskey", "spirits", "campari", "aperol", "baileys",
+    ),
+    "Beverages": (
+        "red bull", "redbull", "coca cola", "coke", "pepsi", "fanta",
+        "sprite", "ribena", "monster", "lucozade", "7up", "kinnie",
+        "water", "juice", "soft drink", "energy drink", "smoothie",
+    ),
+    "Cleaning": (
+        "detergent", "dishwash", "bleach", "cleaner", "cleaning",
+        "domestos", "dettol", "flash", "soap", "sanitiser", "sanitizer",
+        "degreaser", "disinfectant", "rinse aid",
+    ),
+    "Packaging": (
+        "forks", "spoons", "knives", "cutlery", "napkin", "napkins",
+        "bags", "bag", "bowl", "bowls", "container", "containers",
+        "cup", "cups", "lid", "lids", "foil", "cling film", "straws",
+        "disposable", "kraft", "paper roll",
+    ),
+    "Food": (
+        "lettuce", "tomato", "tomatoes", "cucumber", "onion", "onions",
+        "capsicum", "rucola", "lemon", "lemons", "pears", "fruit",
+        "vegetables", "veg", "produce", "cheese", "milk", "butter",
+        "cream", "yoghurt", "yogurt", "poultry", "chicken", "meat",
+        "beef", "pork", "fish", "seafood", "tuna", "salmon", "bread",
+        "baguette", "ftira", "roll", "rolls", "rice", "pasta",
+        "sweetcorn", "beans", "peas", "oil", "olive oil", "sugar",
+        "tea bags", "coffee", "nescafe", "mayonnaise", "mayo",
+        "bigilla", "kunserva", "burger", "slices", "cookie", "chocolate",
+        "nesquik", "cereal", "flour", "frozen", "salad",
+    ),
+}
+
 
 def _nominal_text_tokens(value: object) -> set[str]:
     text = re.sub(r"[^a-z0-9 ]", " ", str(value or "").lower())
@@ -3273,6 +3367,51 @@ def _nominal_text_tokens(value: object) -> set[str]:
             token = token[:-1]
         tokens.add(token)
     return tokens
+
+
+def _term_in_text(term: str, text_lower: str) -> bool:
+    term_lower = re.sub(r"\s+", " ", str(term or "").strip().lower())
+    if not term_lower:
+        return False
+    if " " in term_lower:
+        return term_lower in text_lower
+    return re.search(rf"(?<![a-z0-9]){re.escape(term_lower)}(?![a-z0-9])", text_lower) is not None
+
+
+def _nominal_context_hints(text: object) -> list[tuple[str, float, list[str]]]:
+    """Infer nominal category hints from invoice line context.
+
+    Returns sorted tuples of (hint, confidence, matched_terms).  The confidence
+    is conservative and relative: if two categories are close, no auto-selection
+    should happen.
+    """
+    text_lower = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    if not text_lower:
+        return []
+    scored: list[tuple[str, float, list[str]]] = []
+    for hint, terms in _NOMINAL_CONTEXT_TERMS.items():
+        matched = [term for term in terms if _term_in_text(term, text_lower)]
+        if not matched:
+            continue
+        # Multi-word product hits are stronger than isolated generic words.
+        strength = sum(2 if " " in term else 1 for term in matched)
+        confidence = min(0.92, 0.70 + (0.04 * strength))
+        scored.append((hint, confidence, matched[:12]))
+    scored.sort(key=lambda item: (item[1], len(item[2])), reverse=True)
+    return scored
+
+
+def _select_clear_nominal_context_hint(text: object) -> tuple[str | None, float, list[str], str]:
+    hints = _nominal_context_hints(text)
+    if not hints:
+        return None, 0.0, [], "no_context_hint"
+    best_hint, best_conf, best_terms = hints[0]
+    if len(hints) == 1:
+        return best_hint, best_conf, best_terms, "context_hint_clear"
+    second_hint, second_conf, second_terms = hints[1]
+    if best_conf >= second_conf + 0.08 or len(best_terms) >= len(second_terms) + 2:
+        return best_hint, best_conf, best_terms, "context_hint_clear"
+    return None, 0.0, best_terms + second_terms, f"context_hint_ambiguous:{best_hint}:{second_hint}"
 
 
 def _match_nominal_from_description(
@@ -3327,7 +3466,8 @@ def _match_nominal_from_hint(
     if not hint_text or not accounts:
         return None, "no_hint", 0.0
     hint_lower = hint_text.lower()
-    hint_tokens = _nominal_text_tokens(hint_lower)
+    alias_values = (hint_text,) + _NOMINAL_HINT_SYNONYMS.get(hint_text, ())
+    alias_tokens = set().union(*(_nominal_text_tokens(alias) for alias in alias_values))
     scored: list[tuple[TenantNominalAccount, str, float]] = []
     for account in accounts:
         code = str(account.account_code or "").strip().lower()
@@ -3335,18 +3475,31 @@ def _match_nominal_from_hint(
         name_tokens = _nominal_text_tokens(name)
         if code and hint_lower == code:
             scored.append((account, "nominal_hint_code_exact", 0.96))
-        elif hint_lower and hint_lower in name:
-            scored.append((account, "nominal_hint_name_contains", 0.92))
-        elif hint_tokens and hint_tokens <= name_tokens:
-            scored.append((account, "nominal_hint_tokens", 0.88))
-        elif hint_tokens and (hint_tokens & name_tokens):
-            scored.append((account, "nominal_hint_partial", 0.76))
+            continue
+        best_alias_score = 0.0
+        best_alias_method = ""
+        for alias in alias_values:
+            alias_lower = str(alias or "").strip().lower()
+            alias_tok = _nominal_text_tokens(alias_lower)
+            if alias_lower and alias_lower in name:
+                best_alias_score = max(best_alias_score, 0.92)
+                best_alias_method = "nominal_hint_name_contains"
+            elif alias_tok and alias_tok <= name_tokens:
+                best_alias_score = max(best_alias_score, 0.88)
+                best_alias_method = "nominal_hint_tokens"
+        overlap = alias_tokens & name_tokens
+        if best_alias_score:
+            scored.append((account, best_alias_method, best_alias_score))
+        elif overlap:
+            scored.append((account, "nominal_hint_partial", 0.76 + min(len(overlap), 2) * 0.03))
     if not scored:
         return None, "no_hint_match", 0.0
     scored.sort(key=lambda item: item[2], reverse=True)
     best = scored[0]
     second_score = scored[1][2] if len(scored) > 1 else 0.0
-    if best[2] >= 0.88 or (best[2] >= 0.76 and best[2] - second_score >= 0.12):
+    if (best[2] >= 0.88 and (second_score <= 0 or best[2] - second_score >= 0.04)) or (
+        best[2] >= 0.76 and best[2] - second_score >= 0.12
+    ):
         return best
     return None, "hint_match_ambiguous", 0.0
 
@@ -3607,8 +3760,12 @@ def _apply_master_data_enrichment(
                 _append_method_tag(row, "nominal:company_scope_empty")
         search_text = " ".join(filter(None, [row.description, row.line_items_raw]))
         category_hint = _category_hint_from_text(search_text)
-        if accounts and category_hint:
-            hinted_account, hint_method, hint_confidence = _match_nominal_from_hint(accounts, category_hint)
+        context_hint, context_confidence, context_terms, context_reason = _select_clear_nominal_context_hint(search_text)
+        chosen_hint = category_hint or context_hint
+        chosen_confidence = 0.90 if category_hint else context_confidence
+        chosen_terms = [category_hint] if category_hint else context_terms
+        if accounts and chosen_hint:
+            hinted_account, hint_method, hint_confidence = _match_nominal_from_hint(accounts, chosen_hint)
             if hinted_account:
                 row.nominal_account_code = hinted_account.account_code
                 row.classification_method = hint_method
@@ -3616,12 +3773,18 @@ def _apply_master_data_enrichment(
                 add_candidate(
                     "nominal_account_code",
                     hinted_account.account_code,
-                    "nominal_category_hint",
+                    "nominal_category_hint" if category_hint else "nominal_context_hint",
                     f"nominal:{hinted_account.id}",
-                    hint_confidence,
-                    f"category_hint={category_hint}; description={row.description or ''}; account={hinted_account.account_name}",
-                    "Nominal applied from product/category hint matched against company nominal master data",
+                    max(hint_confidence, chosen_confidence),
+                    (
+                        f"hint={chosen_hint}; terms={', '.join(chosen_terms[:12])}; "
+                        f"description={row.description or ''}; line_items={row.line_items_raw or ''}; "
+                        f"account={hinted_account.account_name}"
+                    ),
+                    "Nominal applied from invoice line context matched against company nominal master data",
                 )
+        elif accounts and context_reason.startswith("context_hint_ambiguous"):
+            _append_method_tag(row, "nominal:context_ambiguous")
 
     if not row.nominal_account_code:
         accounts = _active_nominal_accounts(db, tenant_id, company_id)
@@ -3683,7 +3846,26 @@ def _apply_master_data_enrichment(
             except Exception as exc:
                 logger.warning("master-data nominal classifier failed: %s", exc)
 
-    if not row.nominal_account_code and _active_nominal_accounts(db, tenant_id, company_id):
+    if not row.nominal_account_code:
+        accounts = _active_nominal_accounts(db, tenant_id, company_id)
+        default_account = next((a for a in accounts if getattr(a, "is_default", False)), None)
+        if default_account:
+            row.nominal_account_code = default_account.account_code
+            row.classification_method = "nominal_default_catch_all"
+            _append_method_tag(row, "nominal:default_catch_all")
+            add_candidate(
+                "nominal_account_code",
+                default_account.account_code,
+                "nominal_default_catch_all",
+                f"nominal:{default_account.id}",
+                0.40,
+                f"account={default_account.account_name}; is_default=true",
+                "No specific nominal match was found; applied the company nominal marked as default catch-all.",
+            )
+
+    if row.nominal_account_code:
+        _clear_review_marker(row, "nominal_account_code", "nominal_mapping_uncertain")
+    elif _active_nominal_accounts(db, tenant_id, company_id):
         _append_review_marker(row, "nominal_account_code", "nominal_mapping_uncertain")
     return candidates
 
