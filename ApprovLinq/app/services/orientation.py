@@ -56,10 +56,10 @@ def _detect_with_azure_di(jpeg_bytes: bytes, page_no: int) -> int | None:
             body=jpeg_bytes,
             content_type="image/jpeg",
             polling_interval=1,
-            connection_timeout=min(float(getattr(settings, "azure_di_page_timeout_s", 25)), 20.0),
-            read_timeout=min(float(getattr(settings, "azure_di_page_timeout_s", 25)), 20.0),
+            connection_timeout=min(float(getattr(settings, "azure_di_orientation_timeout_s", 8)), 8.0),
+            read_timeout=min(float(getattr(settings, "azure_di_orientation_timeout_s", 8)), 8.0),
         )
-        timeout_s = min(float(getattr(settings, "azure_di_page_timeout_s", 25)), 25.0)
+        timeout_s = min(float(getattr(settings, "azure_di_orientation_timeout_s", 8)), 8.0)
         pool = _cf.ThreadPoolExecutor(max_workers=1)
         fut = pool.submit(poller.result)
         try:
@@ -157,10 +157,10 @@ def _detect_with_ocr_space(jpeg_bytes: bytes, page_no: int) -> int | None:
 
 def _detect_page_rotation(jpeg_bytes: bytes, page_no: int) -> int:
     """Return clockwise rotation needed to make the rendered page upright."""
-    angle = _detect_with_azure_di(jpeg_bytes, page_no)
+    angle = _detect_with_tesseract(jpeg_bytes)
     if angle is not None:
         return angle
-    angle = _detect_with_tesseract(jpeg_bytes)
+    angle = _detect_with_azure_di(jpeg_bytes, page_no)
     if angle is not None:
         return angle
     angle = _detect_with_ocr_space(jpeg_bytes, page_no)

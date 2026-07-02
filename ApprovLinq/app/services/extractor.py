@@ -3454,7 +3454,7 @@ def azure_di_extract_invoice(
         # poller.result() can block indefinitely if Azure DI hangs.  We run
         # it in a daemon thread so we can enforce a wall-clock timeout and
         # fall back cleanly rather than leaving the batch stuck at 0 %.
-        # Default: 25 s per page (configurable via AZURE_DI_PAGE_TIMEOUT_S).
+        # Default: 45 s per page (configurable via AZURE_DI_PAGE_TIMEOUT_S).
         import concurrent.futures as _cf
         _page_timeout = float(getattr(settings, "azure_di_page_timeout_s", 45))
         _pool = _cf.ThreadPoolExecutor(max_workers=1)
@@ -3463,11 +3463,10 @@ def azure_di_extract_invoice(
             result = _future.result(timeout=_page_timeout)
         except _cf.TimeoutError:
                 logger.warning(
-                    "Azure DI page timeout after %.0fs — opening circuit breaker, "
-                    "falling back to OpenAI vision for remaining pages",
+                    "Azure DI page timeout after %.0fs; "
+                    "using fallback for this page; DI remains enabled for later pages",
                     _page_timeout,
                 )
-                _azure_di_error = f"Page timeout after {_page_timeout:.0f}s"
                 _future.cancel()
                 _pool.shutdown(wait=False, cancel_futures=True)
                 return None
@@ -4228,6 +4227,7 @@ def process_pdf_page(
     page_index: int,
     openai_api_key: str | None = None,
     account_company_name: str | None = None,
+    skip_azure_di: bool = False,
 ) -> dict[str, Any]:
     """Extract invoice data from a single PDF page.
 
@@ -4278,9 +4278,10 @@ def process_pdf_page(
     jpeg_bytes = None
 
     _di_ok, _di_reason = azure_di_available()
-    use_azure_di = _di_ok
+    use_azure_di = _di_ok and not skip_azure_di
     use_azure_di_read_fallback = bool(
         getattr(settings, "azure_di_read_text_fallback", False)
+        and not skip_azure_di
         and
         settings.use_azure_di
         and settings.azure_di_endpoint
@@ -5255,12 +5256,16 @@ def process_pdf_page_rows(
         )
         if direct_rows is not None:
             return direct_rows
+        skip_azure_di_retry = True
+    else:
+        skip_azure_di_retry = False
 
     page_result = process_pdf_page(
         pdf_path,
         page_index=page_index,
         openai_api_key=openai_api_key,
         account_company_name=account_company_name,
+        skip_azure_di=skip_azure_di_retry,
     )
     method_text = str(page_result.get("method_used") or "")
     should_mark_di_failed = (
