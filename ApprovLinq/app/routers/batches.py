@@ -3202,8 +3202,25 @@ def _get_supplier_historical_nominal(
 
 
 def _active_nominal_accounts(db: Session, tenant_id, company_id) -> list[TenantNominalAccount]:
-    if not tenant_id or not company_id:
+    if not tenant_id:
         return []
+    base = db.query(TenantNominalAccount).filter(
+        TenantNominalAccount.tenant_id == tenant_id,
+        TenantNominalAccount.is_active.is_(True),
+    )
+    if company_id:
+        scoped = base.filter(TenantNominalAccount.company_id == company_id).all()
+        if scoped:
+            return scoped
+        # Legacy/import safety: older builds could leave company_id blank. Only
+        # use these rows when the selected company has no scoped nominal table.
+        return base.filter(TenantNominalAccount.company_id.is_(None)).all()
+    return base.all()
+
+
+def _nominal_scope_has_company_rows(db: Session, tenant_id, company_id) -> bool:
+    if not tenant_id or not company_id:
+        return False
     return (
         db.query(TenantNominalAccount)
         .filter(
@@ -3211,7 +3228,8 @@ def _active_nominal_accounts(db: Session, tenant_id, company_id) -> list[TenantN
             TenantNominalAccount.company_id == company_id,
             TenantNominalAccount.is_active.is_(True),
         )
-        .all()
+        .first()
+        is not None
     )
 
 
@@ -3219,17 +3237,19 @@ def _nominal_code_is_active(db: Session, tenant_id, company_id, code: object) ->
     text = str(code or "").strip()
     if not text:
         return False
-    return (
-        db.query(TenantNominalAccount.id)
-        .filter(
-            TenantNominalAccount.tenant_id == tenant_id,
-            TenantNominalAccount.company_id == company_id,
-            TenantNominalAccount.account_code == text,
-            TenantNominalAccount.is_active.is_(True),
-        )
-        .first()
-        is not None
+    base = db.query(TenantNominalAccount.id).filter(
+        TenantNominalAccount.tenant_id == tenant_id,
+        TenantNominalAccount.account_code == text,
+        TenantNominalAccount.is_active.is_(True),
     )
+    if company_id:
+        scoped = base.filter(TenantNominalAccount.company_id == company_id).first()
+        if scoped is not None:
+            return True
+        if not _nominal_scope_has_company_rows(db, tenant_id, company_id):
+            return base.filter(TenantNominalAccount.company_id.is_(None)).first() is not None
+        return False
+    return base.first() is not None
 
 
 _NOMINAL_GENERIC_WORDS = {
@@ -3241,10 +3261,14 @@ _NOMINAL_GENERIC_WORDS = {
 
 def _nominal_text_tokens(value: object) -> set[str]:
     text = re.sub(r"[^a-z0-9 ]", " ", str(value or "").lower())
-    return {
-        t for t in re.sub(r"\s+", " ", text).split()
-        if len(t) >= 3 and t not in _NOMINAL_GENERIC_WORDS and not t.isdigit()
-    }
+    tokens: set[str] = set()
+    for token in re.sub(r"\s+", " ", text).split():
+        if len(token) < 3 or token in _NOMINAL_GENERIC_WORDS or token.isdigit():
+            continue
+        if len(token) > 4 and token.endswith("s"):
+            token = token[:-1]
+        tokens.add(token)
+    return tokens
 
 
 def _match_nominal_from_description(
@@ -3345,15 +3369,7 @@ def _apply_account_suggestions(
             )
 
     if not row.nominal_account_code:
-        accounts = (
-            db.query(TenantNominalAccount)
-            .filter(
-                TenantNominalAccount.tenant_id == tenant_id,
-                TenantNominalAccount.company_id == company_id,
-                TenantNominalAccount.is_active.is_(True),
-            )
-            .all()
-        )
+        accounts = _active_nominal_accounts(db, tenant_id, company_id)
         accts_dicts = [
             {
                 "account_code": a.account_code,
@@ -3436,16 +3452,7 @@ def _apply_account_suggestions(
 
     # Final safety net: direct query for is_default if still nothing
     if not row.nominal_account_code:
-        default_account = (
-            db.query(TenantNominalAccount)
-            .filter(
-                TenantNominalAccount.tenant_id == tenant_id,
-                TenantNominalAccount.company_id == company_id,
-                TenantNominalAccount.is_active.is_(True),
-                TenantNominalAccount.is_default.is_(True),
-            )
-            .first()
-        )
+        default_account = next((a for a in _active_nominal_accounts(db, tenant_id, company_id) if a.is_default), None)
         if default_account:
             row.nominal_account_code = default_account.account_code
 
@@ -3579,7 +3586,10 @@ def _apply_master_data_enrichment(
                     line_items_raw=row.line_items_raw,
                     supplier_norm=None,
                     nominal_accounts=accts_dicts,
-                    historical_hook=None,
+                    historical_hook=(
+                        (lambda: _get_supplier_historical_nominal(db, tenant_id, company_id, matched_supplier_name))
+                        if matched_supplier_name else None
+                    ),
                     openai_api_key=None,
                 )
                 if (

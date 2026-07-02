@@ -82,14 +82,43 @@ def _best_nominal(
     hint: str,
     nominal_accounts: list[dict],
 ) -> tuple[str | None, str | None]:
-    """Return (code, name) of the first nominal whose name contains hint."""
+    """Return the best nominal whose name/code aligns to a category hint."""
     if not hint:
         return None, None
-    hint_lower = hint.lower()
+    hint_lower = hint.lower().strip()
+    hint_tokens = _nominal_tokens(hint_lower)
+    best: tuple[int, dict] | None = None
     for acct in nominal_accounts:
-        if hint_lower in (acct.get("account_name") or "").lower():
-            return acct.get("account_code"), acct.get("account_name")
+        name = (acct.get("account_name") or "").lower()
+        code = (acct.get("account_code") or "").lower()
+        name_tokens = _nominal_tokens(name)
+        score = 0
+        if hint_lower and hint_lower in name:
+            score = 100
+        elif hint_lower and code and hint_lower == code:
+            score = 100
+        elif hint_tokens and hint_tokens <= name_tokens:
+            score = 92
+        elif hint_tokens and (hint_tokens & name_tokens):
+            score = 78
+        if score and (best is None or score > best[0]):
+            best = (score, acct)
+    if best:
+        acct = best[1]
+        return acct.get("account_code"), acct.get("account_name")
     return None, None
+
+
+def _nominal_tokens(value: str | None) -> set[str]:
+    text = re.sub(r"[^a-z0-9 ]", " ", str(value or "").lower())
+    tokens: set[str] = set()
+    for token in re.sub(r"\s+", " ", text).split():
+        if len(token) < 3 or token in {"and", "the", "for", "purchase", "purchases", "expense", "expenses", "nominal", "account", "code"}:
+            continue
+        if len(token) > 4 and token.endswith("s"):
+            token = token[:-1]
+        tokens.add(token)
+    return tokens
 
 
 def _find_taxonomy_match(
@@ -125,10 +154,16 @@ def _keyword_match(
 ) -> tuple[str | None, str | None]:
     """Check if any nominal account name/code appears in the description text."""
     text_lower = text.lower()
+    text_tokens = _nominal_tokens(text_lower)
     for acct in nominal_accounts:
         name = (acct.get("account_name") or "").lower()
         code = (acct.get("account_code") or "").lower()
-        if (name and name in text_lower) or (code and code in text_lower):
+        name_tokens = _nominal_tokens(name)
+        if (
+            (name and name in text_lower)
+            or (code and re.search(rf"(?<![a-z0-9]){re.escape(code)}(?![a-z0-9])", text_lower))
+            or (name_tokens and name_tokens <= text_tokens)
+        ):
             return acct.get("account_code"), acct.get("account_name")
     return None, None
 
