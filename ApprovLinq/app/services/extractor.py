@@ -1993,6 +1993,35 @@ def _collapse_ws(value: str | None) -> str | None:
     return collapsed or None
 
 
+def _clean_di_supplier_name(value: str | None) -> str | None:
+    """Conservatively clean DI supplier names without supplier-specific rules."""
+    text = _collapse_ws(value)
+    if not text:
+        return None
+    # Strip obvious logo/acronym crumbs before a real company-looking token.
+    # Do not strip Titlecase first words such as "Cafe Roma".
+    text = re.sub(r"^(?:[a-z]{2,5}|[A-Z]{2,5}|[0-9]{1,3}|[&+])\s+(?=[A-Z][A-Za-z]{3,}\b)", "", text).strip()
+    text = re.sub(r"^[^A-Za-z]+(?=[A-Za-z])", "", text).strip()
+    text = re.sub(
+        r"^([A-Za-z][A-Za-z&.'-]*(?:\s+[A-Za-z][A-Za-z&.'-]*){0,2})\s+\1\b",
+        r"\1",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"\b([A-Za-z][A-Za-z&.'-]*(?:\s+[A-Za-z][A-Za-z&.'-]*){1,2})\s+\1\b", r"\1", text, flags=re.I)
+    text = re.sub(r"\b([A-Za-z]{2,})\s+\1\b", r"\1", text, flags=re.I)
+    words = text.split()
+    if len(words) >= 4:
+        last = re.sub(r"[^A-Za-z0-9]", "", words[-1]).lower()
+        prior = [re.sub(r"[^A-Za-z0-9]", "", w).lower() for w in words[:-1]]
+        has_suffix = any(w in {"co", "ltd", "limited", "plc", "company"} for w in prior)
+        if has_suffix and last and last in prior:
+            text = " ".join(words[:-1])
+    text = _clean_ocr_supplier_name(text) or text
+    text = re.sub(r"\s+", " ", text).strip(" -;,")
+    return text or None
+
+
 def _di_field_content_text(field: Any) -> str | None:
     if field is None:
         return None
@@ -2114,6 +2143,92 @@ def _append_field_candidate(
     })
 
 
+def _apply_direct_di_content_blank_fallbacks(
+    row: dict[str, Any],
+    *,
+    page_text: str | None,
+    account_company_name: str | None,
+) -> None:
+    """Fill blank direct-DI fields from Azure DI's own full page text.
+
+    This is intentionally not a second provider call.  The prebuilt-invoice
+    response often has complete OCR text even when a semantic field such as
+    InvoiceTotal or InvoiceId is blank.  Use that text before native/OCR/AI
+    fallback, and only fill fields that DI did not already supply.
+    """
+    if not page_text or count_meaningful_chars(page_text) < 10:
+        return
+
+    blank_fields = [
+        field_name
+        for field_name in (
+            "supplier_name", "invoice_number", "invoice_date", "net_amount",
+            "vat_amount", "total_amount", "currency", "description",
+        )
+        if _value_blank(row.get(field_name))
+    ]
+    if not blank_fields:
+        return
+
+    fallback_payload = simple_extract(
+        page_text,
+        openai_api_key=None,
+        account_company_name=account_company_name,
+    )
+    fallback_payload["page_text_raw"] = page_text
+    if not any(not _value_blank(fallback_payload.get(field_name)) for field_name in blank_fields):
+        return
+
+    candidates: list[dict[str, Any]] = list(row.get("_field_candidates") or [])
+    filled_critical: list[str] = list(row.get("_field_fallback_critical_fields") or [])
+    field_sources = dict(row.get("_direct_di_field_sources") or {})
+    changed = False
+
+    for field_name in blank_fields:
+        value = fallback_payload.get(field_name)
+        if _value_blank(value):
+            continue
+        if field_name == "supplier_name":
+            value = normalise_company_name(_clean_ocr_supplier_name(str(value)))
+        if field_name == "invoice_date":
+            value = parse_date(str(value)) if value is not None else None
+        if field_name in {"net_amount", "vat_amount", "total_amount"}:
+            value = parse_amount(str(value))
+        if _value_blank(value):
+            continue
+
+        row[field_name] = value
+        field_sources[field_name] = "azure_di_content_text_fallback"
+        changed = True
+        if field_name in {"supplier_name", "invoice_number", "invoice_date", "total_amount"}:
+            filled_critical.append(field_name)
+        _append_field_candidate(
+            candidates,
+            field_name=field_name,
+            value=value,
+            source_type="di_text_field_fallback",
+            source_id="azure_di_content",
+            confidence=_candidate_confidence(fallback_payload, field_name),
+            evidence=(fallback_payload.get("_header_text") or fallback_payload.get("_totals_text") or page_text or "")[:2000],
+            reason="filled_blank_from_direct_di_content",
+            selected=True,
+            applied=True,
+        )
+
+    if changed:
+        row["_field_candidates"] = candidates
+        row["_field_fallback_critical_fields"] = sorted(set(filled_critical))
+        row["_direct_di_field_sources"] = field_sources
+        row["_provider_status"] = "di_success_field_fallback"
+        row["_fallback_used"] = True
+        method = str(row.get("method_used") or "DI")
+        if "DI_CONTENT_TEXT_FALLBACK" not in method:
+            row["method_used"] = method + "+DI_CONTENT_TEXT_FALLBACK"
+        source = str(row.get("extraction_source") or "azure_di_direct")
+        if "azure_di_content_text_fallback" not in source:
+            row["extraction_source"] = source + "+azure_di_content_text_fallback"
+
+
 def _apply_direct_blank_field_fallbacks(
     row: dict[str, Any],
     *,
@@ -2154,7 +2269,7 @@ def _apply_direct_blank_field_fallbacks(
                 account_company_name=account_company_name,
             )
 
-    filled_critical: list[str] = []
+    filled_critical: list[str] = list(row.get("_field_fallback_critical_fields") or [])
     fallback_sources = [
         ("ocr_field_fallback", fallback_method or "ocr_fallback", fallback_payload),
         ("ai_field_fallback", "openai_text", ai_payload),
@@ -3516,7 +3631,7 @@ def azure_di_extract_invoice(
 
     # ── Core fields ────────────────────────────────────────────────────────
     supplier_name, s_conf     = _str(fields.get("VendorName"))
-    supplier_name = _di_field_content_text(fields.get("VendorName")) or supplier_name
+    supplier_name = _clean_di_supplier_name(_di_field_content_text(fields.get("VendorName")) or supplier_name)
     supplier_addr, _          = _str(fields.get("VendorAddress"))
     if not supplier_addr:
         supplier_addr = _addr(fields.get("VendorAddress"))
@@ -3619,6 +3734,37 @@ def azure_di_extract_invoice(
             )
 
     # ── Description: derive from line items ─────────────────────────────────
+    # Azure DI's semantic invoice fields and full-page OCR text come from the
+    # same provider response.  Use the text as a zero-extra-call recovery layer
+    # for blank dates and missing/mismatched totals before trying heavier
+    # providers.
+    di_page_text_for_recovery = getattr(result, "content", None) or ""
+    if invoice_date is None and di_page_text_for_recovery:
+        recovered_date = parse_date(_extract_invoice_date_value(di_page_text_for_recovery))
+        if recovered_date is not None:
+            invoice_date = recovered_date
+
+    if di_page_text_for_recovery:
+        recovered_amounts = _apply_financial_remediation(
+            {
+                "net_amount": net_amount,
+                "vat_amount": vat_amount,
+                "total_amount": total_amount,
+                "method_used": "azure_di",
+            },
+            di_page_text_for_recovery,
+            "azure_di_content_recovery",
+        )
+        if recovered_amounts.get("net_amount") is not None and recovered_amounts.get("net_amount") != net_amount:
+            net_amount = recovered_amounts.get("net_amount")
+            t_conf_sub = max(t_conf_sub, 0.65)
+        if recovered_amounts.get("vat_amount") is not None and recovered_amounts.get("vat_amount") != vat_amount:
+            vat_amount = recovered_amounts.get("vat_amount")
+            t_conf_tax = max(t_conf_tax, 0.65)
+        if recovered_amounts.get("total_amount") is not None and recovered_amounts.get("total_amount") != total_amount:
+            total_amount = recovered_amounts.get("total_amount")
+            t_conf_tot = max(t_conf_tot, 0.65)
+
     descs = [it["description"] for it in line_items if it.get("description")]
     description = limit_to_20_words("; ".join(descs)) if descs else None
 
@@ -5126,7 +5272,7 @@ def _build_direct_di_page_rows(
 
     row = {
         "page_no": page_index + 1,
-        "supplier_name": field("VendorName"),
+        "supplier_name": _clean_di_supplier_name(field("VendorName")),
         "supplier_vat": field("VendorTaxId"),
         "supplier_address": field("VendorAddress"),
         "supplier_address_recipient": field("VendorAddressRecipient"),
@@ -5190,6 +5336,11 @@ def _build_direct_di_page_rows(
         "totals_raw": "",
         "page_text_raw": page_text,
     }
+    _apply_direct_di_content_blank_fallbacks(
+        row,
+        page_text=page_text,
+        account_company_name=account_company_name,
+    )
     if bool(getattr(settings, "azure_di_read_text_fallback", False)) and not _extraction_has_minimum_invoice_fields(row):
         di_read_payload = azure_di_extract_read_text(
             jpeg_bytes,

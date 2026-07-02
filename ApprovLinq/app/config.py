@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     azure_di_key: str | None = None
     azure_di_page_timeout_s: float = 45.0
     azure_di_orientation_timeout_s: float = 8.0
+    azure_di_orientation_enabled: bool = False
+    local_orientation_enabled: bool = True
+    local_orientation_sample_pages: int = 5
     azure_di_read_text_fallback: bool = False
     extraction_page_timeout_s: float = 120.0
     extraction_consecutive_timeout_limit: int = 3
@@ -84,6 +87,9 @@ class Settings(BaseSettings):
             "azure_di_key_present": bool(self.azure_di_key),
             "azure_di_page_timeout_s": self.azure_di_page_timeout_s,
             "azure_di_orientation_timeout_s": self.azure_di_orientation_timeout_s,
+            "azure_di_orientation_enabled": self.azure_di_orientation_enabled,
+            "local_orientation_enabled": self.local_orientation_enabled,
+            "local_orientation_sample_pages": self.local_orientation_sample_pages,
             "azure_di_read_text_fallback": self.azure_di_read_text_fallback,
             "extraction_page_timeout_s": self.extraction_page_timeout_s,
             "extraction_consecutive_timeout_limit": self.extraction_consecutive_timeout_limit,
