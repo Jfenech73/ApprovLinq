@@ -410,6 +410,7 @@ def _persist_selected_field_candidates(
         "purchase_order": ("PurchaseOrder", payload.get("purchase_order")),
         "order_number": ("OrderNumber", payload.get("order_number")),
         "description": ("Items", row.description),
+        "nominal_account_code": ("NominalAccountCode", row.nominal_account_code),
     }
 
     for field_name, (di_name, selected_value) in field_map.items():
@@ -1420,8 +1421,10 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
             # saved rule text for invoice-specific values.
             continue
         src = _normalize_rule_value(rule.source_pattern)
-        if not src or src != current_supplier_norm:
-            # CRITICAL: supplier identity must match
+        if not src:
+            continue
+        if rule.rule_type == "remap_field_value" and src != current_supplier_norm:
+            # CRITICAL: coordinate remaps are supplier/layout scoped.
             continue
         remap_rules_by_field.setdefault(field, []).append(rule)
 
@@ -1432,7 +1435,8 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
     #   "remap_field_value"  → coordinate rule: re-read current PDF via _read_region_text.
     #                          NEVER assign stored target_value (stale from creation invoice).
     for field, field_rules in remap_rules_by_field.items():
-        if not _field_is_eligible(field):
+        has_text_correction = any(r.rule_type == "text_correction" for r in field_rules)
+        if not has_text_correction and not _field_is_eligible(field):
             logger.debug(
                 "_apply_saved_rules: field=%r has trusted value %r — skipping remap",
                 field, getattr(row, field, None),
@@ -3309,6 +3313,44 @@ def _match_nominal_from_description(
     return None, "description_match_ambiguous", 0.0
 
 
+def _match_nominal_from_hint(
+    accounts: list[TenantNominalAccount],
+    hint: object,
+) -> tuple[TenantNominalAccount | None, str, float]:
+    """Match a category/product hint to the company nominal list.
+
+    This keeps the production scan path deterministic even if the optional
+    classifier/taxonomy module is unavailable.  It also handles simple
+    singular/plural differences such as Beverages -> Beverage Purchases.
+    """
+    hint_text = str(hint or "").strip()
+    if not hint_text or not accounts:
+        return None, "no_hint", 0.0
+    hint_lower = hint_text.lower()
+    hint_tokens = _nominal_text_tokens(hint_lower)
+    scored: list[tuple[TenantNominalAccount, str, float]] = []
+    for account in accounts:
+        code = str(account.account_code or "").strip().lower()
+        name = str(account.account_name or "").strip().lower()
+        name_tokens = _nominal_text_tokens(name)
+        if code and hint_lower == code:
+            scored.append((account, "nominal_hint_code_exact", 0.96))
+        elif hint_lower and hint_lower in name:
+            scored.append((account, "nominal_hint_name_contains", 0.92))
+        elif hint_tokens and hint_tokens <= name_tokens:
+            scored.append((account, "nominal_hint_tokens", 0.88))
+        elif hint_tokens and (hint_tokens & name_tokens):
+            scored.append((account, "nominal_hint_partial", 0.76))
+    if not scored:
+        return None, "no_hint_match", 0.0
+    scored.sort(key=lambda item: item[2], reverse=True)
+    best = scored[0]
+    second_score = scored[1][2] if len(scored) > 1 else 0.0
+    if best[2] >= 0.88 or (best[2] >= 0.76 and best[2] - second_score >= 0.12):
+        return best
+    return None, "hint_match_ambiguous", 0.0
+
+
 def _apply_account_suggestions(
     db: Session,
     tenant_id,
@@ -3552,6 +3594,34 @@ def _apply_master_data_enrichment(
                 f"supplier={matched_supplier_name}; historical_nominal={hist_nominal}",
                 "Historical nominal applied only after repeated prior use for the matched supplier",
             )
+
+    if not row.nominal_account_code:
+        accounts = _active_nominal_accounts(db, tenant_id, company_id)
+        if not accounts:
+            _append_method_tag(row, "nominal:no_active_accounts")
+            logger.info(
+                "Nominal enrichment skipped: no active nominal accounts tenant=%s company=%s row=%s",
+                tenant_id, company_id, getattr(row, "id", None),
+            )
+            if _active_nominal_accounts(db, tenant_id, None):
+                _append_method_tag(row, "nominal:company_scope_empty")
+        search_text = " ".join(filter(None, [row.description, row.line_items_raw]))
+        category_hint = _category_hint_from_text(search_text)
+        if accounts and category_hint:
+            hinted_account, hint_method, hint_confidence = _match_nominal_from_hint(accounts, category_hint)
+            if hinted_account:
+                row.nominal_account_code = hinted_account.account_code
+                row.classification_method = hint_method
+                _append_method_tag(row, f"nominal:{hint_method}")
+                add_candidate(
+                    "nominal_account_code",
+                    hinted_account.account_code,
+                    "nominal_category_hint",
+                    f"nominal:{hinted_account.id}",
+                    hint_confidence,
+                    f"category_hint={category_hint}; description={row.description or ''}; account={hinted_account.account_name}",
+                    "Nominal applied from product/category hint matched against company nominal master data",
+                )
 
     if not row.nominal_account_code:
         accounts = _active_nominal_accounts(db, tenant_id, company_id)
@@ -4287,6 +4357,34 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                         supplier_vat=supplier_vat,
                                         payload=r,
                                     )
+                                baseline_before_rules = {
+                                    "supplier_name": row.supplier_name,
+                                    "supplier_posting_account": row.supplier_posting_account,
+                                    "nominal_account_code": row.nominal_account_code,
+                                    "invoice_number": row.invoice_number,
+                                    "invoice_date": row.invoice_date,
+                                    "description": row.description,
+                                    "net_amount": row.net_amount,
+                                    "vat_amount": row.vat_amount,
+                                    "total_amount": row.total_amount,
+                                }
+                                with perf_ctx.timed("rule_application"):
+                                    _apply_saved_rules(db, batch, row)
+                                baseline_changed = [
+                                    field for field, before_value in baseline_before_rules.items()
+                                    if str(getattr(row, field, None) or "").strip() != str(before_value or "").strip()
+                                ]
+                                if baseline_changed:
+                                    for field in baseline_changed:
+                                        r[field] = getattr(row, field, None)
+                                    _append_method_tag(row, "provider_baseline_rules_checked")
+                                if row.supplier_name != baseline_before_rules.get("supplier_name"):
+                                    with perf_ctx.timed("supplier_history_lookup"):
+                                        _apply_master_data_enrichment(
+                                            db, tenant_id, batch.company_id, row,
+                                            supplier_vat=supplier_vat,
+                                            payload=r,
+                                        )
                                 _append_method_tag(row, "provider_baseline_mode")
 
                             _persist_selected_field_candidates(
