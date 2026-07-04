@@ -2931,13 +2931,38 @@ def _build_bcrs_row(row: InvoiceRow, amount: float) -> InvoiceRow:
         invoice_date=row.invoice_date, description=desc, line_items_raw='BCRS surcharge',
         net_amount=amount, vat_amount=0.0, total_amount=amount, currency=row.currency, tax_code=row.tax_code,
         method_used=(row.method_used or '') + '+bcrs', confidence_score=row.confidence_score,
-        validation_status=row.validation_status, review_required=row.review_required,
-        review_priority=row.review_priority, review_reasons=row.review_reasons, review_fields=row.review_fields,
+        validation_status='ok_bcrs_split', review_required=False,
+        review_priority=None, review_reasons=None, review_fields=None,
         auto_approved=row.auto_approved, page_quality_score=row.page_quality_score,
         classification_method=row.classification_method, supplier_match_method=row.supplier_match_method,
-        totals_reconciliation_status=row.totals_reconciliation_status, header_raw=row.header_raw,
+        totals_reconciliation_status='bcrs_split', header_raw=row.header_raw,
         totals_raw=row.totals_raw, page_text_raw=row.page_text_raw,
     )
+
+
+def _mark_bcrs_split_resolved(row: InvoiceRow) -> None:
+    row.totals_reconciliation_status = "bcrs_split_resolved"
+    if row.validation_status in (None, "", "ok_warned", "review_validation_failed", "review_bcrs_ambiguous"):
+        row.validation_status = "ok_bcrs_split"
+    reasons = []
+    for reason in re.split(r"[|]", row.review_reasons or ""):
+        key = reason.split(":", 1)[0].strip()
+        if key in {"totals_mismatch", "totals_mismatch_advisory", "deposit_component_detected"}:
+            continue
+        if reason.strip():
+            reasons.append(reason.strip())
+    fields = []
+    for field in re.split(r"[|,]", row.review_fields or ""):
+        field = field.strip()
+        if field in {"net_amount", "vat_amount", "total_amount"}:
+            continue
+        if field:
+            fields.append(field)
+    row.review_reasons = "|".join(reasons) if reasons else None
+    row.review_fields = "|".join(fields) if fields else None
+    if not reasons and not fields:
+        row.review_required = False
+        row.review_priority = None
 
 
 def _apply_bcrs_split(db: Session, row: InvoiceRow, amount: float) -> InvoiceRow:
@@ -2948,6 +2973,7 @@ def _apply_bcrs_split(db: Session, row: InvoiceRow, amount: float) -> InvoiceRow
     _corrected_total = round(_net + _vat, 2)
     if _corrected_total >= 0 and _corrected_total < round(float(row.total_amount or 0.0), 2):
         row.total_amount = _corrected_total
+    _mark_bcrs_split_resolved(row)
     return bcrs_row
 
 
@@ -4660,7 +4686,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
 
                             inserted_rows += 1
                             total_rows += 1
-                            if provider_baseline_mode or (batch.scan_mode or "summary").lower() == "lines":
+                            if (batch.scan_mode or "summary").lower() == "lines":
                                 continue
                             bcrs_outcome, bcrs_amount, bcrs_reason = _decide_bcrs_split(db, batch, row, r, [row])
                             if bcrs_outcome == "auto_split" and bcrs_amount and bcrs_amount > 0:
