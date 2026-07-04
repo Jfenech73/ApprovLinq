@@ -8,7 +8,9 @@ from app.routers.batches import (
     _apply_bcrs_split,
     _decide_bcrs_split,
     _extract_bcrs_amount_from_summary,
+    _parse_money_candidates,
 )
+from app.services.extractor import _extract_labeled_financial_bundle
 
 
 class DummyDb:
@@ -104,3 +106,27 @@ def test_apply_split_copies_invoice_details_and_reduces_original_total():
     assert bcrs_row.nominal_account_code == row.nominal_account_code
     assert bcrs_row.invoice_number == row.invoice_number
     assert bcrs_row.currency == row.currency
+
+
+def test_jsultana_totals_table_keeps_bcrs_separate_from_vat():
+    text = (
+        "Subtotal:\n486.03\n"
+        "VAT:\n87.47\n"
+        "Terms and Conditions\n"
+        "BCRS Deposit:\n68.40\n"
+        "Total :\n641.90\n"
+        "Balance :\n641.90\n"
+        "Tax summary F=18.00% E=0%\n"
+        "573.46 @ 18.00% = 87.47"
+    )
+
+    bundle = _extract_labeled_financial_bundle(text)
+
+    assert bundle["net_amount"] == 486.03
+    assert bundle["vat_amount"] == 87.47
+    assert bundle["total_amount"] == 641.90
+    assert bundle["_deposit_candidate"] == 68.40
+
+
+def test_comma_decimal_bcrs_amount_is_not_treated_as_thousands():
+    assert _parse_money_candidates("BCRS Deposit: 14,40") == [14.40]

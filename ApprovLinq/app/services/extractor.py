@@ -695,6 +695,17 @@ def _extract_labeled_financial_bundle(text: str) -> dict[str, float]:
         if v is not None and (k not in out or out.get(k) in (None, 0.0)):
             out[k] = v
 
+    try:
+        net_v = out.get("net_amount")
+        vat_v = out.get("vat_amount")
+        total_v = out.get("total_amount")
+        dep_v = out.get("_deposit_candidate")
+        if net_v is not None and vat_v is not None and total_v is not None and dep_v:
+            if abs((float(net_v) + float(vat_v) + float(dep_v)) - float(total_v)) <= 0.10:
+                return _repair_financial_bundle(out, text)
+    except Exception:
+        pass
+
     # Bottom summary grids are usually the most reliable source for amounts.
     # Use them when they reconcile better than the generic labelled pass.
     grid = _extract_summary_grid_bundle(text)
@@ -786,9 +797,37 @@ def _repair_financial_bundle(values: dict[str, float], text: str | None = None) 
         net = out.get("net_amount")
         vat = out.get("vat_amount")
         total = out.get("total_amount")
+        deposit = out.get("_deposit_candidate")
         net_f = round(float(net), 2) if net is not None else None
         vat_f = round(float(vat or 0.0), 2) if vat is not None else None
         total_f = round(float(total), 2) if total is not None else None
+        deposit_f = round(float(deposit), 2) if deposit is not None else None
+
+        if total_f is not None and deposit_f is not None and deposit_f > 0 and net_f is not None:
+            if vat_f is not None:
+                deposit_diff = abs(round((net_f + vat_f + deposit_f) - total_f, 2))
+                if deposit_diff <= 0.10:
+                    return out
+                # Some OCR/DI paths fold the deposit into VAT because net + inflated
+                # VAT equals the payable total. If subtracting the known deposit
+                # restores the commercial VAT, repair it before generic rate logic.
+                commercial_vat = round(vat_f - deposit_f, 2)
+                if commercial_vat >= 0:
+                    commercial_rate = commercial_vat / net_f if net_f > 0 else 0
+                    if (
+                        abs(round((net_f + commercial_vat + deposit_f) - total_f, 2)) <= 0.10
+                        and (commercial_vat == 0 or 0.03 <= commercial_rate <= 0.30)
+                    ):
+                        out["vat_amount"] = commercial_vat
+                        vat_f = commercial_vat
+                        return out
+            else:
+                commercial_vat = round(total_f - net_f - deposit_f, 2)
+                commercial_rate = commercial_vat / net_f if net_f > 0 else 0
+                if commercial_vat >= 0 and (commercial_vat == 0 or 0.03 <= commercial_rate <= 0.30):
+                    out["vat_amount"] = commercial_vat
+                    vat_f = commercial_vat
+                    return out
 
         # If the document only exposes a payable total and no VAT/tax breakdown,
         # treat it as a zero-VAT row so accounting export remains complete.

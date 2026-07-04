@@ -2358,7 +2358,12 @@ def _is_suspect_field_value(field: str, value: object) -> bool:
 def _parse_money_candidates(text: str) -> list[float]:
     vals = []
     for m in re.findall(r"(?<!\d)(?:€\s*)?(\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|\d+[.,]\d{2})(?!\d)", text or ""):
-        raw = m.replace('.', '').replace(',', '.') if re.match(r"^\d{1,3}(?:\.\d{3})+,\d{2}$", m) else m.replace(',', '')
+        if re.match(r"^\d{1,3}(?:\.\d{3})+,\d{2}$", m):
+            raw = m.replace('.', '').replace(',', '.')
+        elif re.match(r"^\d+,\d{2}$", m):
+            raw = m.replace(',', '.')
+        else:
+            raw = m.replace(',', '')
         try:
             vals.append(round(float(raw), 2))
         except Exception:
@@ -2405,6 +2410,9 @@ def _has_bcrs_component_label(text: str) -> bool:
 
 def _is_summary_context(line: str) -> bool:
     low = (line or '').lower()
+    if re.search(r"\b(qty|quantity|unit|uom|barcode|item|description|pcs|price|w/sale|retail|consumer|code|stock)\b", low):
+        if not re.search(r"\b(sub\s*total|subtotal|net|vat|tax|invoice\s+summary|tax\s+summary|deposit\s+summary|amount\s+due|balance\s+due)\b", low):
+            return False
     return bool(re.search(
         r"\b(total|subtotal|gross|net|vat|tax|summary|amount due|total due|invoice summary|tax summary|deposit summary|total eur|total incl|total net|total gross|container|returnable|recycling|environmental|eco|scheme)\b",
         low,
