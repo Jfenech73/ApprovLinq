@@ -2381,10 +2381,32 @@ def _parse_first_money(value: object) -> float | None:
     return vals[0] if vals else None
 
 
+_BCRS_COMPONENT_LABEL_RE = re.compile(
+    r"\b(?:"
+    r"bcrs(?:\s+refundable)?(?:\s+deposit)?|d\.?r\.?s\.?|"
+    r"refundable\s+(?:deposit|container)|"
+    r"container\s+(?:deposit|refund|return|scheme|charge|contribution|levy|fee)|"
+    r"beverage\s+container\s+(?:deposit|refund|scheme|charge|contribution|levy|fee)|"
+    r"packaging\s+(?:deposit|return|charge|contribution|levy|fee)|"
+    r"returnables?|"
+    r"recycling\s+(?:charge|contribution|levy|fee)|"
+    r"environment(?:al)?\s+(?:charge|contribution|levy|fee)|"
+    r"eco\s+(?:charge|contribution|levy|fee)|"
+    r"scheme\s+(?:charge|contribution|levy|fee)|"
+    r"deposit\s+summary|deposits?"
+    r")\b",
+    re.I,
+)
+
+
+def _has_bcrs_component_label(text: str) -> bool:
+    return bool(_BCRS_COMPONENT_LABEL_RE.search(text or ""))
+
+
 def _is_summary_context(line: str) -> bool:
     low = (line or '').lower()
     return bool(re.search(
-        r"\b(total|subtotal|gross|net|vat|tax|summary|amount due|total due|invoice summary|tax summary|deposit summary|total eur|total incl|total net|total gross)\b",
+        r"\b(total|subtotal|gross|net|vat|tax|summary|amount due|total due|invoice summary|tax summary|deposit summary|total eur|total incl|total net|total gross|container|returnable|recycling|environmental|eco|scheme)\b",
         low,
     ))
 
@@ -2474,10 +2496,7 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
 
     # Accepted BCRS/deposit labels only.  "surcharge" alone is intentionally
     # excluded — it is too generic and fires on delivery/fuel surcharges.
-    label_re = re.compile(
-        r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit|deposit\s+summary|deposits?|returnables?)\b",
-        re.I,
-    )
+    label_re = _BCRS_COMPONENT_LABEL_RE
     # Rejected contexts: any line whose primary identity is a VAT/tax field.
     # Used as an extra guard in the context-window check of Pass 1.
     _VAT_CTX_RE = re.compile(
@@ -2493,7 +2512,7 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
     # splits on invoices that print a normal "Total BCRS 0.00" line.
     _bcrs_amount_mentions = []
     for _ln in lines:
-        if re.search(r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit)\b", _ln, re.I):
+        if _has_bcrs_component_label(_ln):
             _bcrs_amount_mentions.extend(_parse_money_candidates(_ln))
     _has_positive_bcrs_mention = any(float(_v) > 0.001 for _v in _bcrs_amount_mentions)
     _has_zero_bcrs_mention = bool(_bcrs_amount_mentions) and not _has_positive_bcrs_mention
@@ -2526,11 +2545,7 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
             diff = round(float(total_amount) - float(net_amount) - float(vat_amount or 0), 2)
         except Exception:
             diff = 0.0
-        explicit_bcrs_label = bool(re.search(
-            r"\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit)\b",
-            summary_text,
-            re.I,
-        ))
+        explicit_bcrs_label = _has_bcrs_component_label(summary_text)
         if explicit_bcrs_label and not _has_zero_bcrs_mention and diff > 0.02:
             # Do not promote ordinary VAT or invoice total values.  A valid BCRS
             # component should be positive, smaller than the invoice total, and
@@ -2540,6 +2555,9 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
 
     # Pass 1: regex extraction over the whole summary text, useful when OCR collapses rows.
     patterns = [
+        re.compile(r"(?is)\b(?:bcrs(?:\s+refundable)?(?:\s+deposit)?|d\.?r\.?s\.?|refundable\s+(?:deposit|container))(?:\s*\([^\n)]{1,12}\))?\b[^\d\n-]{0,40}(?:\S?\s*)?(-?\d+(?:[.,]\d{2}))"),
+        re.compile(r"(?is)\b(?:container\s+(?:deposit|refund|return|scheme|charge|contribution|levy|fee)|beverage\s+container\s+(?:deposit|refund|scheme|charge|contribution|levy|fee)|packaging\s+(?:deposit|return|charge|contribution|levy|fee)|returnables?)(?:\s*\([^\n)]{1,12}\))?\b[^\d\n-]{0,40}(?:\S?\s*)?(-?\d+(?:[.,]\d{2}))"),
+        re.compile(r"(?is)\b(?:recycling\s+(?:charge|contribution|levy|fee)|environment(?:al)?\s+(?:charge|contribution|levy|fee)|eco\s+(?:charge|contribution|levy|fee)|scheme\s+(?:charge|contribution|levy|fee))(?:\s*\([^\n)]{1,12}\))?\b[^\d\n-]{0,40}(?:\S?\s*)?(-?\d+(?:[.,]\d{2}))"),
         re.compile(r"(?is)\bbcrs(?:\s+refundable)?(?:\s+deposit)?(?:\s*\([^\n)]{1,12}\))?\b[^\d\n€-]{0,40}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
         re.compile(r"(?is)\brefundable\s+deposit(?:\s*\([^\n)]{1,12}\))?\b[^\d\n€-]{0,40}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
         re.compile(r"(?is)\bdeposit\s+summary(?:\s*\([^\n)]{1,12}\))?\b[^\d\n€-]{0,40}(?:€\s*)?(-?\d+(?:[.,]\d{2}))"),
@@ -2572,10 +2590,9 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
                 # Plain deposit/deposits/returnables/surcharge patterns: accept only
                 # when the surrounding context explicitly confirms BCRS/deposit context.
                 has_context_window = (
-                    'bcrs' in label_span
+                    _has_bcrs_component_label(label_span)
                     or 'summary' in label_span
                     or 'refundable' in label_span
-                    or 'returnable' in label_span
                 )
                 if not has_context_window and 'total' in label_span:
                     has_context_window = not bool(_VAT_CTX_RE.search(label_span))
@@ -2769,11 +2786,7 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
         r'|amount\s*due|balance\s*due)\s*[:\-]?\s*[€$£]?[\d.,]+\s*$',
         re.I,
     )
-    _DEPOSIT_LABEL_RE = re.compile(
-        r'\b(bcrs(?:\s+refundable)?(?:\s+deposit)?|refundable\s+deposit'
-        r'|deposit\s+summary|returnables?|deposits?|deposit)\b',
-        re.I,
-    )
+    _DEPOSIT_LABEL_RE = _BCRS_COMPONENT_LABEL_RE
     has_label_line = False
     for ln in lines:
         if _DEPOSIT_LABEL_RE.search(ln.lower()):
@@ -2814,26 +2827,58 @@ def _get_supplier_bcrs_precedent_score(db: Session, batch: InvoiceBatch, row: In
         return 0
 
 
+def _payload_bcrs_candidate(payload: dict) -> float | None:
+    """Return a labelled BCRS/deposit amount already found by extraction."""
+    for key in ("_deposit_candidate", "bcrs_amount"):
+        try:
+            val = payload.get(key)
+            if val not in (None, ""):
+                amount = round(float(val), 2)
+                if amount > 0:
+                    return amount
+        except Exception:
+            continue
+    return None
+
+
+def _bcrs_candidate_reconciles(payload: dict, amount: float | None) -> bool:
+    if amount is None:
+        return False
+    try:
+        inv_net = payload.get("source_invoice_net_amount", payload.get("net_amount"))
+        inv_vat = payload.get("source_invoice_vat_amount", payload.get("vat_amount"))
+        inv_total = payload.get("source_invoice_total_amount", payload.get("total_amount"))
+        if inv_net is None or inv_total is None:
+            return False
+        expected = round(float(inv_net) + float(inv_vat or 0) + float(amount), 2)
+        return abs(expected - round(float(inv_total), 2)) <= 0.10
+    except Exception:
+        return False
+
+
 def _decide_bcrs_split(db: Session, batch: InvoiceBatch, row: InvoiceRow, payload: dict, page_rows: list[InvoiceRow] | None = None) -> tuple[str, float | None, str | None]:
     amount = _extract_bcrs_amount_from_summary(payload)
+    payload_candidate = _payload_bcrs_candidate(payload)
+    if amount is None and _bcrs_candidate_reconciles(payload, payload_candidate):
+        amount = payload_candidate
     existing_line = bool(amount and page_rows and _page_has_existing_bcrs_row(page_rows, amount))
     lines_text = str(payload.get("line_items_raw") or "")
     totals_text = "\n".join([str(payload.get("totals_raw") or ""), str(payload.get("page_text_raw") or "")])
     score = 0
     if amount and amount > 0:
         score += 14
-    if payload.get("_deposit_candidate") not in (None, ""):
+    if payload_candidate not in (None, ""):
         try:
-            dep = round(float(payload.get("_deposit_candidate")), 2)
+            dep = round(float(payload_candidate), 2)
             if amount and abs(dep - amount) <= 0.06:
                 score += 10
             elif dep > 0:
                 score += 5
         except Exception:
             pass
-    if re.search(r"\b(bcrs|refundable\s+deposit|deposit\s+summary|returnables?|deposits?)\b", totals_text, re.I):
+    if _has_bcrs_component_label(totals_text):
         score += 8
-    if re.search(r"\b(bcrs|deposit|returnable)\b", lines_text, re.I):
+    if _has_bcrs_component_label(lines_text):
         score += 3
     try:
         inv_net = payload.get("source_invoice_net_amount", payload.get("net_amount"))
@@ -2859,7 +2904,7 @@ def _decide_bcrs_split(db: Session, batch: InvoiceBatch, row: InvoiceRow, payloa
         mismatch = inv_total is not None and inv_net is not None and abs(float(inv_total) - (float(inv_net) + float(inv_vat or 0))) > 0.10
     except Exception:
         mismatch = False
-    if mismatch and (amount or re.search(r"\b(bcrs|deposit|returnable)\b", totals_text, re.I)):
+    if mismatch and (amount or _has_bcrs_component_label(totals_text)):
         return ("review_suggest_split", amount, "Possible deposit/BCRS adjustment not safely resolved")
     return ("no_split", None, None)
 
@@ -2887,10 +2932,21 @@ def _build_bcrs_row(row: InvoiceRow, amount: float) -> InvoiceRow:
     )
 
 
+def _apply_bcrs_split(db: Session, row: InvoiceRow, amount: float) -> InvoiceRow:
+    bcrs_row = _build_bcrs_row(row, amount)
+    db.add(bcrs_row)
+    _net = round(float(row.net_amount or 0.0), 2)
+    _vat = round(float(row.vat_amount or 0.0), 2)
+    _corrected_total = round(_net + _vat, 2)
+    if _corrected_total >= 0 and _corrected_total < round(float(row.total_amount or 0.0), 2):
+        row.total_amount = _corrected_total
+    return bcrs_row
+
+
 def _page_has_existing_bcrs_row(rows: list[InvoiceRow], amount: float, tolerance: float = 0.06) -> bool:
     for row in rows:
         text = f"{row.description or ''} {row.line_items_raw or ''}".lower()
-        if not re.search(r"\b(bcrs|deposit|returnable|returnables|refund(?:able)?)\b", text):
+        if not _has_bcrs_component_label(text):
             continue
         for candidate in (row.total_amount, row.net_amount):
             try:
@@ -4408,6 +4464,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             "scan page completed batch=%s file_index=%d page=%d rows=%d methods=%s",
                             batch_id, file_index, page_index + 1, len(row_payloads), ",".join(page_methods),
                         )
+                        current_page_rows: list[InvoiceRow] = []
                         for r in row_payloads:
                             supplier_name = r.get("supplier_name")
                             supplier_vat  = r.get("supplier_vat")
@@ -4464,6 +4521,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             )
                             db.add(row)
                             db.flush()
+                            current_page_rows.append(row)
                             if provider_baseline_mode:
                                 _apply_stable_anchor_saved_regions_as_candidates(
                                     db,
@@ -4598,15 +4656,9 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 continue
                             bcrs_outcome, bcrs_amount, bcrs_reason = _decide_bcrs_split(db, batch, row, r, [row])
                             if bcrs_outcome == "auto_split" and bcrs_amount and bcrs_amount > 0:
-                                bcrs_row = _build_bcrs_row(row, bcrs_amount)
-                                db.add(bcrs_row)
+                                _apply_bcrs_split(db, row, bcrs_amount)
                                 inserted_rows += 1
                                 total_rows += 1
-                                _net = round(float(row.net_amount or 0.0), 2)
-                                _vat = round(float(row.vat_amount or 0.0), 2)
-                                _corrected_total = round(_net + _vat, 2)
-                                if _corrected_total >= 0 and _corrected_total < round(float(row.total_amount or 0.0), 2):
-                                    row.total_amount = _corrected_total
                             elif bcrs_outcome == "review_suggest_split":
                                 row.review_required = True
                                 row.validation_status = row.validation_status or "review_bcrs_ambiguous"
@@ -4616,17 +4668,11 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 row.review_reasons = "|".join(reasons)
                         if (batch.scan_mode or "summary").lower() == "lines" and row_payloads:
                             anchor_payload = dict(row_payloads[0])
-                            page_rows = [
-                                obj for obj in db.new
-                                if isinstance(obj, InvoiceRow)
-                                and obj.batch_id == batch_id
-                                and obj.source_file_id == invoice_file.id
-                                and obj.page_no == (row_payloads[0].get("page_no") or (page_index + 1))
-                            ]
+                            page_rows = current_page_rows
                             if page_rows:
                                 outcome, bcrs_amount, bcrs_reason = _decide_bcrs_split(db, batch, page_rows[0], anchor_payload, page_rows)
                                 if outcome == "auto_split" and bcrs_amount and bcrs_amount > 0:
-                                    db.add(_build_bcrs_row(page_rows[0], bcrs_amount))
+                                    _apply_bcrs_split(db, page_rows[0], bcrs_amount)
                                     inserted_rows += 1
                                     total_rows += 1
                                 elif outcome == "review_suggest_split":

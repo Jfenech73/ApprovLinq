@@ -659,7 +659,20 @@ def _extract_labeled_financial_bundle(text: str) -> dict[str, float]:
     )
     deposit = _last_money_on_label_line(
         text,
-        [r"\bbcrs\b", r"\bdeposit\b", r"\breturnable", r"\breturnables?\b"],
+        [
+            r"\bbcrs\b",
+            r"\bd\.?r\.?s\.?\b",
+            r"\bdeposit\b",
+            r"\breturnable",
+            r"\breturnables?\b",
+            r"\bcontainer\s+(?:deposit|refund|return|scheme|charge|contribution|levy|fee)\b",
+            r"\bbeverage\s+container\s+(?:deposit|refund|scheme|charge|contribution|levy|fee)\b",
+            r"\bpackaging\s+(?:deposit|return|charge|contribution|levy|fee)\b",
+            r"\brecycling\s+(?:charge|contribution|levy|fee)\b",
+            r"\benvironment(?:al)?\s+(?:charge|contribution|levy|fee)\b",
+            r"\beco\s+(?:charge|contribution|levy|fee)\b",
+            r"\bscheme\s+(?:charge|contribution|levy|fee)\b",
+        ],
         reject_patterns=[r"\bvat\b", r"\btax\b"],
     )
 
