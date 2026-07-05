@@ -581,6 +581,77 @@ html[data-theme="dark"] .ap-app .stat-value { color: var(--ap-text) !important; 
   min-height: 100%;
 }
 
+.ap-app .review-col-rows .review-rows-body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ap-app .review-col-rows .row-list-scroll {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.ap-app .review-col-rows .selected-explain-panel {
+  flex: 0 0 auto;
+  max-height: 140px;
+}
+
+.ap-app .saved-rules-modal {
+  position: fixed;
+  z-index: 10020;
+  top: 72px;
+  right: 28px;
+  bottom: 28px;
+  width: min(760px, calc(100vw - 56px));
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--ap-s-3);
+  padding: var(--ap-s-4);
+  border: 1px solid var(--ap-border);
+  border-radius: var(--ap-r-md);
+  background: var(--ap-bg-surface);
+  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.22);
+  overflow: hidden;
+}
+
+.ap-app .saved-rules-modal.ap-hidden,
+.ap-app .saved-rules-modal[hidden] {
+  display: none;
+}
+
+.ap-app .saved-rules-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ap-s-3);
+  border-bottom: 1px solid var(--ap-border);
+  padding-bottom: var(--ap-s-3);
+  flex: 0 0 auto;
+}
+
+.ap-app .saved-rules-modal #savedRegionsList {
+  overflow: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding-right: var(--ap-s-2);
+}
+
+@media (max-width: 760px) {
+  .ap-app .saved-rules-modal {
+    inset: 56px 12px 12px 12px;
+    width: auto;
+  }
+}
+
 /* Base row card */
 .ap-app .review-row {
   padding: 10px 12px;

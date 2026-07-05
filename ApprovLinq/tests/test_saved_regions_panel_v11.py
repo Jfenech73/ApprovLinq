@@ -19,8 +19,9 @@ def test_manage_saved_regions_panel_uses_explicit_visibility_not_hidden_only():
     assert 'aria-expanded="false"' in html
     assert 'aria-controls="savedRegionsPanel"' in html
     assert 'id="savedRegionsPanel"' in html
+    assert 'class="saved-rules-modal ap-hidden"' in html
+    assert 'id="savedRulesCloseBtn"' in html
     assert 'ap-hidden' in html
-    assert 'display:none' in html
     assert "function setSavedRegionsPanelOpen" in js
     assert 'panel.style.display = open ? "flex" : "none"' in js
     assert 'btn.setAttribute("aria-expanded"' in js

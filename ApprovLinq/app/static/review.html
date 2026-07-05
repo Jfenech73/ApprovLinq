@@ -7,8 +7,8 @@
   <script>
     (function(){ try { var t = localStorage.getItem("ap_theme"); if (t==="light"||t==="dark") document.documentElement.setAttribute("data-theme", t); } catch(e){} })();
   </script>
-  <link rel="stylesheet" href="/static/css/tokens.css" />
-  <link rel="stylesheet" href="/static/css/components.css" />
+  <link rel="stylesheet" href="/static/css/tokens.css?v=20260705c" />
+  <link rel="stylesheet" href="/static/css/components.css?v=20260705c" />
 </head>
 <body class="ap-app">
   <div data-ap-shell='{"active":"","crumb":[[\"Work\",\"\"],[\"Batches\",\"\"],[\"Review\",\"cur\"]]}'></div>
@@ -142,7 +142,11 @@
               </button>
               <span id="applySavedRegionsStatus" class="muted" style="font-size:12px"></span>
             </div>
-            <div id="savedRegionsPanel" class="remap-hint ap-hidden" role="dialog" aria-label="Manage saved rules" style="display:none;margin-top:6px;max-height:260px;overflow:auto;align-items:stretch;justify-content:flex-start;flex-direction:column">
+            <div id="savedRegionsPanel" class="saved-rules-modal ap-hidden" role="dialog" aria-modal="true" aria-label="Manage saved rules" hidden>
+              <div class="saved-rules-modal-head">
+                <strong>Saved rules</strong>
+                <button id="savedRulesCloseBtn" class="btn btn-sm" type="button">Close</button>
+              </div>
               <div class="muted" style="font-size:12px;margin-bottom:4px">
                 Saved rules include reviewer-created field rules and saved regions. They are replayed on future scans and can be manually replayed on the selected row.
               </div>
@@ -173,8 +177,8 @@
 
   </div><!-- /data-ap-page-body -->
 
-  <script src="/static/js/common.js"></script>
-  <script src="/static/js/ap-ui.js"></script>
-  <script src="/static/js/review.js"></script>
+  <script src="/static/js/common.js?v=20260705c"></script>
+  <script src="/static/js/ap-ui.js?v=20260705c"></script>
+  <script src="/static/js/review.js?v=20260705c"></script>
 </body>
 </html>

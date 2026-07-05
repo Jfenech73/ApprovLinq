@@ -283,9 +283,9 @@ function ensureExplainabilityStyles() {
   const st = document.createElement("style");
   st.id = "reviewExplainabilityStyles";
   st.textContent = `
-    .review-rows-body{display:flex;flex-direction:column;gap:8px;padding:8px}
-    .row-list-scroll{min-height:180px;overflow-y:auto;overflow-x:hidden;flex:1;border-bottom:1px solid var(--ap-border,#d7e0ea);padding-bottom:8px}
-    .selected-explain-panel{flex-shrink:0;max-height:24%;overflow:auto;border-top:1px solid var(--ap-border,#d7e0ea);padding-top:8px}
+    .review-rows-body{display:flex;flex-direction:column;gap:8px;padding:8px;height:100%;min-height:0;overflow:hidden}
+    .row-list-scroll{min-height:0;height:100%;overflow-y:auto;overflow-x:hidden;flex:1 1 auto;border-bottom:0;padding-bottom:0}
+    .selected-explain-panel{flex:0 0 auto;max-height:140px;overflow:auto;border-top:1px solid var(--ap-border,#d7e0ea);padding-top:8px}
     .selected-explain-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
     .selected-explain-head h3{margin:0;font-size:13px;font-weight:700;color:var(--ap-text-muted,#536476)}
     .review-explain-card{border:1px solid var(--ap-border,#d7e0ea);background:var(--ap-surface,#fff);border-radius:10px;padding:10px;margin-bottom:0;font-size:12px;line-height:1.45;overflow-wrap:anywhere}
@@ -1019,6 +1019,10 @@ async function loadSavedRegions() {
   }
 }
 
+function loadSavedRegions() {
+  return loadSavedRules();
+}
+
 function savedRuleTypeLabel(type) {
   const labels = {
     supplier_alias: "Supplier alias",
@@ -1236,6 +1240,12 @@ if (applySavedRegionsBtn) applySavedRegionsBtn.addEventListener("click", handleA
 
 const savedRegionsBtn = $("savedRegionsBtn");
 if (savedRegionsBtn) savedRegionsBtn.addEventListener("click", handleSavedRegionsToggleClick);
+
+const savedRulesCloseBtn = $("savedRulesCloseBtn");
+if (savedRulesCloseBtn) savedRulesCloseBtn.addEventListener("click", (e) => {
+  e.preventDefault();
+  setSavedRegionsPanelOpen(false);
+});
 
 // Extra delegated fallback: if a later render or browser extension replaces the
 // buttons, the actions still trigger.  This also makes failures visible instead
