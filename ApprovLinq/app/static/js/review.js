@@ -285,7 +285,7 @@ function ensureExplainabilityStyles() {
   st.textContent = `
     .review-rows-body{display:flex;flex-direction:column;gap:8px;padding:8px}
     .row-list-scroll{min-height:180px;overflow-y:auto;overflow-x:hidden;flex:1;border-bottom:1px solid var(--ap-border,#d7e0ea);padding-bottom:8px}
-    .selected-explain-panel{flex-shrink:0;max-height:38%;overflow:auto;border-top:1px solid var(--ap-border,#d7e0ea);padding-top:8px}
+    .selected-explain-panel{flex-shrink:0;max-height:24%;overflow:auto;border-top:1px solid var(--ap-border,#d7e0ea);padding-top:8px}
     .selected-explain-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
     .selected-explain-head h3{margin:0;font-size:13px;font-weight:700;color:var(--ap-text-muted,#536476)}
     .review-explain-card{border:1px solid var(--ap-border,#d7e0ea);background:var(--ap-surface,#fff);border-radius:10px;padding:10px;margin-bottom:0;font-size:12px;line-height:1.45;overflow-wrap:anywhere}
@@ -968,7 +968,7 @@ function setSavedRegionsPanelOpen(open) {
   panel.style.display = open ? "flex" : "none";
   if (btn) {
     btn.setAttribute("aria-expanded", open ? "true" : "false");
-    btn.textContent = open ? "Hide saved regions" : "Manage saved regions";
+    btn.textContent = open ? "Hide saved rules" : "Manage saved rules";
   }
 }
 
@@ -1019,6 +1019,142 @@ async function loadSavedRegions() {
   }
 }
 
+function savedRuleTypeLabel(type) {
+  const labels = {
+    supplier_alias: "Supplier alias",
+    nominal_remap: "Nominal remap",
+    remap_field_value: "Field remap",
+    text_correction: "Text correction",
+    saved_region: "Saved region",
+  };
+  return labels[type] || String(type || "Rule").replace(/_/g, " ");
+}
+
+function savedRuleScopeLabel(item) {
+  if (item.is_global) return "Global";
+  return item.applies_to === "this_company" ? "This company" : "All companies";
+}
+
+function renderSavedRegionRule(h) {
+  const hintId = h.hint_id || String(h.id || "").replace(/^hint-/, "");
+  const role = h.archived ? "archived" : (h.is_primary ? "primary" : (h.active ? "fallback" : "disabled"));
+  return `
+    <div class="saved-rule-card" data-saved-region-id="${esc(hintId)}" style="border-bottom:1px solid var(--ap-border);padding:6px 0;opacity:${h.active && !h.archived ? "1" : "0.55"}">
+      <div class="row gap-sm" style="align-items:center;justify-content:space-between">
+        <strong>${esc(h.field_name)}</strong>
+        <span class="row gap-sm">
+          <span class="pill ${h.is_primary ? "ok" : h.archived ? "warning" : ""}">${esc(role)}</span>
+          <span class="pill">${esc(savedRuleScopeLabel(h))}</span>
+        </span>
+      </div>
+      <div class="muted">${esc(h.source_pattern || "supplier/layout saved region")}</div>
+      <div class="muted">${esc(h.target_value || "")}</div>
+      <div class="row gap-sm" style="margin-top:5px;flex-wrap:wrap">
+        ${!h.archived && !h.is_primary ? `<button class="btn btn-sm" type="button" data-primary-region="${esc(hintId)}">Set primary</button>` : ""}
+        ${h.archived
+          ? `<button class="btn btn-sm" type="button" data-restore-region="${esc(hintId)}">Restore</button><button class="btn btn-sm" type="button" data-hard-delete-region="${esc(hintId)}" style="color:var(--ap-err-fg);border-color:var(--ap-err-fg)">Delete permanently</button>`
+          : `${h.active
+              ? `<button class="btn btn-sm" type="button" data-disable-region="${esc(hintId)}">Disable</button>`
+              : `<button class="btn btn-sm" type="button" data-enable-region="${esc(hintId)}">Enable</button>`}
+             <button class="btn btn-sm" type="button" data-archive-region="${esc(hintId)}" data-delete-region="${esc(hintId)}" title="Archive saved region">Archive</button>`}
+      </div>
+    </div>`;
+}
+
+function renderEditableSavedRule(rule) {
+  const disabled = rule.is_global ? "disabled" : "";
+  return `
+    <div class="saved-rule-card" data-rule-id="${esc(rule.id)}" style="border-bottom:1px solid var(--ap-border);padding:6px 0">
+      <div class="row gap-sm" style="align-items:center;justify-content:space-between">
+        <strong>${esc(savedRuleTypeLabel(rule.rule_type))}: ${esc(rule.field_name || "")}</strong>
+        <span class="pill">${esc(savedRuleScopeLabel(rule))}</span>
+      </div>
+      <label style="display:block;margin-top:5px;font-size:12px">
+        Match
+        <input class="ap-input saved-rule-source" type="text" value="${esc(rule.source_pattern || "")}" ${disabled} />
+      </label>
+      <label style="display:block;margin-top:5px;font-size:12px">
+        Value
+        <input class="ap-input saved-rule-target" type="text" value="${esc(rule.target_value || "")}" ${disabled} />
+      </label>
+      <label class="row gap-sm" style="align-items:center;margin-top:5px;font-size:12px">
+        <input class="saved-rule-active" type="checkbox" ${rule.active ? "checked" : ""} ${disabled} /> Active
+      </label>
+      <div class="row gap-sm" style="margin-top:6px;flex-wrap:wrap">
+        <button class="btn btn-sm" type="button" data-rule-save="${esc(rule.id)}" ${disabled}>Save</button>
+        ${rule.company_id && !rule.is_global ? `<button class="btn btn-sm" type="button" data-rule-wide="${esc(rule.id)}">Make tenant-wide</button>` : ""}
+        <button class="btn btn-sm" type="button" data-rule-delete="${esc(rule.id)}" ${disabled} style="color:var(--ap-err-fg);border-color:var(--ap-err-fg)">Delete</button>
+      </div>
+      ${rule.origin_batch_id ? `<div class="muted" style="margin-top:4px">Origin batch ${esc(String(rule.origin_batch_id).slice(0, 8))}${rule.origin_row_id ? ` &middot; row ${esc(rule.origin_row_id)}` : ""}</div>` : ""}
+    </div>`;
+}
+
+async function loadSavedRules() {
+  const panel = $("savedRegionsPanel");
+  const list = $("savedRegionsList");
+  if (!panel || !list) return;
+  list.innerHTML = `<div class="muted">Loading saved rules...</div>`;
+  try {
+    const r = await fetch(`/review/rules?include_saved_regions=true&active_only=false`, { headers: hdrs() });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    const items = Array.isArray(data) ? data : (data.items || []);
+    if (!items.length) {
+      list.innerHTML = `<div class="muted">No saved rules found for this tenant yet.</div>`;
+      return;
+    }
+    const rules = items.filter(x => x.item_type !== "saved_region");
+    const regions = items.filter(x => x.item_type === "saved_region");
+    const summary = `<div class="muted" style="margin-bottom:6px">${esc(rules.length)} field rule(s), ${esc(regions.length)} saved region(s). Tenant-wide rules apply to all companies in the tenant.</div>`;
+    list.innerHTML = summary + items.slice(0, 200).map(item =>
+      item.item_type === "saved_region" ? renderSavedRegionRule(item) : renderEditableSavedRule(item)
+    ).join("");
+  } catch (e) {
+    list.innerHTML = `<div class="message error">Could not load saved rules: ${esc(e.message)}</div>`;
+    msg(`Could not load saved rules: ${e.message}`, "error");
+  }
+}
+
+async function handleSavedRuleEditClick(btn, action) {
+  const id = btn.getAttribute(`data-rule-${action}`);
+  const card = btn.closest("[data-rule-id]");
+  if (!id || !card) return;
+  try {
+    if (action === "delete") {
+      if (!confirm(`Delete saved rule ${id}?`)) return;
+      const r = await fetch(`/review/rules/${id}`, { method: "DELETE", headers: hdrs() });
+      if (!r.ok) throw new Error(await r.text());
+      msg("Saved rule deleted.", "success");
+    } else if (action === "wide") {
+      const r = await fetch(`/review/rules/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...hdrs() },
+        body: JSON.stringify({ applies_to: "all_companies" }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      msg("Saved rule is now available to all companies in this tenant.", "success");
+    } else {
+      const source = card.querySelector(".saved-rule-source");
+      const target = card.querySelector(".saved-rule-target");
+      const active = card.querySelector(".saved-rule-active");
+      const r = await fetch(`/review/rules/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...hdrs() },
+        body: JSON.stringify({
+          source_pattern: source ? source.value : undefined,
+          target_value: target ? target.value : undefined,
+          active: active ? active.checked : undefined,
+        }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      msg("Saved rule updated.", "success");
+    }
+    await loadSavedRules();
+  } catch (e) {
+    msg(`Saved rule ${action} failed: ${e && e.message ? e.message : e}`, "error");
+  }
+}
+
 
 async function handleApplySavedRegionsClick(evt) {
   if (evt) { evt.preventDefault(); evt.stopPropagation(); }
@@ -1040,15 +1176,15 @@ async function handleApplySavedRegionsClick(evt) {
       render();
       loadAudit(row.id);
     }
-    if (!row) { msg("No extracted row is available for saved-region replay.", "error"); setApplySavedRegionsStatus("No row selected", "error"); return; }
-    if (!batchId) { msg("Missing batch_id in review URL; cannot apply saved regions.", "error"); setApplySavedRegionsStatus("Missing batch", "error"); return; }
+    if (!row) { msg("No extracted row is available for saved-rule replay.", "error"); setApplySavedRegionsStatus("No row selected", "error"); return; }
+    if (!batchId) { msg("Missing batch_id in review URL; cannot apply saved rules.", "error"); setApplySavedRegionsStatus("Missing batch", "error"); return; }
 
-    msg("Applying saved regions to selected row…", "");
+    msg("Applying saved rules to selected row...", "");
     const r = await fetch(`/review/batches/${batchId}/rows/${row.id}/apply-saved-regions`, {
       method: "POST",
       headers: hdrs(),
     });
-    if (!r.ok) { msg(`Apply saved regions failed: ${await r.text()}`, "error"); return; }
+    if (!r.ok) { msg(`Apply saved rules failed: ${await r.text()}`, "error"); return; }
     const data = await r.json().catch(() => ({}));
     const fields = data.changed_fields || [];
     const conflicts = data.conflict_fields || [];
@@ -1057,7 +1193,7 @@ async function handleApplySavedRegionsClick(evt) {
     const checkedFields = Array.isArray(diag.fields_checked) ? diag.fields_checked.join(", ") : "";
     const skipped = Array.isArray(diag.skipped_reasons) ? diag.skipped_reasons.join("; ") : "";
     if (fields.length) {
-      const text = `Saved regions applied: ${fields.join(", ")}. Please verify before approval.`;
+      const text = `Saved rules applied: ${fields.join(", ")}. Please verify before approval.`;
       msg(text, "success");
       setApplySavedRegionsStatus(`Changed: ${fields.join(", ")}${checkedFields ? ` | Checked: ${checkedFields}` : ""}`, "success");
       const keepSelected = row.id;
@@ -1066,33 +1202,33 @@ async function handleApplySavedRegionsClick(evt) {
       const updated = state.rows.find(x => x.id === keepSelected);
       if (updated) { state.fileId = updated.source_file_id; state.page = updated.page_no || 1; render(); await loadAudit(keepSelected); await ensurePageCount(); refreshPreview(); }
     } else if (conflicts.length) {
-      const text = `Saved regions checked ${checked ? `(${checked}) ` : ""}but conflicted with existing values: ${conflicts.join(", ")}. Field left unchanged.`;
+      const text = `Saved rules checked ${checked ? `(${checked}) ` : ""}but conflicted with existing values: ${conflicts.join(", ")}. Field left unchanged.`;
       msg(text, "warning");
       setApplySavedRegionsStatus(`Conflict: ${conflicts.join(", ")}${checkedFields ? ` | Checked: ${checkedFields}` : ""}`, "warning");
       await loadAudit(row.id);
       renderSelectedExplainPanel();
     } else {
-      const text = `Saved regions checked${checked ? ` (${checked})` : ""} — no field changed on the selected row.`;
+      const text = `Saved rules checked${checked ? ` (${checked})` : ""} - no field changed on the selected row.`;
       msg(text, "warning");
       setApplySavedRegionsStatus(`Checked; no change${skipped ? ` | ${skipped}` : ""}`, "warning");
       await loadAudit(row.id);
       renderSelectedExplainPanel();
     }
   } catch (e) {
-    msg(`Apply saved regions failed: ${e && e.message ? e.message : e}`, "error");
+    msg(`Apply saved rules failed: ${e && e.message ? e.message : e}`, "error");
     setApplySavedRegionsStatus("Apply failed", "error");
   } finally {
-    if (btn) { btn.dataset.busy = "0"; btn.disabled = false; btn.textContent = oldText || "Apply saved regions to row"; }
+    if (btn) { btn.dataset.busy = "0"; btn.disabled = false; btn.textContent = oldText || "Apply saved rules to row"; }
   }
 }
 
 async function handleSavedRegionsToggleClick(evt) {
   if (evt) { evt.preventDefault(); evt.stopPropagation(); }
   const panel = $("savedRegionsPanel");
-  if (!panel) { msg("Saved regions panel is not available on this page.", "error"); return; }
+  if (!panel) { msg("Saved rules panel is not available on this page.", "error"); return; }
   const isClosed = panel.hidden || panel.classList.contains("ap-hidden") || getComputedStyle(panel).display === "none";
   setSavedRegionsPanelOpen(isClosed);
-  if (isClosed) await loadSavedRegions();
+  if (isClosed) await loadSavedRules();
 }
 
 const applySavedRegionsBtn = $("applySavedRegionsBtn");
@@ -1110,6 +1246,19 @@ document.addEventListener("click", async (e) => {
   if (savedBtn) await handleSavedRegionsToggleClick(e);
   if (applyBtn) await handleApplySavedRegionsClick(e);
 }, true);
+
+document.addEventListener("click", async (e) => {
+  const saveBtn = e.target.closest && e.target.closest("[data-rule-save]");
+  const deleteBtn = e.target.closest && e.target.closest("[data-rule-delete]");
+  const wideBtn = e.target.closest && e.target.closest("[data-rule-wide]");
+  const picked = saveBtn || deleteBtn || wideBtn;
+  if (!picked) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (saveBtn) await handleSavedRuleEditClick(saveBtn, "save");
+  if (deleteBtn) await handleSavedRuleEditClick(deleteBtn, "delete");
+  if (wideBtn) await handleSavedRuleEditClick(wideBtn, "wide");
+});
 
 document.addEventListener("click", async (e) => {
   const targets = [
@@ -1134,7 +1283,7 @@ document.addEventListener("click", async (e) => {
   const r = await fetch(url, { method, headers: hdrs() });
   if (!r.ok) { msg(`Saved region ${label} failed: ${await r.text()}`, "error"); return; }
   msg(`Saved region ${label} complete.`, "success");
-  await loadSavedRegions();
+  await loadSavedRules();
 });
 
 if (typeof ensureAuth === "function" && !ensureAuth()) {

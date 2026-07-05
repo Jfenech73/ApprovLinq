@@ -576,6 +576,11 @@ html[data-theme="dark"] .ap-app .stat-value { color: var(--ap-text) !important; 
   max-height: 60vh;
 }
 
+.ap-app .review-col-rows .row-list {
+  max-height: none;
+  min-height: 100%;
+}
+
 /* Base row card */
 .ap-app .review-row {
   padding: 10px 12px;

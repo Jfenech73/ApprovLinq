@@ -285,11 +285,12 @@ function applyReviewStates(fileStates) {
     if (!fs) return;
     const cell = tr.querySelector(".review-cell");
     if (!cell) return;
+    const reviewReady = isFileReviewReady(fs);
     cell.innerHTML = renderReviewCell(fs, state.selectedBatchId);
-    tr.classList.toggle("needs-review", fs.review_state === "needs_review");
+    tr.classList.toggle("needs-review", reviewReady && fs.review_state === "needs_review");
     // Row flash on needs_review transition (no popup toast)
     const key = `${state.selectedBatchId}|${fs.file_id}`;
-    if (fs.review_state === "needs_review" && !_announcedReviewFiles.has(key)) {
+    if (reviewReady && fs.review_state === "needs_review" && !_announcedReviewFiles.has(key)) {
       _announcedReviewFiles.add(key);
       tr.classList.add("row-flash");
       setTimeout(() => tr.classList.remove("row-flash"), 2500);
@@ -297,7 +298,15 @@ function applyReviewStates(fileStates) {
   });
 }
 
+function isFileReviewReady(fs) {
+  const status = String(fs && (fs.status || fs.file_status || "") || "").toLowerCase();
+  if (["processed", "partial", "failed", "completed", "complete", "done", "error"].includes(status)) return true;
+  if (fs && (fs.finished_at || fs.processed_at || fs.completed_at)) return true;
+  return false;
+}
+
 function renderReviewCell(fs, batchId) {
+  if (!isFileReviewReady(fs)) return "-";
   if (fs.review_state === "needs_review") {
     const url = reviewUrl(batchId, fs.file_id);
     const fields = fs.flagged_fields && fs.flagged_fields.length

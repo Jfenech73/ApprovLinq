@@ -133,18 +133,18 @@
               <button id="savedRegionsBtn" class="btn btn-sm" type="button"
                       aria-expanded="false"
                       aria-controls="savedRegionsPanel"
-                      title="Open the saved region maintenance panel">
-                Manage saved regions
+                      title="Open the saved rules maintenance panel">
+                Manage saved rules
               </button>
               <button id="applySavedRegionsBtn" class="btn btn-sm" type="button"
-                      title="Replay active saved regions against the selected row now">
-                Apply saved regions to row
+                      title="Replay active saved rules against the selected row now">
+                Apply saved rules to row
               </button>
               <span id="applySavedRegionsStatus" class="muted" style="font-size:12px"></span>
             </div>
-            <div id="savedRegionsPanel" class="remap-hint ap-hidden" style="display:none;margin-top:6px;max-height:190px;overflow:auto;align-items:stretch;justify-content:flex-start;flex-direction:column">
+            <div id="savedRegionsPanel" class="remap-hint ap-hidden" role="dialog" aria-label="Manage saved rules" style="display:none;margin-top:6px;max-height:260px;overflow:auto;align-items:stretch;justify-content:flex-start;flex-direction:column">
               <div class="muted" style="font-size:12px;margin-bottom:4px">
-                Saved regions are reviewer-approved coordinates. They are replayed on future scans and can be manually replayed on the selected row. Use this panel to confirm what is saved, disable duplicates, re-enable useful regions, or delete unusable regions.
+                Saved rules include reviewer-created field rules and saved regions. They are replayed on future scans and can be manually replayed on the selected row.
               </div>
               <div id="savedRegionsList" class="stack" style="gap:4px;font-size:12px"></div>
             </div>

@@ -24,12 +24,15 @@ def test_manage_saved_regions_panel_uses_explicit_visibility_not_hidden_only():
     assert "function setSavedRegionsPanelOpen" in js
     assert 'panel.style.display = open ? "flex" : "none"' in js
     assert 'btn.setAttribute("aria-expanded"' in js
-    assert 'Hide saved regions' in js
+    assert 'Hide saved rules' in js
 
 
-def test_manage_saved_regions_loads_all_regions_and_supports_enable_disable_delete():
+def test_manage_saved_rules_loads_rules_regions_and_supports_enable_disable_delete():
     js = _read("app/static/js/review.js")
     review = _read("app/routers/review.py")
+    assert "/review/rules?include_saved_regions=true&active_only=false" in js
+    assert 'data-rule-save' in js
+    assert 'data-rule-delete' in js
     assert "/review/remap-hints?include_inactive=true" in js
     assert 'data-enable-region' in js
     assert 'data-disable-region' in js

@@ -167,6 +167,7 @@ def apply_field_changes(
                 ).scalar_one_or_none()
                 if existing:
                     # Re-activate if it was disabled; update provenance metadata
+                    existing.company_id = None
                     if not existing.active:
                         existing.active = True
                         existing.disabled_by = None
@@ -178,7 +179,7 @@ def apply_field_changes(
                 else:
                     db.add(CorrectionRule(
                         tenant_id=batch.tenant_id,
-                        company_id=batch.company_id,
+                        company_id=None,
                         rule_type=rule_type,
                         field_name=field,
                         source_pattern=src,

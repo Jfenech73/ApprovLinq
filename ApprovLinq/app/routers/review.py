@@ -1935,6 +1935,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
                 ).scalar_one_or_none()
 
                 if existing_rule:
+                    existing_rule.company_id = None
                     if not existing_rule.active:
                         existing_rule.active = True
                         existing_rule.disabled_by = None
@@ -1949,7 +1950,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
                 else:
                     db.add(CorrectionRule(
                         tenant_id=batch.tenant_id,
-                        company_id=batch.company_id,
+                        company_id=None,
                         rule_type="remap_field_value",
                         field_name=payload.field_name,
                         source_pattern=_norm,
@@ -2392,11 +2393,11 @@ def apply_saved_regions_to_row(
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ):
-    """Manually replay active saved regions against one review row.
+    """Manually replay active saved regions and field rules against one review row.
 
-    The Saved regions panel is mainly maintenance.  This action gives reviewers
+    The saved rules panel is mainly maintenance.  This action gives reviewers
     an explicit way to prove whether the current row is being improved by saved
-    coordinates, without waiting for the next batch scan.
+    coordinates or saved field rules, without waiting for the next batch scan.
     """
     batch = _get_batch(db, batch_id)
     row = db.get(M.InvoiceRow, row_id)
@@ -2410,7 +2411,8 @@ def apply_saved_regions_to_row(
     tracked = (
         "supplier_name", "invoice_number", "invoice_date",
         "net_amount", "vat_amount", "total_amount",
-        "nominal_account_code", "description",
+        "nominal_account_code", "supplier_posting_account",
+        "description", "currency", "tax_code",
     )
     before = {f: getattr(row, f, None) for f in tracked}
     supplier_before = row.supplier_name
@@ -2424,13 +2426,17 @@ def apply_saved_regions_to_row(
     ) or 0
 
     try:
-        from app.routers.batches import _apply_remap_hints, _apply_master_data_enrichment
+        from app.routers.batches import _apply_remap_hints, _apply_master_data_enrichment, _apply_saved_rules
         _apply_remap_hints(db, batch, row)
         if row.supplier_name != supplier_before:
             _apply_master_data_enrichment(db, batch.tenant_id, batch.company_id, row)
+        supplier_before_rules = row.supplier_name
+        _apply_saved_rules(db, batch, row)
+        if row.supplier_name != supplier_before_rules:
+            _apply_master_data_enrichment(db, batch.tenant_id, batch.company_id, row)
     except Exception as exc:
         logger.warning("apply_saved_regions_to_row failed row_id=%s: %s", row_id, exc)
-        raise HTTPException(500, f"Saved region replay failed: {exc}")
+        raise HTTPException(500, f"Saved rule replay failed: {exc}")
 
     after = {f: getattr(row, f, None) for f in tracked}
     changed = {
@@ -2449,7 +2455,7 @@ def apply_saved_regions_to_row(
         row.review_required = True
         row.validation_status = row.validation_status or "saved_region_applied"
         reasons = [x for x in re.split(r"[|]", row.review_reasons or "") if x]
-        reason = "Saved region replay changed field values; verify before approval"
+        reason = "Saved rule replay changed field values; verify before approval"
         if reason not in reasons:
             reasons.append(reason)
         row.review_reasons = "|".join(reasons)[:500]
@@ -2459,8 +2465,8 @@ def apply_saved_regions_to_row(
             field_name="saved_regions",
             old_value=None,
             new_value=", ".join(changed.keys()),
-            action="saved_region_replay",
-            note="Manually replayed saved regions from review page",
+            action="saved_rule_replay",
+            note="Manually replayed saved regions and field rules from review page",
             rule_created=False,
             user_id=user.id,
             username=getattr(user, "email", None) or str(user.id),
@@ -2473,7 +2479,11 @@ def apply_saved_regions_to_row(
         .filter(
             InvoiceRowFieldAudit.row_id == row.id,
             InvoiceRowFieldAudit.id > last_audit_id,
-            InvoiceRowFieldAudit.action.like("saved_region%"),
+            or_(
+                InvoiceRowFieldAudit.action.like("saved_region%"),
+                InvoiceRowFieldAudit.action.like("saved_rule%"),
+                InvoiceRowFieldAudit.action.like("rule%"),
+            ),
         )
         .order_by(InvoiceRowFieldAudit.id.asc())
         .all()
@@ -2500,7 +2510,7 @@ def apply_saved_regions_to_row(
         "values_read": changed,
         "fields_changed": list(changed.keys()),
         "conflicts": conflict_fields,
-        "skipped_reasons": [] if checked_changed else ["No applicable active saved region changed the selected row."],
+        "skipped_reasons": [] if checked_changed else ["No applicable active saved rule changed the selected row."],
     }
     return {
         "changed": changed,

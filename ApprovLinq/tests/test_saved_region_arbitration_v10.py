@@ -56,16 +56,17 @@ def test_manual_apply_saved_regions_endpoint_and_ui_present():
     assert "apply_saved_regions_to_row" in review
     assert "/apply-saved-regions" in review
     assert "applySavedRegionsBtn" in html
-    assert "Apply saved regions to row" in html
+    assert "Apply saved rules to row" in html
     assert "apply-saved-regions" in js
-    assert "Saved regions checked" in js
+    assert "Saved rules checked" in js
+    assert "_apply_saved_rules(db, batch, row)" in review
 
 
-def test_saved_regions_button_is_maintenance_not_invisible_action():
+def test_saved_rules_button_is_maintenance_not_invisible_action():
     html = _read("app/static/review.html")
     js = _read("app/static/js/review.js")
-    assert "Manage saved regions" in html
-    assert "reviewer-approved coordinates" in html
+    assert "Manage saved rules" in html
+    assert "reviewer-created field rules and saved regions" in html
     assert "Disable" in js and "Delete" in js
 
 
