@@ -49,7 +49,7 @@ return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officed
 ## Migration
 ```bash
 pip install alembic
-export DATABASE_URL=postgresql+psycopg://user:pass@host/db
+export DATABASE_URL=
 alembic upgrade head
 ```
 Rollback: `alembic downgrade -1` (drops new tables and the 7 added columns).

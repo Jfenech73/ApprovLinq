@@ -32,7 +32,7 @@ This build is set up to avoid local Tesseract by default.
 
 Set:
 - `OCR_PROVIDER=ocr_space`
-- `OCR_SPACE_API_KEY=your_key`
+- `OCR_SPACE_API_KEY=`
 
 If you want no OCR fallback at all, set:
 - `OCR_PROVIDER=none`

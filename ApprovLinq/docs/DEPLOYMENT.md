@@ -36,14 +36,15 @@ of a Koyeb startup/reload command.
 1. Extract the ZIP.
 2. Open the folder in VS Code.
 3. Copy `.env.example` to `.env`.
-4. Fill in at least:
+4. Fill in the values locally. Do not commit `.env` or include it in a
+   distributable archive.
 
 ```env
-DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST/DATABASE?sslmode=require
-USE_OPENAI=true
-OPENAI_API_KEY=your_openai_key
-OCR_PROVIDER=ocr_space
-OCR_SPACE_API_KEY=your_ocr_space_key
+DATABASE_URL=
+USE_OPENAI=
+OPENAI_API_KEY=
+OCR_PROVIDER=
+OCR_SPACE_API_KEY=
 ```
 
 If you do not want LLM support yet:
@@ -153,24 +154,25 @@ Test in this order:
 4. Select your repository.
 5. Koyeb should detect the `Dockerfile`.
 6. Expose port `8000`.
-7. Add these environment variables:
+7. Add these environment variables in Koyeb's environment/secrets settings.
+   Do not bake them into the image and do not upload a `.env` file.
 
 ```env
-APP_ENV=production
-DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST/DATABASE?sslmode=require
-USE_OPENAI=true
-OPENAI_API_KEY=your_openai_key
-OCR_PROVIDER=ocr_space
-OCR_SPACE_API_KEY=your_ocr_space_key
-OCR_SPACE_ENDPOINT=https://api.ocr.space/parse/image
-OCR_SPACE_LANGUAGE=eng
-OCR_SPACE_OVERLAY_REQUIRED=false
-OCR_SPACE_SCALE=true
-OCR_SPACE_OCR_ENGINE=2
-OCR_SPACE_TIMEOUT_SECONDS=45
-AZURE_DI_PAGE_TIMEOUT_S=25
-EXTRACTION_PAGE_TIMEOUT_S=120
-EXTRACTION_CONSECUTIVE_TIMEOUT_LIMIT=3
+APP_ENV=
+DATABASE_URL=
+USE_OPENAI=
+OPENAI_API_KEY=
+OCR_PROVIDER=
+OCR_SPACE_API_KEY=
+OCR_SPACE_ENDPOINT=
+OCR_SPACE_LANGUAGE=
+OCR_SPACE_OVERLAY_REQUIRED=
+OCR_SPACE_SCALE=
+OCR_SPACE_OCR_ENGINE=
+OCR_SPACE_TIMEOUT_SECONDS=
+AZURE_DI_PAGE_TIMEOUT_S=
+EXTRACTION_PAGE_TIMEOUT_S=
+EXTRACTION_CONSECUTIVE_TIMEOUT_LIMIT=
 ```
 
 8. Deploy the service.
@@ -190,7 +192,22 @@ Then run the same sequence:
 
 ---
 
-## 8. Notes on OCR modes
+## 8. Credential rotation after leaked packages
+If a `.env` file or any other credential file has ever been included in a ZIP,
+container image, source control history or shared support bundle, rotate the
+affected credentials manually before the next production deploy:
+
+- OpenAI API key
+- Azure Document Intelligence key
+- Neon/Postgres database password or role used by `DATABASE_URL`
+- OCR.space API key
+
+After rotation, store the new values only in local `.env` files or managed
+deployment environment variables/secrets.
+
+---
+
+## 9. Notes on OCR modes
 ### OCR.space default
 This is the easiest production mode because it avoids local OCR binaries.
 
@@ -209,7 +226,7 @@ Then add PaddleOCR to `requirements.txt` and rebuild the image.
 
 ---
 
-## 9. Common issues
+## 10. Common issues
 ### Processing works for some PDFs but not image-only scans
 - Make sure `OCR_PROVIDER=ocr_space`
 - Make sure `OCR_SPACE_API_KEY` is correct
@@ -234,7 +251,7 @@ Then add PaddleOCR to `requirements.txt` and rebuild the image.
 
 ---
 
-## 10. Recommended production path
+## 11. Recommended production path
 Start with:
 - native PDF extraction first
 - OCR.space fallback

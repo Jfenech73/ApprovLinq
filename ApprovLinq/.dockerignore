@@ -1,0 +1,41 @@
+.env
+.env.*
+!.env.example
+
+# Credentials and private keys
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_dsa*
+*credentials*.json
+*credential*.json
+*token*.json
+service-account*.json
+
+# Local runtime state
+data/uploads/
+data/exports/
+data/tmp/
+tmp/
+*.db
+*.sqlite
+*.sqlite3
+invoice_scanner.db
+
+# VCS, local envs, caches and test output
+.git/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+*.zip

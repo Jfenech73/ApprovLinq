@@ -17,7 +17,7 @@ try:
     if not _db_url:
         print("ERROR: DATABASE_URL is not set.")
         print("  Set it in ApprovLinq/.env or as an environment variable.")
-        print("  Example: DATABASE_URL=postgresql://user:password@host:5432/dbname")
+        print("  Set DATABASE_URL to the PostgreSQL connection string for the target database.")
         sys.exit(1)
 except Exception as _cfg_err:
     print(f"ERROR: Could not load configuration: {_cfg_err}")
