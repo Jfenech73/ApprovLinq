@@ -166,6 +166,7 @@ create table if not exists invoice_batches (
     page_count      integer,
     notes           text,
     scan_mode       varchar(20)  not null default 'summary',
+    current_scan_run_id uuid,
     created_at      timestamptz  not null default now(),
     processed_at    timestamptz
 );
@@ -174,12 +175,44 @@ create table if not exists invoice_batches (
 alter table invoice_batches add column if not exists tenant_id  uuid references tenants(id)   on delete set null;
 alter table invoice_batches add column if not exists company_id uuid references companies(id) on delete set null;
 alter table invoice_batches add column if not exists scan_mode  varchar(20) default 'summary';
+alter table invoice_batches add column if not exists current_scan_run_id uuid;
 
 -- Ensure scan_mode is never NULL on old rows
 update invoice_batches set scan_mode = 'summary' where scan_mode is null;
 
 create index if not exists idx_invoice_batches_tenant_id  on invoice_batches(tenant_id);
 create index if not exists idx_invoice_batches_company_id on invoice_batches(company_id);
+
+
+-- ---------------------------------------------------------------------------
+-- SCAN RUNS  (immutable processing attempts and evidence identity)
+-- ---------------------------------------------------------------------------
+create table if not exists scan_runs (
+    id                          uuid primary key default gen_random_uuid(),
+    batch_id                    uuid not null references invoice_batches(id) on delete cascade,
+    tenant_id                   uuid references tenants(id) on delete set null,
+    company_id                  uuid references companies(id) on delete set null,
+    run_number                  integer not null,
+    parent_run_id               uuid references scan_runs(id) on delete set null,
+    status                      varchar(40) not null default 'processing',
+    app_version                 varchar(80),
+    extractor_build_tag         varchar(120),
+    scan_mode                   varchar(20),
+    settings_fingerprint        varchar(64),
+    provider_config_fingerprint varchar(64),
+    selected_backend            varchar(80),
+    page_count                  integer,
+    row_count                   integer,
+    notes                       text,
+    error_message               text,
+    started_at                  timestamptz not null default now(),
+    completed_at                timestamptz,
+    created_at                  timestamptz not null default now()
+);
+
+create index if not exists ix_scan_runs_batch_number on scan_runs(batch_id, run_number);
+create index if not exists ix_scan_runs_status       on scan_runs(status);
+create index if not exists ix_scan_runs_parent       on scan_runs(parent_run_id);
 
 
 -- ---------------------------------------------------------------------------
@@ -220,6 +253,7 @@ create table if not exists invoice_rows (
     batch_id                 uuid         not null references invoice_batches(id) on delete cascade,
     tenant_id                uuid         references tenants(id)       on delete set null,
     company_id               uuid         references companies(id)     on delete set null,
+    scan_run_id              uuid         references scan_runs(id)     on delete set null,
     source_file_id           bigint       references invoice_files(id) on delete set null,
     source_filename          varchar(500),
     page_no                  integer      not null,
@@ -248,6 +282,7 @@ create table if not exists invoice_rows (
 -- Back-fill columns added after initial release
 alter table invoice_rows add column if not exists tenant_id               uuid         references tenants(id)       on delete set null;
 alter table invoice_rows add column if not exists company_id              uuid         references companies(id)     on delete set null;
+alter table invoice_rows add column if not exists scan_run_id             uuid         references scan_runs(id)     on delete set null;
 alter table invoice_rows add column if not exists supplier_posting_account varchar(100);
 alter table invoice_rows add column if not exists nominal_account_code    varchar(100);
 
@@ -257,6 +292,7 @@ alter table invoice_rows alter column method_used type varchar(200);
 create index if not exists idx_invoice_rows_batch_id    on invoice_rows(batch_id);
 create index if not exists idx_invoice_rows_tenant_id   on invoice_rows(tenant_id);
 create index if not exists idx_invoice_rows_company_id  on invoice_rows(company_id);
+create index if not exists ix_invoice_rows_scan_run     on invoice_rows(scan_run_id);
 
 
 -- ---------------------------------------------------------------------------
@@ -299,6 +335,7 @@ create table if not exists invoice_read_headers (
     batch_id                      uuid         not null references invoice_batches(id) on delete cascade,
     tenant_id                     uuid         references tenants(id) on delete set null,
     company_id                    uuid         references companies(id) on delete set null,
+    scan_run_id                   uuid         references scan_runs(id) on delete set null,
     source_file_id                bigint       references invoice_files(id) on delete set null,
     row_id                        bigint       references invoice_rows(id) on delete set null,
     source_filename               varchar(500),
@@ -385,6 +422,7 @@ create table if not exists invoice_read_headers (
 create index if not exists ix_invoice_read_headers_batch_page on invoice_read_headers(batch_id, page_no);
 create index if not exists ix_invoice_read_headers_row        on invoice_read_headers(row_id);
 create index if not exists ix_invoice_read_headers_provider   on invoice_read_headers(provider_name);
+create index if not exists ix_invoice_read_headers_scan_run   on invoice_read_headers(scan_run_id);
 
 
 -- ---------------------------------------------------------------------------
@@ -423,6 +461,7 @@ create table if not exists invoice_field_candidates (
     tenant_id        uuid        not null references tenants(id) on delete cascade,
     company_id       uuid        references companies(id) on delete set null,
     batch_id         uuid        not null references invoice_batches(id) on delete cascade,
+    scan_run_id      uuid        references scan_runs(id) on delete set null,
     row_id           bigint      not null references invoice_rows(id) on delete cascade,
     source_file_id   bigint      references invoice_files(id) on delete set null,
     field_name       varchar(80) not null,
@@ -452,6 +491,7 @@ create index if not exists ix_field_candidates_field_name    on invoice_field_ca
 create index if not exists ix_field_candidates_source_type   on invoice_field_candidates(source_type);
 create index if not exists ix_field_candidates_selected      on invoice_field_candidates(selected);
 create index if not exists ix_field_candidates_created_at    on invoice_field_candidates(created_at);
+create index if not exists ix_field_candidates_scan_run      on invoice_field_candidates(scan_run_id);
 
 
 -- =============================================================================

@@ -313,8 +313,12 @@ def _require_admin(user: M.User):
 @router.get("/batches/{batch_id}")
 def get_review_workspace(batch_id: UUID, db: Session = Depends(get_db), user=Depends(current_user)):
     batch = _get_batch(db, batch_id)
-    rows = db.execute(select(M.InvoiceRow).where(M.InvoiceRow.batch_id == batch_id)
-                      .order_by(M.InvoiceRow.source_file_id, M.InvoiceRow.page_no, M.InvoiceRow.id)).scalars().all()
+    row_query = select(M.InvoiceRow).where(M.InvoiceRow.batch_id == batch_id)
+    if getattr(batch, "current_scan_run_id", None) is not None:
+        row_query = row_query.where(M.InvoiceRow.scan_run_id == batch.current_scan_run_id)
+    rows = db.execute(
+        row_query.order_by(M.InvoiceRow.source_file_id, M.InvoiceRow.page_no, M.InvoiceRow.id)
+    ).scalars().all()
     cmap = cs.load_correction_map(db, batch_id)
     row_audits: dict[int, list[InvoiceRowFieldAudit]] = {}
     row_ids = [r.id for r in rows]
@@ -421,6 +425,7 @@ def delete_review_row(batch_id: UUID, row_id: int,
         raise HTTPException(404, "Row not found in batch")
     db.add(InvoiceRowFieldAudit(
         batch_id=batch.id,
+        scan_run_id=getattr(row, "scan_run_id", None),
         row_id=row.id,
         field_name="_row",
         old_value=f"{row.supplier_name or ''} | {row.invoice_number or ''} | {row.total_amount or ''}"[:500],
@@ -456,6 +461,7 @@ def duplicate_row(batch_id: UUID, row_id: int,
         batch_id=row.batch_id,
         tenant_id=row.tenant_id,
         company_id=row.company_id,
+        scan_run_id=getattr(row, "scan_run_id", None),
         source_file_id=row.source_file_id,
         source_filename=row.source_filename,
         page_no=row.page_no,
@@ -492,6 +498,7 @@ def duplicate_row(batch_id: UUID, row_id: int,
     from app.db.review_models import InvoiceRowFieldAudit
     audit = InvoiceRowFieldAudit(
         batch_id=batch.id,
+        scan_run_id=getattr(row, "scan_run_id", None),
         row_id=row.id,
         field_name="_action",
         old_value=None,
@@ -552,6 +559,7 @@ def bcrs_split(batch_id: UUID, row_id: int, payload: BcrsSplitIn,
             batch_id=row.batch_id,
             tenant_id=row.tenant_id,
             company_id=row.company_id,
+            scan_run_id=getattr(row, "scan_run_id", None),
             source_file_id=row.source_file_id,
             source_filename=row.source_filename,
             page_no=row.page_no,
@@ -617,7 +625,7 @@ def bcrs_split(batch_id: UUID, row_id: int, payload: BcrsSplitIn,
         # -- Audit entries ----------------------------------------------------
         uname = getattr(user, "email", None) or str(user.id)
         db.add(InvoiceRowFieldAudit(
-            batch_id=batch.id, row_id=row.id,
+            batch_id=batch.id, scan_run_id=getattr(row, "scan_run_id", None), row_id=row.id,
             field_name="total_amount",
             old_value=str(old_total),
             new_value=str(corrected_total),
@@ -626,7 +634,7 @@ def bcrs_split(batch_id: UUID, row_id: int, payload: BcrsSplitIn,
             user_id=user.id, username=uname,
         ))
         db.add(InvoiceRowFieldAudit(
-            batch_id=batch.id, row_id=bcrs_row.id,
+            batch_id=batch.id, scan_run_id=getattr(bcrs_row, "scan_run_id", None), row_id=bcrs_row.id,
             field_name="_action",
             old_value=None,
             new_value=f"bcrs_split - row {row.id} (amount={amount:.2f})",
@@ -785,7 +793,10 @@ def mark_file_reviewed(batch_id: UUID, file_id: int,
     f = db.get(M.InvoiceFile, file_id)
     if not f or f.batch_id != batch.id:
         raise HTTPException(404, "File not found in batch")
-    rows = db.query(M.InvoiceRow).filter(M.InvoiceRow.source_file_id == file_id).all()
+    rows_q = db.query(M.InvoiceRow).filter(M.InvoiceRow.source_file_id == file_id)
+    if getattr(batch, "current_scan_run_id", None) is not None:
+        rows_q = rows_q.filter(M.InvoiceRow.scan_run_id == batch.current_scan_run_id)
+    rows = rows_q.all()
     flagged = [r for r in rows
                if (r.confidence_score is not None and float(r.confidence_score) < 0.55)
                or r.review_required]
@@ -801,11 +812,11 @@ def mark_file_reviewed(batch_id: UUID, file_id: int,
                 corr.row_reviewed = True
                 created += 1
             continue
-        corr = InvoiceRowCorrection(row_id=r.id, batch_id=batch.id, row_reviewed=True)
+        corr = InvoiceRowCorrection(row_id=r.id, batch_id=batch.id, scan_run_id=getattr(r, "scan_run_id", None), row_reviewed=True)
         db.add(corr)
         db.flush()
         db.add(InvoiceRowFieldAudit(
-            batch_id=batch.id, row_id=r.id, field_name="_file_reviewed",
+            batch_id=batch.id, scan_run_id=getattr(r, "scan_run_id", None), row_id=r.id, field_name="_file_reviewed",
             old_value=None, new_value="marked_reviewed",
             action="mark_reviewed", user_id=user.id, note=None,
         ))
@@ -1899,6 +1910,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
             setattr(correction, payload.field_name, read_text)
             db.add(InvoiceRowFieldAudit(
                 batch_id=batch.id,
+                scan_run_id=getattr(row, "scan_run_id", None),
                 row_id=row.id,
                 field_name=payload.field_name,
                 old_value=old_str or None,
@@ -2471,6 +2483,7 @@ def apply_saved_regions_to_row(
         row.review_reasons = "|".join(reasons)[:500]
         db.add(InvoiceRowFieldAudit(
             batch_id=batch.id,
+            scan_run_id=getattr(row, "scan_run_id", None),
             row_id=row.id,
             field_name="saved_regions",
             old_value=None,

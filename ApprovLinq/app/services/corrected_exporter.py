@@ -26,12 +26,15 @@ from app.utils.storage import batch_export_folder
 logger = logging.getLogger(__name__)
 
 
-def _build_di_candidate_summary_map(db: Session, batch_id) -> dict[int, str]:
+def _build_di_candidate_summary_map(db: Session, batch_id, scan_run_id=None) -> dict[int, str]:
+    criteria = [
+        InvoiceFieldCandidate.batch_id == batch_id,
+        InvoiceFieldCandidate.source_type.in_(["azure_di", "azure_di_structured"]),
+    ]
+    if scan_run_id is not None:
+        criteria.append(InvoiceFieldCandidate.scan_run_id == scan_run_id)
     rows = db.execute(
-        select(InvoiceFieldCandidate).where(
-            InvoiceFieldCandidate.batch_id == batch_id,
-            InvoiceFieldCandidate.source_type.in_(["azure_di", "azure_di_structured"]),
-        ).order_by(
+        select(InvoiceFieldCandidate).where(*criteria).order_by(
             InvoiceFieldCandidate.row_id.asc(),
             InvoiceFieldCandidate.field_name.asc(),
             InvoiceFieldCandidate.selected.desc(),
@@ -70,12 +73,15 @@ def _build_di_candidate_summary_map(db: Session, batch_id) -> dict[int, str]:
 
 
 def build_corrected_rows(db: Session, batch: M.InvoiceBatch) -> list[dict]:
+    scan_run_id = getattr(batch, "current_scan_run_id", None)
+    row_query = select(M.InvoiceRow).where(M.InvoiceRow.batch_id == batch.id)
+    if scan_run_id is not None:
+        row_query = row_query.where(M.InvoiceRow.scan_run_id == scan_run_id)
     rows = db.execute(
-        select(M.InvoiceRow).where(M.InvoiceRow.batch_id == batch.id)
-        .order_by(M.InvoiceRow.source_file_id, M.InvoiceRow.page_no, M.InvoiceRow.id)
+        row_query.order_by(M.InvoiceRow.source_file_id, M.InvoiceRow.page_no, M.InvoiceRow.id)
     ).scalars().all()
     cmap = cs.load_correction_map(db, batch.id)
-    di_summary_by_row = _build_di_candidate_summary_map(db, batch.id)
+    di_summary_by_row = _build_di_candidate_summary_map(db, batch.id, scan_run_id)
     out = []
     for r in rows:
         c = cmap.get(r.id)
@@ -159,7 +165,7 @@ def export_batch_corrected(
     logger.info("supplier pattern learning promoted batch=%s patterns=%d source=export", batch.id, promoted_patterns)
 
     ev = BatchExportEvent(
-        batch_id=batch.id, export_version=next_version,
+        batch_id=batch.id, scan_run_id=getattr(batch, "current_scan_run_id", None), export_version=next_version,
         exported_by=user.id, exported_at=datetime.utcnow(),
         file_path=str(export_path), file_bytes=export_bytes, storage_backend="database+local", row_count=len(rows),
     )
@@ -169,7 +175,7 @@ def export_batch_corrected(
     batch.exported_by = user.id
     batch.status = "exported"
     db.add(InvoiceRowFieldAudit(
-        batch_id=batch.id, row_id=0, field_name="__export__",
+        batch_id=batch.id, scan_run_id=getattr(batch, "current_scan_run_id", None), row_id=0, field_name="__export__",
         old_value=None, new_value=f"v{next_version}", action="export",
         user_id=user.id,
     ))

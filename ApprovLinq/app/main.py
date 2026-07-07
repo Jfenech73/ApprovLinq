@@ -55,7 +55,58 @@ def ensure_runtime_schema() -> None:
         "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS tenant_id UUID",
         "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS company_id UUID",
         "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS scan_mode VARCHAR(20) DEFAULT 'summary'",
+        "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS current_scan_run_id UUID",
         "UPDATE invoice_batches SET scan_mode = COALESCE(NULLIF(scan_mode, ''), 'summary')",
+        """CREATE TABLE IF NOT EXISTS scan_runs (
+            id UUID PRIMARY KEY,
+            batch_id UUID NOT NULL REFERENCES invoice_batches(id) ON DELETE CASCADE,
+            tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL,
+            company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
+            run_number INTEGER NOT NULL,
+            parent_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL,
+            status VARCHAR(40) NOT NULL DEFAULT 'processing',
+            app_version VARCHAR(80),
+            extractor_build_tag VARCHAR(120),
+            scan_mode VARCHAR(20),
+            settings_fingerprint VARCHAR(64),
+            provider_config_fingerprint VARCHAR(64),
+            selected_backend VARCHAR(80),
+            page_count INTEGER,
+            row_count INTEGER,
+            notes TEXT,
+            error_message TEXT,
+            started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            completed_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_scan_runs_batch_number ON scan_runs(batch_id, run_number)",
+        "CREATE INDEX IF NOT EXISTS ix_scan_runs_status ON scan_runs(status)",
+        "CREATE INDEX IF NOT EXISTS ix_scan_runs_parent ON scan_runs(parent_run_id)",
+        """INSERT INTO scan_runs (
+            id, batch_id, tenant_id, company_id, run_number, status, scan_mode,
+            page_count, row_count, notes, started_at, completed_at, created_at
+        )
+        SELECT
+            (
+                substr(md5(b.id::text), 1, 8) || '-' ||
+                substr(md5(b.id::text), 9, 4) || '-' ||
+                substr(md5(b.id::text), 13, 4) || '-' ||
+                substr(md5(b.id::text), 17, 4) || '-' ||
+                substr(md5(b.id::text), 21, 12)
+            )::uuid,
+            b.id, b.tenant_id, b.company_id, 1, COALESCE(NULLIF(b.status, ''), 'backfilled'),
+            b.scan_mode, b.page_count,
+            (SELECT COUNT(*) FROM invoice_rows r WHERE r.batch_id = b.id),
+            b.notes, COALESCE(b.created_at, NOW()), b.processed_at, COALESCE(b.created_at, NOW())
+        FROM invoice_batches b
+        WHERE b.current_scan_run_id IS NULL
+        ON CONFLICT (id) DO NOTHING""",
+        """UPDATE invoice_batches b
+        SET current_scan_run_id = sr.id
+        FROM scan_runs sr
+        WHERE b.current_scan_run_id IS NULL
+          AND sr.batch_id = b.id
+          AND sr.run_number = 1""",
 
         # ── invoice_files ────────────────────────────────────────────────────
         "ALTER TABLE invoice_files ADD COLUMN IF NOT EXISTS tenant_id UUID",
@@ -68,6 +119,7 @@ def ensure_runtime_schema() -> None:
         # ── invoice_rows ─────────────────────────────────────────────────────
         "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS tenant_id UUID",
         "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS company_id UUID",
+        "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS scan_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL",
         "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS supplier_posting_account VARCHAR(100)",
         "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS nominal_account_code VARCHAR(100)",
         "ALTER TABLE invoice_rows ALTER COLUMN method_used TYPE TEXT",
@@ -87,6 +139,11 @@ def ensure_runtime_schema() -> None:
         "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS classification_method VARCHAR(50)",
         "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS supplier_match_method VARCHAR(50)",
         "ALTER TABLE invoice_rows ADD COLUMN IF NOT EXISTS totals_reconciliation_status VARCHAR(50)",
+        "CREATE INDEX IF NOT EXISTS ix_invoice_rows_scan_run ON invoice_rows(scan_run_id)",
+        """UPDATE invoice_rows r
+        SET scan_run_id = b.current_scan_run_id
+        FROM invoice_batches b
+        WHERE r.scan_run_id IS NULL AND r.batch_id = b.id""",
 
         # Koyeb-safe read snapshot tables. These must be created/extended
         # idempotently on restart; never rebuild them with DROP TABLE from an
@@ -96,6 +153,7 @@ def ensure_runtime_schema() -> None:
             batch_id UUID NOT NULL REFERENCES invoice_batches(id) ON DELETE CASCADE,
             tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL,
             company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
+            scan_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL,
             source_file_id BIGINT REFERENCES invoice_files(id) ON DELETE SET NULL,
             row_id BIGINT REFERENCES invoice_rows(id) ON DELETE SET NULL,
             source_filename VARCHAR(500),
@@ -187,6 +245,7 @@ def ensure_runtime_schema() -> None:
         "CREATE INDEX IF NOT EXISTS ix_invoice_read_headers_provider ON invoice_read_headers(provider_name)",
         "ALTER TABLE IF EXISTS invoice_read_headers ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL",
         "ALTER TABLE IF EXISTS invoice_read_headers ADD COLUMN IF NOT EXISTS company_id UUID REFERENCES companies(id) ON DELETE SET NULL",
+        "ALTER TABLE IF EXISTS invoice_read_headers ADD COLUMN IF NOT EXISTS scan_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL",
         "ALTER TABLE IF EXISTS invoice_read_headers ADD COLUMN IF NOT EXISTS source_file_id BIGINT REFERENCES invoice_files(id) ON DELETE SET NULL",
         "ALTER TABLE IF EXISTS invoice_read_headers ADD COLUMN IF NOT EXISTS row_id BIGINT REFERENCES invoice_rows(id) ON DELETE SET NULL",
         "ALTER TABLE IF EXISTS invoice_read_headers ADD COLUMN IF NOT EXISTS source_filename VARCHAR(500)",
@@ -265,6 +324,11 @@ def ensure_runtime_schema() -> None:
         "ALTER TABLE IF EXISTS invoice_read_headers ADD COLUMN IF NOT EXISTS \"PaymentDetails\" JSON",
         "ALTER TABLE IF EXISTS invoice_read_headers ADD COLUMN IF NOT EXISTS \"TaxDetails\" JSON",
         "ALTER TABLE IF EXISTS invoice_read_headers ADD COLUMN IF NOT EXISTS \"PaidInFourInstallements\" JSON",
+        "CREATE INDEX IF NOT EXISTS ix_invoice_read_headers_scan_run ON invoice_read_headers(scan_run_id)",
+        """UPDATE invoice_read_headers h
+        SET scan_run_id = b.current_scan_run_id
+        FROM invoice_batches b
+        WHERE h.scan_run_id IS NULL AND h.batch_id = b.id""",
         """CREATE TABLE IF NOT EXISTS invoice_read_details (
             id BIGSERIAL PRIMARY KEY,
             header_id BIGINT NOT NULL REFERENCES invoice_read_headers(id) ON DELETE CASCADE,
@@ -357,6 +421,7 @@ def ensure_runtime_schema() -> None:
         """CREATE TABLE IF NOT EXISTS invoice_row_corrections (
             row_id BIGINT PRIMARY KEY REFERENCES invoice_rows(id) ON DELETE CASCADE,
             batch_id UUID NOT NULL REFERENCES invoice_batches(id) ON DELETE CASCADE,
+            scan_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL,
             supplier_name TEXT, supplier_posting_account VARCHAR(100),
             nominal_account_code VARCHAR(100), invoice_number TEXT,
             invoice_date DATE, description TEXT,
@@ -366,9 +431,16 @@ def ensure_runtime_schema() -> None:
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_by UUID REFERENCES users(id))""",
         "CREATE INDEX IF NOT EXISTS ix_corrections_batch ON invoice_row_corrections(batch_id)",
+        "ALTER TABLE invoice_row_corrections ADD COLUMN IF NOT EXISTS scan_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL",
+        "CREATE INDEX IF NOT EXISTS ix_corrections_scan_run ON invoice_row_corrections(scan_run_id)",
+        """UPDATE invoice_row_corrections c
+        SET scan_run_id = b.current_scan_run_id
+        FROM invoice_batches b
+        WHERE c.scan_run_id IS NULL AND c.batch_id = b.id""",
         """CREATE TABLE IF NOT EXISTS invoice_row_field_audits (
             id BIGSERIAL PRIMARY KEY,
             batch_id UUID NOT NULL REFERENCES invoice_batches(id) ON DELETE CASCADE,
+            scan_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL,
             row_id BIGINT NOT NULL,
             field_name VARCHAR(80) NOT NULL,
             old_value TEXT, new_value TEXT,
@@ -378,6 +450,12 @@ def ensure_runtime_schema() -> None:
             user_id UUID REFERENCES users(id), username VARCHAR(255),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
         "CREATE INDEX IF NOT EXISTS ix_audits_batch_row ON invoice_row_field_audits(batch_id, row_id)",
+        "ALTER TABLE invoice_row_field_audits ADD COLUMN IF NOT EXISTS scan_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL",
+        "CREATE INDEX IF NOT EXISTS ix_audits_scan_run ON invoice_row_field_audits(scan_run_id)",
+        """UPDATE invoice_row_field_audits a
+        SET scan_run_id = b.current_scan_run_id
+        FROM invoice_batches b
+        WHERE a.scan_run_id IS NULL AND a.batch_id = b.id""",
         """CREATE TABLE IF NOT EXISTS correction_rules (
             id BIGSERIAL PRIMARY KEY,
             tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -437,6 +515,7 @@ def ensure_runtime_schema() -> None:
         """CREATE TABLE IF NOT EXISTS batch_export_events (
             id BIGSERIAL PRIMARY KEY,
             batch_id UUID NOT NULL REFERENCES invoice_batches(id) ON DELETE CASCADE,
+            scan_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL,
             export_version INTEGER NOT NULL,
             template_id BIGINT,
             exported_by UUID REFERENCES users(id),
@@ -447,6 +526,12 @@ def ensure_runtime_schema() -> None:
             row_count INTEGER)""",
         "ALTER TABLE batch_export_events ADD COLUMN IF NOT EXISTS file_bytes BYTEA",
         "ALTER TABLE batch_export_events ADD COLUMN IF NOT EXISTS storage_backend VARCHAR(30) NOT NULL DEFAULT 'database+local'",
+        "ALTER TABLE batch_export_events ADD COLUMN IF NOT EXISTS scan_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL",
+        "CREATE INDEX IF NOT EXISTS ix_export_events_scan_run ON batch_export_events(scan_run_id)",
+        """UPDATE batch_export_events e
+        SET scan_run_id = b.current_scan_run_id
+        FROM invoice_batches b
+        WHERE e.scan_run_id IS NULL AND e.batch_id = b.id""",
 
         # ── invoice_field_candidates — future ML/ranking foundation ─────────
         """CREATE TABLE IF NOT EXISTS invoice_field_candidates (
@@ -454,6 +539,7 @@ def ensure_runtime_schema() -> None:
             tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
             company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
             batch_id UUID NOT NULL REFERENCES invoice_batches(id) ON DELETE CASCADE,
+            scan_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL,
             row_id BIGINT NOT NULL REFERENCES invoice_rows(id) ON DELETE CASCADE,
             source_file_id BIGINT REFERENCES invoice_files(id) ON DELETE SET NULL,
             field_name VARCHAR(80) NOT NULL,
@@ -481,12 +567,18 @@ def ensure_runtime_schema() -> None:
         "ALTER TABLE invoice_field_candidates ADD COLUMN IF NOT EXISTS finalised_at TIMESTAMPTZ",
         "ALTER TABLE invoice_field_candidates ADD COLUMN IF NOT EXISTS finalised_by UUID REFERENCES users(id)",
         "ALTER TABLE invoice_field_candidates ADD COLUMN IF NOT EXISTS outcome_source VARCHAR(40)",
+        "ALTER TABLE invoice_field_candidates ADD COLUMN IF NOT EXISTS scan_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL",
         "CREATE INDEX IF NOT EXISTS ix_field_candidates_tenant_company ON invoice_field_candidates(tenant_id, company_id)",
         "CREATE INDEX IF NOT EXISTS ix_field_candidates_batch_row ON invoice_field_candidates(batch_id, row_id)",
         "CREATE INDEX IF NOT EXISTS ix_field_candidates_field_name ON invoice_field_candidates(field_name)",
         "CREATE INDEX IF NOT EXISTS ix_field_candidates_source_type ON invoice_field_candidates(source_type)",
         "CREATE INDEX IF NOT EXISTS ix_field_candidates_selected ON invoice_field_candidates(selected)",
         "CREATE INDEX IF NOT EXISTS ix_field_candidates_created_at ON invoice_field_candidates(created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_field_candidates_scan_run ON invoice_field_candidates(scan_run_id)",
+        """UPDATE invoice_field_candidates c
+        SET scan_run_id = b.current_scan_run_id
+        FROM invoice_batches b
+        WHERE c.scan_run_id IS NULL AND c.batch_id = b.id""",
         "CREATE INDEX IF NOT EXISTS ix_export_events_batch ON batch_export_events(batch_id)",
         # <<< REVIEW_PACK startup_alters
 

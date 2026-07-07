@@ -30,6 +30,7 @@ class InvoiceRowCorrection(Base):
     __tablename__ = "invoice_row_corrections"
     row_id: Mapped[int] = mapped_column(ForeignKey("invoice_rows.id", ondelete="CASCADE"), primary_key=True)
     batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
+    scan_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True)
     supplier_name: Mapped[str | None] = mapped_column(Text)
     supplier_posting_account: Mapped[str | None] = mapped_column(String(100))
     nominal_account_code: Mapped[str | None] = mapped_column(String(100))
@@ -51,6 +52,7 @@ class InvoiceRowFieldAudit(Base):
     __tablename__ = "invoice_row_field_audits"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
+    scan_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True)
     row_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     field_name: Mapped[str] = mapped_column(String(80), nullable=False)
     old_value: Mapped[str | None] = mapped_column(Text)
@@ -74,6 +76,7 @@ class InvoiceFieldCandidate(Base):
     __table_args__ = (
         Index("ix_field_candidates_tenant_company", "tenant_id", "company_id"),
         Index("ix_field_candidates_batch_row", "batch_id", "row_id"),
+        Index("ix_field_candidates_scan_run", "scan_run_id"),
         Index("ix_field_candidates_field_name", "field_name"),
         Index("ix_field_candidates_source_type", "source_type"),
         Index("ix_field_candidates_selected", "selected"),
@@ -84,6 +87,7 @@ class InvoiceFieldCandidate(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     company_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
     batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
+    scan_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True)
     row_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("invoice_rows.id", ondelete="CASCADE"), nullable=False)
     source_file_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("invoice_files.id", ondelete="SET NULL"), nullable=True)
     field_name: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -179,6 +183,7 @@ class BatchExportEvent(Base):
     __tablename__ = "batch_export_events"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
+    scan_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True)
     export_version: Mapped[int] = mapped_column(Integer, nullable=False)
     template_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     exported_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)

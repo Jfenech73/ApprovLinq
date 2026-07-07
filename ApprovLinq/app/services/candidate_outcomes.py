@@ -82,6 +82,7 @@ def label_row_candidates(
             InvoiceFieldCandidate.batch_id == batch.id,
             InvoiceFieldCandidate.row_id == row.id,
             InvoiceFieldCandidate.tenant_id == batch.tenant_id,
+            InvoiceFieldCandidate.scan_run_id == getattr(row, "scan_run_id", None),
         )
     ).scalars().all()
     if not candidates:
@@ -125,9 +126,10 @@ def label_batch_candidates(
     outcome_source: str = "export",
 ) -> int:
     """Label candidates for all rows in a batch at export/acceptance time."""
-    rows = db.execute(
-        select(M.InvoiceRow).where(M.InvoiceRow.batch_id == batch.id)
-    ).scalars().all()
+    row_query = select(M.InvoiceRow).where(M.InvoiceRow.batch_id == batch.id)
+    if getattr(batch, "current_scan_run_id", None) is not None:
+        row_query = row_query.where(M.InvoiceRow.scan_run_id == batch.current_scan_run_id)
+    rows = db.execute(row_query).scalars().all()
     total = 0
     for row in rows:
         total += label_row_candidates(db, batch=batch, row=row, user=user, outcome_source=outcome_source)

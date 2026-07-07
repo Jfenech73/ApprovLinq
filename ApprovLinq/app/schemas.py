@@ -362,6 +362,7 @@ class BatchOut(BaseModel):
     page_count: int | None = None
     notes: str | None = None
     scan_mode: str = "summary"
+    current_scan_run_id: UUID | None = None
     created_at: datetime
     processed_at: datetime | None = None
 
@@ -399,6 +400,7 @@ class InvoiceRowOut(BaseModel):
     batch_id: UUID
     tenant_id: UUID | None = None
     company_id: UUID | None = None
+    scan_run_id: UUID | None = None
     source_file_id: int | None = None
     source_filename: str | None = None
     page_no: int

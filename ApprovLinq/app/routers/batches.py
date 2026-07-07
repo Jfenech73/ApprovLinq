@@ -34,6 +34,7 @@ from app.services.corrected_exporter import build_corrected_rows, export_batch_c
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
 from app.services.invoice_arbitration import arbitrate_invoice_row
 from app.services.scan_performance import ScanPerformanceContext
+from app.services.scan_runs import create_scan_run, mark_scan_run_completed
 from app.services.supplier_pattern_learning import (
     extract_pattern_keywords as _trusted_extract_pattern_keywords,
     match_supplier_by_active_pattern,
@@ -238,6 +239,7 @@ def _persist_invoice_read_snapshot(
         batch_id=batch.id,
         tenant_id=batch.tenant_id,
         company_id=batch.company_id,
+        scan_run_id=getattr(row, "scan_run_id", None) or getattr(batch, "current_scan_run_id", None),
         source_file_id=source_file_id,
         row_id=row.id,
         source_filename=row.source_filename or invoice_file.original_filename,
@@ -436,6 +438,7 @@ def _persist_selected_field_candidates(
             tenant_id=batch.tenant_id,
             company_id=batch.company_id,
             batch_id=batch.id,
+            scan_run_id=getattr(row, "scan_run_id", None) or getattr(batch, "current_scan_run_id", None),
             row_id=row.id,
             source_file_id=invoice_file.id,
             field_name=field_name,
@@ -462,6 +465,7 @@ def _persist_selected_field_candidates(
             tenant_id=batch.tenant_id,
             company_id=batch.company_id,
             batch_id=batch.id,
+            scan_run_id=getattr(row, "scan_run_id", None) or getattr(batch, "current_scan_run_id", None),
             row_id=row.id,
             source_file_id=invoice_file.id,
             field_name=field_name,
@@ -915,6 +919,7 @@ def _audit_rule_application(
         db.flush()
     db.add(InvoiceRowFieldAudit(
         batch_id=batch.id,
+        scan_run_id=getattr(row, "scan_run_id", None),
         row_id=row.id,
         field_name=field_name,
         old_value=old_text,
@@ -946,6 +951,7 @@ def _audit_supplier_identity_resolution(
         db.flush()
     db.add(InvoiceRowFieldAudit(
         batch_id=batch.id,
+        scan_run_id=getattr(row, "scan_run_id", None),
         row_id=row.id,
         field_name="supplier_name",
         old_value=old_text,
@@ -1018,6 +1024,7 @@ def _audit_saved_region_action(
 
     db.add(InvoiceRowFieldAudit(
         batch_id=batch.id,
+        scan_run_id=getattr(row, "scan_run_id", None),
         row_id=row.id,
         field_name=field_name,
         old_value=old_text,
@@ -2930,6 +2937,7 @@ def _build_bcrs_row(row: InvoiceRow, amount: float) -> InvoiceRow:
         desc = 'BCRS surcharge'
     return InvoiceRow(
         batch_id=row.batch_id, tenant_id=row.tenant_id, company_id=row.company_id,
+        scan_run_id=getattr(row, "scan_run_id", None),
         source_file_id=row.source_file_id, source_filename=row.source_filename, page_no=row.page_no,
         supplier_name=row.supplier_name, supplier_posting_account=row.supplier_posting_account,
         nominal_account_code=row.nominal_account_code, invoice_number=row.invoice_number,
@@ -4060,7 +4068,7 @@ def _match_supplier_by_pattern(
 
 
 def _learn_supplier_patterns(
-    batch_id: UUID, tenant_id, company_id, db: Session
+    batch_id: UUID, tenant_id, company_id, db: Session, scan_run_id=None
 ) -> None:
     """Record unreviewed scan discoveries as inactive proposals only."""
     try:
@@ -4069,6 +4077,7 @@ def _learn_supplier_patterns(
             batch_id=batch_id,
             tenant_id=tenant_id,
             company_id=company_id,
+            scan_run_id=scan_run_id,
         )
         db.commit()
         logger.info("Supplier pattern proposals recorded for batch %s count=%d", batch_id, proposals)
@@ -4087,19 +4096,17 @@ def _norm_duplicate_token(value: object) -> str:
     return text
 
 
-def _mark_duplicate_invoice_rows(db: Session, batch_id: UUID) -> int:
+def _mark_duplicate_invoice_rows(db: Session, batch_id: UUID, scan_run_id=None) -> int:
     """Flag likely duplicate invoice rows for review/export blocking.
 
     Detection is intentionally generic and conservative: invoice/credit-note
     number plus date plus near-identical total is the strong identity. Supplier
     text is not required because OCR may read the same supplier differently.
     """
-    rows = (
-        db.query(InvoiceRow)
-        .filter(InvoiceRow.batch_id == batch_id)
-        .order_by(InvoiceRow.source_file_id.asc(), InvoiceRow.page_no.asc(), InvoiceRow.id.asc())
-        .all()
-    )
+    q = db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch_id)
+    if scan_run_id is not None:
+        q = q.filter(InvoiceRow.scan_run_id == scan_run_id)
+    rows = q.order_by(InvoiceRow.source_file_id.asc(), InvoiceRow.page_no.asc(), InvoiceRow.id.asc()).all()
     seen: dict[tuple[str, object, int], InvoiceRow] = {}
     flagged = 0
     for row in rows:
@@ -4142,6 +4149,7 @@ def _mark_duplicate_invoice_rows(db: Session, batch_id: UUID) -> int:
         _append_method_tag(row, "arbitrated:duplicate_check")
         db.add(InvoiceRowFieldAudit(
             batch_id=batch_id,
+            scan_run_id=scan_run_id,
             row_id=row.id or 0,
             field_name="_row",
             old_value=None,
@@ -4224,7 +4232,7 @@ def _create_batch_issue_logs(batch_id: UUID, tenant_id, db: Session) -> None:
 
 def _build_batch_detail(batch: InvoiceBatch, db: Session) -> BatchDetailOut:
     files = db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch.id).order_by(InvoiceFile.uploaded_at.asc(), InvoiceFile.id.asc()).all()
-    rows_count = db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch.id).count()
+    rows_count = _current_rows_query(db, batch).count()
     uploaded_files = sum(1 for f in files if f.status in ("uploaded", "processing", "processed", "partial"))
     processed_files = sum(1 for f in files if f.status in ("processed", "partial"))
     failed_files = sum(1 for f in files if f.status == "failed")
@@ -4255,6 +4263,18 @@ def _get_batch_for_tenant(db: Session, batch_id: UUID, tenant_id) -> InvoiceBatc
     return batch
 
 
+def _current_run_id(batch: InvoiceBatch):
+    return getattr(batch, "current_scan_run_id", None)
+
+
+def _current_rows_query(db: Session, batch: InvoiceBatch):
+    q = db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch.id)
+    run_id = _current_run_id(batch)
+    if run_id is not None:
+        q = q.filter(InvoiceRow.scan_run_id == run_id)
+    return q
+
+
 def _process_batch_job(batch_id: UUID, tenant_id) -> None:
     db = SessionLocal()
     try:
@@ -4266,18 +4286,27 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         _batch_tenant_id  = batch.tenant_id
         _batch_company_id = batch.company_id
 
-        logger.info("scan started batch=%s tenant=%s", batch_id, _batch_tenant_id)
+        logger.info("_process_batch_job: batch %s started tenant=%s", batch_id, _batch_tenant_id)
+
+        scan_run = create_scan_run(db, batch)
+        scan_run_id = scan_run.id
+        db.commit()
 
         files = db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch_id).order_by(InvoiceFile.uploaded_at.asc(), InvoiceFile.id.asc()).all()
         if not files:
             batch.status = "failed"
             batch.notes = "No uploaded files found for this batch"
             batch.processed_at = datetime.utcnow()
+            mark_scan_run_completed(
+                db,
+                scan_run,
+                status="failed",
+                page_count=0,
+                row_count=0,
+                notes=batch.notes,
+            )
             db.commit()
             return
-
-        db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch_id).delete()
-        db.commit()
 
         total_target_pages = 0
         for invoice_file in files:
@@ -4428,6 +4457,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 batch_id=batch_id,
                                 tenant_id=batch.tenant_id,
                                 company_id=batch.company_id,
+                                scan_run_id=scan_run_id,
                                 source_file_id=invoice_file.id,
                                 source_filename=invoice_file.original_filename,
                                 page_no=r.get("page_no") or (page_index + 1),
@@ -4663,6 +4693,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             batch_id=batch_id,
                             tenant_id=_batch_tenant_id,
                             company_id=_batch_company_id,
+                            scan_run_id=scan_run_id,
                             source_file_id=invoice_file.id,
                             source_filename=invoice_file.original_filename,
                             page_no=page_index + 1,
@@ -4735,7 +4766,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 failed_files += 1
 
         if not provider_baseline_mode:
-            duplicate_review_count = _mark_duplicate_invoice_rows(db, batch_id)
+            duplicate_review_count = _mark_duplicate_invoice_rows(db, batch_id, scan_run_id)
             if duplicate_review_count:
                 review_required_count += duplicate_review_count
                 logger.info("duplicate invoice review flags batch=%s count=%d", batch_id, duplicate_review_count)
@@ -4761,6 +4792,16 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 processed_at=datetime.utcnow(),
             )
             .execution_options(synchronize_session=False)
+        )
+        mark_scan_run_completed(
+            db,
+            scan_run,
+            status=final_status,
+            selected_backend=getattr(getattr(preflight, "selected_backend", None), "value", None)
+            or str(getattr(preflight, "selected_backend", "") or ""),
+            page_count=processed_pages,
+            row_count=total_rows,
+            notes=final_notes,
         )
         with perf_ctx.timed("db_commit"):
             db.commit()
@@ -4792,7 +4833,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
 
         # Unreviewed scan output is not trusted learning. Record only inactive
         # supplier-pattern proposals; promotion happens after review/approval/export.
-        _learn_supplier_patterns(batch_id, _batch_tenant_id, _batch_company_id, db)
+        _learn_supplier_patterns(batch_id, _batch_tenant_id, _batch_company_id, db, scan_run_id)
         # Issue Log is reserved for tenant-raised support tickets.
         # Do not auto-create one ticket per scan/review row here; extraction
         # review needs stay on the Review page via review_required/review_reasons.
@@ -4933,8 +4974,8 @@ def delete_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
 
 @router.get("/{batch_id}/rows", response_model=list[InvoiceRowOut])
 def list_rows(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
-    _get_batch_for_tenant(db, batch_id, tenant_id)
-    rows = db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch_id).order_by(InvoiceRow.id.asc()).all()
+    batch = _get_batch_for_tenant(db, batch_id, tenant_id)
+    rows = _current_rows_query(db, batch).order_by(InvoiceRow.id.asc()).all()
     return rows
 
 
@@ -5031,7 +5072,10 @@ def get_batch_progress(batch_id: UUID, db: Session = Depends(get_db), tenant_id=
     THRESHOLD = 0.55
     file_states: list[dict] = []
     for f in files:
-        rows = db.query(InvoiceRow).filter(InvoiceRow.source_file_id == f.id).all()
+        rows_q = db.query(InvoiceRow).filter(InvoiceRow.source_file_id == f.id)
+        if getattr(batch, "current_scan_run_id", None) is not None:
+            rows_q = rows_q.filter(InvoiceRow.scan_run_id == batch.current_scan_run_id)
+        rows = rows_q.all()
         flagged_rows = [r for r in rows
                         if (r.confidence_score is not None and float(r.confidence_score) < THRESHOLD)
                         or r.review_required]
@@ -5091,7 +5135,7 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
     from app.db.models import Company, Tenant
 
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)
-    rows = db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch_id).order_by(InvoiceRow.id.asc()).all()
+    rows = _current_rows_query(db, batch).order_by(InvoiceRow.id.asc()).all()
     if not rows:
         raise HTTPException(status_code=400, detail="No rows available to export")
 

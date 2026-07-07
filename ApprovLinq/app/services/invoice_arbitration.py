@@ -351,6 +351,7 @@ def _audit_arbitration(
         db.flush()
     db.add(InvoiceRowFieldAudit(
         batch_id=batch.id,
+        scan_run_id=getattr(row, "scan_run_id", None),
         row_id=row.id,
         field_name=field_name,
         old_value=old_text,
@@ -531,6 +532,7 @@ def persist_field_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow, 
                 tenant_id=tenant_id,
                 company_id=getattr(row, "company_id", None) or getattr(batch, "company_id", None),
                 batch_id=batch_id,
+                scan_run_id=getattr(row, "scan_run_id", None) or getattr(batch, "current_scan_run_id", None),
                 row_id=row.id,
                 source_file_id=getattr(row, "source_file_id", None),
                 field_name=candidate.field_name[:80],

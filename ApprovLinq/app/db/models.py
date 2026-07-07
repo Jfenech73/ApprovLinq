@@ -143,6 +143,31 @@ class IssueLog(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
 
 
+class ScanRun(Base):
+    __tablename__ = "scan_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True)
+    company_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
+    run_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    parent_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(40), default="processing", nullable=False)
+    app_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    extractor_build_tag: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    scan_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    settings_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provider_config_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    selected_backend: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
 class InvoiceBatch(Base):
     __tablename__ = "invoice_batches"
 
@@ -155,6 +180,7 @@ class InvoiceBatch(Base):
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     scan_mode: Mapped[str] = mapped_column(String(20), default="summary", nullable=False)
+    current_scan_run_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -196,6 +222,7 @@ class InvoiceRow(Base):
     batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
     tenant_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True)
     company_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
+    scan_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True)
     source_file_id: Mapped[int | None] = mapped_column(ForeignKey("invoice_files.id", ondelete="SET NULL"), nullable=True)
     source_filename: Mapped[str | None] = mapped_column(String(500), nullable=True)
     page_no: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -240,6 +267,7 @@ class InvoiceReadHeader(Base):
     batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
     tenant_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True)
     company_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
+    scan_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True)
     source_file_id: Mapped[int | None] = mapped_column(ForeignKey("invoice_files.id", ondelete="SET NULL"), nullable=True)
     row_id: Mapped[int | None] = mapped_column(ForeignKey("invoice_rows.id", ondelete="SET NULL"), nullable=True)
     source_filename: Mapped[str | None] = mapped_column(String(500), nullable=True)

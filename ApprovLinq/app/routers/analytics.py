@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
-from app.db.models import Company, InvoiceRow, User
+from app.db.models import Company, InvoiceBatch, InvoiceRow, User
 from app.db.session import get_db
 from app.routers.auth import current_tenant_id, current_user
 
@@ -33,7 +33,9 @@ def get_summary(
     base = db.query(InvoiceRow).filter(
         InvoiceRow.tenant_id == tenant_id,
         InvoiceRow.company_id == company_id,
+        InvoiceRow.scan_run_id == InvoiceBatch.current_scan_run_id,
     )
+    base = base.join(InvoiceBatch, InvoiceRow.batch_id == InvoiceBatch.id)
 
     total_rows = base.count()
     needs_review = base.filter(InvoiceRow.review_required.is_(True)).count()
@@ -46,7 +48,9 @@ def get_summary(
         .filter(
             InvoiceRow.tenant_id == tenant_id,
             InvoiceRow.company_id == company_id,
+            InvoiceRow.scan_run_id == InvoiceBatch.current_scan_run_id,
         )
+        .join(InvoiceBatch, InvoiceRow.batch_id == InvoiceBatch.id)
         .first()
     )
 
@@ -55,8 +59,10 @@ def get_summary(
         .filter(
             InvoiceRow.tenant_id == tenant_id,
             InvoiceRow.company_id == company_id,
+            InvoiceRow.scan_run_id == InvoiceBatch.current_scan_run_id,
             InvoiceRow.supplier_name.isnot(None),
         )
+        .join(InvoiceBatch, InvoiceRow.batch_id == InvoiceBatch.id)
         .scalar()
         or 0
     )
@@ -98,9 +104,11 @@ def get_monthly(
         .filter(
             InvoiceRow.tenant_id == tenant_id,
             InvoiceRow.company_id == company_id,
+            InvoiceRow.scan_run_id == InvoiceBatch.current_scan_run_id,
             InvoiceRow.invoice_date.isnot(None),
             InvoiceRow.invoice_date >= cutoff,
         )
+        .join(InvoiceBatch, InvoiceRow.batch_id == InvoiceBatch.id)
         .group_by(text("1"))
         .order_by(text("1"))
         .all()
@@ -137,8 +145,10 @@ def get_top_suppliers(
         .filter(
             InvoiceRow.tenant_id == tenant_id,
             InvoiceRow.company_id == company_id,
+            InvoiceRow.scan_run_id == InvoiceBatch.current_scan_run_id,
             InvoiceRow.supplier_name.isnot(None),
         )
+        .join(InvoiceBatch, InvoiceRow.batch_id == InvoiceBatch.id)
         .group_by(InvoiceRow.supplier_name)
         .order_by(func.coalesce(func.sum(InvoiceRow.total_amount), 0).desc())
         .limit(limit)

@@ -35,9 +35,11 @@ def normalise_status(s: str | None) -> str:
 def get_or_create_correction(db: Session, row: M.InvoiceRow) -> InvoiceRowCorrection:
     c = db.get(InvoiceRowCorrection, row.id)
     if c is None:
-        c = InvoiceRowCorrection(row_id=row.id, batch_id=row.batch_id)
+        c = InvoiceRowCorrection(row_id=row.id, batch_id=row.batch_id, scan_run_id=getattr(row, "scan_run_id", None))
         db.add(c)
         db.flush()
+    elif getattr(c, "scan_run_id", None) is None:
+        c.scan_run_id = getattr(row, "scan_run_id", None)
     return c
 
 
@@ -191,7 +193,7 @@ def apply_field_changes(
                     rule_created = True
 
         a = InvoiceRowFieldAudit(
-            batch_id=batch.id, row_id=row.id, field_name=field,
+            batch_id=batch.id, scan_run_id=getattr(row, "scan_run_id", None), row_id=row.id, field_name=field,
             old_value=None if old_val is None else str(old_val),
             new_value=None if new_val is None else str(new_val),
             action="edit", note=note,
@@ -209,6 +211,7 @@ def apply_field_changes(
                 setattr(correction, "supplier_posting_account", supplier_code)
                 code_audit = InvoiceRowFieldAudit(
                     batch_id=batch.id,
+                    scan_run_id=getattr(row, "scan_run_id", None),
                     row_id=row.id,
                     field_name="supplier_posting_account",
                     old_value=None if old_code is None else str(old_code),
@@ -237,7 +240,7 @@ def revert_field(db: Session, *, batch, row, field: str, user, note: str | None 
     old = getattr(correction, field)
     setattr(correction, field, None)
     a = InvoiceRowFieldAudit(
-        batch_id=batch.id, row_id=row.id, field_name=field,
+        batch_id=batch.id, scan_run_id=getattr(row, "scan_run_id", None), row_id=row.id, field_name=field,
         old_value=str(old), new_value=None, action="revert",
         note=note, user_id=user.id,
     )
@@ -251,7 +254,7 @@ def mark_field_reviewed(db, *, batch, row, field, user):
     cur.add(field)
     c.reviewed_fields = ",".join(sorted(cur))
     db.add(InvoiceRowFieldAudit(
-        batch_id=batch.id, row_id=row.id, field_name=field,
+        batch_id=batch.id, scan_run_id=getattr(row, "scan_run_id", None), row_id=row.id, field_name=field,
         old_value=None, new_value="reviewed", action="mark_reviewed", user_id=user.id))
 
 
@@ -265,7 +268,7 @@ def transition_status(db: Session, *, batch: M.InvoiceBatch, target: str, user: 
         batch.approved_at = datetime.utcnow()
         batch.approved_by = user.id
     db.add(InvoiceRowFieldAudit(
-        batch_id=batch.id, row_id=0, field_name="__status__",
+        batch_id=batch.id, scan_run_id=getattr(batch, "current_scan_run_id", None), row_id=0, field_name="__status__",
         old_value=cur, new_value=target, action="status", user_id=user.id))
 
 
@@ -276,7 +279,7 @@ def reopen_batch(db: Session, *, batch: M.InvoiceBatch, user: M.User):
     batch.reopened_at = datetime.utcnow()
     batch.reopened_by = user.id
     db.add(InvoiceRowFieldAudit(
-        batch_id=batch.id, row_id=0, field_name="__status__",
+        batch_id=batch.id, scan_run_id=getattr(batch, "current_scan_run_id", None), row_id=0, field_name="__status__",
         old_value="exported", new_value="in_review", action="reopen", user_id=user.id))
 
 

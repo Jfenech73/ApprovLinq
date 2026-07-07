@@ -512,18 +512,16 @@ class TestReconciliationBoost:
 class TestNoDuplicateBCRSRows:
     """Batch reprocessing must not create duplicate BCRS rows."""
 
-    def test_bcrs_row_creation_logic_uses_deposit_component_key(self):
-        """_process_batch_job creates a BCRS row only when r['deposit_component']
-        is present and positive.  On reprocess, rows are wiped first, so
-        duplicates cannot accumulate.
-        """
-        # Confirm the batch job deletes existing rows before inserting new ones
+    def test_bcrs_duplicate_guard_is_current_scan_run_scoped(self):
+        """Reprocess keeps prior rows, so duplicate guards must use current run scope."""
         import ast, inspect
         from app.routers import batches as batches_module
         src = inspect.getsource(batches_module._process_batch_job)
-        # The job starts with: db.query(InvoiceRow).filter(...).delete()
-        assert "db.query(InvoiceRow)" in src and ".delete()" in src, \
-            "Reprocess must delete old rows first to prevent BCRS row duplication"
+        duplicate_src = inspect.getsource(batches_module._mark_duplicate_invoice_rows)
+        assert "create_scan_run(db, batch)" in src
+        assert ".delete()" not in src[src.find("create_scan_run(db, batch)"):src.find("total_target_pages")]
+        assert "scan_run_id" in duplicate_src
+        assert "InvoiceRow.scan_run_id == scan_run_id" in duplicate_src
 
     def test_deposit_component_key_in_extractor_payload(self):
         """The extractor must expose 'deposit_component' in every returned payload."""

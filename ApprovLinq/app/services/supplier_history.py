@@ -143,7 +143,14 @@ def _is_row_accepted(db: Session, row: InvoiceRow, correction: InvoiceRowCorrect
         return True
     # Rows in exported batches have passed the user's export gate.
     batch = db.get(InvoiceBatch, row.batch_id) if row.batch_id else None
-    if batch and str(batch.status or "").lower() == "exported":
+    if (
+        batch
+        and str(batch.status or "").lower() == "exported"
+        and (
+            getattr(batch, "current_scan_run_id", None) is None
+            or getattr(row, "scan_run_id", None) == getattr(batch, "current_scan_run_id", None)
+        )
+    ):
         return True
     # Explicit mark-reviewed audit is also an acceptance signal.
     if row.id:

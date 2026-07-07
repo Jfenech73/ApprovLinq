@@ -119,21 +119,21 @@ def record_supplier_pattern_proposals_for_batch(
     batch_id: Any,
     tenant_id: Any,
     company_id: Any,
+    scan_run_id: Any = None,
 ) -> int:
     """Record untrusted scan discoveries as inactive proposals only.
 
     This must never create or mutate active pattern keywords. Trusted promotion
     is handled by explicit review, approval or export outcomes.
     """
-    rows = (
-        db.query(InvoiceRow)
-        .filter(
-            InvoiceRow.batch_id == batch_id,
-            InvoiceRow.supplier_name.isnot(None),
-            InvoiceRow.header_raw.isnot(None),
-        )
-        .all()
+    q = db.query(InvoiceRow).filter(
+        InvoiceRow.batch_id == batch_id,
+        InvoiceRow.supplier_name.isnot(None),
+        InvoiceRow.header_raw.isnot(None),
     )
+    if scan_run_id is not None:
+        q = q.filter(InvoiceRow.scan_run_id == scan_run_id)
+    rows = q.all()
     changed = 0
     now = datetime.now(timezone.utc)
 
@@ -262,7 +262,10 @@ def promote_supplier_patterns_for_batch(
     """Promote all eligible supplier fingerprints in a trusted batch outcome."""
     if outcome_source not in TRUSTED_PATTERN_OUTCOME_SOURCES:
         return 0
-    rows = db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch.id).all()
+    q = db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch.id)
+    if getattr(batch, "current_scan_run_id", None) is not None:
+        q = q.filter(InvoiceRow.scan_run_id == batch.current_scan_run_id)
+    rows = q.all()
     promoted = 0
     for row in rows:
         if promote_supplier_pattern_from_row(db, batch=batch, row=row, user=user, outcome_source=outcome_source):
