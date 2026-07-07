@@ -34,6 +34,11 @@ from app.services.corrected_exporter import build_corrected_rows, export_batch_c
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
 from app.services.invoice_arbitration import arbitrate_invoice_row
 from app.services.scan_performance import ScanPerformanceContext
+from app.services.supplier_pattern_learning import (
+    extract_pattern_keywords as _trusted_extract_pattern_keywords,
+    match_supplier_by_active_pattern,
+    record_supplier_pattern_proposals_for_batch,
+)
 from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceFieldCandidate, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
 from app.services.template_render_service import render_template_sheet, resolve_effective_template
 from app.utils.storage import batch_upload_folder, batch_export_folder, resolve_upload_path
@@ -4040,137 +4045,35 @@ _PATTERN_STOP_WORDS: frozenset[str] = frozenset({
 
 def _extract_pattern_keywords(text: str) -> set[str]:
     """Return a set of meaningful lowercase words from invoice header text."""
-    words = re.findall(r"[a-zA-Z]{4,}", (text or "").lower())
-    return {w for w in words if w not in _PATTERN_STOP_WORDS}
+    return _trusted_extract_pattern_keywords(text)
 
 
 def _match_supplier_by_pattern(
     db: Session, tenant_id, company_id, header_text: str
 ) -> TenantSupplier | None:
-    """Check stored keyword fingerprints for a confident supplier identification.
+    """Check active trusted keyword fingerprints for a supplier identification.
 
     Returns a TenantSupplier if at least 3 keywords overlap with a stored pattern
     and the overlap covers at least 50 % of the pattern's keyword set.
     """
-    if not header_text:
-        return None
-    from app.db.models import SupplierPattern
-
-    keywords = _extract_pattern_keywords(header_text)
-    if len(keywords) < 3:
-        return None
-
-    patterns = (
-        db.query(SupplierPattern)
-        .filter(
-            SupplierPattern.tenant_id == tenant_id,
-            SupplierPattern.company_id == company_id,
-        )
-        .all()
-    )
-
-    best_supplier: TenantSupplier | None = None
-    best_score = 0.0
-
-    for pattern in patterns:
-        if not pattern.keywords:
-            continue
-        pattern_kws = set(pattern.keywords.split())
-        if len(pattern_kws) < 3:
-            continue
-        overlap = keywords & pattern_kws
-        if len(overlap) < 3:
-            continue
-        score = len(overlap) / max(len(pattern_kws), 1)
-        if score >= 0.50 and score > best_score:
-            supplier = (
-                db.query(TenantSupplier)
-                .filter(
-                    TenantSupplier.id == pattern.supplier_id,
-                    TenantSupplier.is_active.is_(True),
-                )
-                .first()
-            )
-            if supplier:
-                best_score = score
-                best_supplier = supplier
-
-    return best_supplier
+    return match_supplier_by_active_pattern(db, tenant_id, company_id, header_text)
 
 
 def _learn_supplier_patterns(
     batch_id: UUID, tenant_id, company_id, db: Session
 ) -> None:
-    """Extract keyword fingerprints from successfully matched rows and save them
-    so that future invoices from the same supplier can be recognised quickly."""
-    from app.db.models import SupplierPattern
-    from datetime import timezone as _tz
-
-    rows = (
-        db.query(InvoiceRow)
-        .filter(
-            InvoiceRow.batch_id == batch_id,
-            InvoiceRow.supplier_name.isnot(None),
-            InvoiceRow.header_raw.isnot(None),
-        )
-        .all()
-    )
-
-    if not rows:
-        return
-
-    for row in rows:
-        supplier = (
-            db.query(TenantSupplier)
-            .filter(
-                TenantSupplier.tenant_id == tenant_id,
-                TenantSupplier.company_id == company_id,
-                TenantSupplier.supplier_name == row.supplier_name,
-                TenantSupplier.is_active.is_(True),
-            )
-            .first()
-        )
-        if not supplier:
-            continue
-
-        keywords = _extract_pattern_keywords(row.header_raw)
-        if len(keywords) < 3:
-            continue
-
-        now = datetime.now(_tz.utc)
-        existing = (
-            db.query(SupplierPattern)
-            .filter(
-                SupplierPattern.tenant_id == tenant_id,
-                SupplierPattern.company_id == company_id,
-                SupplierPattern.supplier_id == supplier.id,
-            )
-            .first()
-        )
-
-        if existing:
-            existing_kws = set(existing.keywords.split()) if existing.keywords else set()
-            merged = existing_kws | keywords
-            existing.keywords = " ".join(sorted(merged)[:60])
-            existing.hit_count += 1
-            existing.last_seen_at = now
-        else:
-            db.add(
-                SupplierPattern(
-                    tenant_id=tenant_id,
-                    company_id=company_id,
-                    supplier_id=supplier.id,
-                    keywords=" ".join(sorted(keywords)[:60]),
-                    hit_count=1,
-                    last_seen_at=now,
-                )
-            )
-
+    """Record unreviewed scan discoveries as inactive proposals only."""
     try:
+        proposals = record_supplier_pattern_proposals_for_batch(
+            db,
+            batch_id=batch_id,
+            tenant_id=tenant_id,
+            company_id=company_id,
+        )
         db.commit()
-        logger.info("Supplier pattern learning completed for batch %s", batch_id)
+        logger.info("Supplier pattern proposals recorded for batch %s count=%d", batch_id, proposals)
     except Exception as exc:
-        logger.warning("Pattern learning commit failed for batch %s: %s", batch_id, exc)
+        logger.warning("Pattern proposal commit failed for batch %s: %s", batch_id, exc)
         try:
             db.rollback()
         except Exception:
@@ -4887,7 +4790,8 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
             perf_summary["timings_seconds"],
         )
 
-        # Learn supplier patterns from this batch's successfully matched rows
+        # Unreviewed scan output is not trusted learning. Record only inactive
+        # supplier-pattern proposals; promotion happens after review/approval/export.
         _learn_supplier_patterns(batch_id, _batch_tenant_id, _batch_company_id, db)
         # Issue Log is reserved for tenant-raised support tickets.
         # Do not auto-create one ticket per scan/review row here; extraction

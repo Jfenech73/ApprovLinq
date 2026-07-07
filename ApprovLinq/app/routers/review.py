@@ -22,6 +22,10 @@ from app.routers.auth import current_user
 from app.utils.security import session_token_hash, utcnow
 from app.services import correction_service as cs
 from app.services.candidate_outcomes import label_row_candidates
+from app.services.supplier_pattern_learning import (
+    promote_supplier_pattern_from_row,
+    promote_supplier_patterns_for_batch,
+)
 from app.utils.storage import resolve_upload_path
 from app.utils.persistent_files import materialize_invoice_file
 from app.config import settings
@@ -228,7 +232,7 @@ def current_user_flexible(
     return user
 
 
-# ── Schemas ───────────────────────────────────────────────────────────────────
+# -- Schemas -------------------------------------------------------------------
 class RowCorrectionIn(BaseModel):
     changes: dict[str, Any]
     note: str | None = None
@@ -305,7 +309,7 @@ def _require_admin(user: M.User):
         raise HTTPException(403, "Admin only")
 
 
-# ── Review workspace ──────────────────────────────────────────────────────────
+# -- Review workspace ----------------------------------------------------------
 @router.get("/batches/{batch_id}")
 def get_review_workspace(batch_id: UUID, db: Session = Depends(get_db), user=Depends(current_user)):
     batch = _get_batch(db, batch_id)
@@ -373,7 +377,7 @@ def get_review_workspace(batch_id: UUID, db: Session = Depends(get_db), user=Dep
     }
 
 
-# ── Edit / revert / mark reviewed ─────────────────────────────────────────────
+# -- Edit / revert / mark reviewed ---------------------------------------------
 @router.patch("/batches/{batch_id}/rows/{row_id}")
 def save_corrections(batch_id: UUID, row_id: int, payload: RowCorrectionIn,
                      db: Session = Depends(get_db), user=Depends(current_user)):
@@ -394,6 +398,7 @@ def save_corrections(batch_id: UUID, row_id: int, payload: RowCorrectionIn,
     labelled = 0
     if audits:
         labelled = label_row_candidates(db, batch=batch, row=row, user=user, outcome_source="manual_review")
+        promote_supplier_pattern_from_row(db, batch=batch, row=row, user=user, outcome_source="manual_review")
     db.commit()
     return {"audited": len(audits), "candidate_labels": labelled}
 
@@ -461,7 +466,7 @@ def duplicate_row(batch_id: UUID, row_id: int,
         invoice_date=row.invoice_date,
         description=(f"{row.description or ''} - BCRS/Deposit (manual)").strip(" -"),
         line_items_raw=None,
-        # Amounts zero — reviewer fills in the deposit/BCRS amount
+        # Amounts zero - reviewer fills in the deposit/BCRS amount
         net_amount=0.0,
         vat_amount=0.0,
         total_amount=0.0,
@@ -490,7 +495,7 @@ def duplicate_row(batch_id: UUID, row_id: int,
         row_id=row.id,
         field_name="_action",
         old_value=None,
-        new_value=f"duplicated → row {duplicate.id}",
+        new_value=f"duplicated -> row {duplicate.id}",
         action="duplicate_created",
         note="Manual duplicate created for BCRS/deposit entry",
         user_id=user.id,
@@ -540,7 +545,7 @@ def bcrs_split(batch_id: UUID, row_id: int, payload: BcrsSplitIn,
         # InvoiceRowCorrection and InvoiceRowFieldAudit are already imported at
         # the top of this module via the review_models import.
 
-        # ── Build the BCRS row ───────────────────────────────────────────────
+        # -- Build the BCRS row -----------------------------------------------
         desc = (row.description or "").strip()
         bcrs_desc = f"{desc} - BCRS" if desc and "bcrs" not in desc.lower() else (desc or "BCRS")
         bcrs_row = M.InvoiceRow(
@@ -578,9 +583,9 @@ def bcrs_split(batch_id: UUID, row_id: int, payload: BcrsSplitIn,
         db.add(bcrs_row)
         db.flush()  # get bcrs_row.id
 
-        # ── Adjust the source row total ──────────────────────────────────────
+        # -- Adjust the source row total --------------------------------------
         # Subtract the BCRS deposit directly from the original total.
-        # Using net+vat alone is wrong when the AI included BCRS inside net —
+        # Using net+vat alone is wrong when the AI included BCRS inside net -
         # that formula loses money.  Subtracting from total is always correct.
         net = round(float(row.net_amount or 0), 2)
         vat = round(float(row.vat_amount or 0), 2)
@@ -593,8 +598,8 @@ def bcrs_split(batch_id: UUID, row_id: int, payload: BcrsSplitIn,
         row.review_required = False
         row.review_priority = None
 
-        # ── Record correction via InvoiceRowCorrection (correct schema) ──────
-        # InvoiceRowCorrection stores corrected field values directly — one
+        # -- Record correction via InvoiceRowCorrection (correct schema) ------
+        # InvoiceRowCorrection stores corrected field values directly - one
         # column per field, keyed by row_id (primary key).  There is no
         # field_name/original_value/corrected_value generic pair on this model.
         # Use get_or_create so we don't duplicate if a correction record already
@@ -609,7 +614,7 @@ def bcrs_split(batch_id: UUID, row_id: int, payload: BcrsSplitIn,
         existing_fields.add("total_amount")
         corr.reviewed_fields = ",".join(sorted(existing_fields))
 
-        # ── Audit entries ────────────────────────────────────────────────────
+        # -- Audit entries ----------------------------------------------------
         uname = getattr(user, "email", None) or str(user.id)
         db.add(InvoiceRowFieldAudit(
             batch_id=batch.id, row_id=row.id,
@@ -624,7 +629,7 @@ def bcrs_split(batch_id: UUID, row_id: int, payload: BcrsSplitIn,
             batch_id=batch.id, row_id=bcrs_row.id,
             field_name="_action",
             old_value=None,
-            new_value=f"bcrs_split ← row {row.id} (amount={amount:.2f})",
+            new_value=f"bcrs_split - row {row.id} (amount={amount:.2f})",
             action="bcrs_split_created",
             note=f"BCRS row created by manual split from row {row.id}",
             user_id=user.id, username=uname,
@@ -643,7 +648,7 @@ def bcrs_split(batch_id: UUID, row_id: int, payload: BcrsSplitIn,
         }
 
     except HTTPException:
-        raise  # let FastAPI handle 400/404 normally — they already return JSON
+        raise  # let FastAPI handle 400/404 normally - they already return JSON
     except Exception as exc:
         logger.exception("bcrs_split failed for batch=%s row=%s", batch_id, row_id)
         db.rollback()
@@ -743,7 +748,7 @@ def row_field_candidates(
     return {"batch_id": str(batch.id), "row_id": row.id, "fields": grouped}
 
 
-# ── Status transitions / reopen ───────────────────────────────────────────────
+# -- Status transitions / reopen -----------------------------------------------
 @router.post("/batches/{batch_id}/transition")
 def transition(batch_id: UUID, payload: TransitionIn,
                db: Session = Depends(get_db), user=Depends(current_user)):
@@ -752,6 +757,8 @@ def transition(batch_id: UUID, payload: TransitionIn,
         cs.transition_status(db, batch=batch, target=payload.target, user=user)
     except ValueError as e:
         raise HTTPException(409, str(e))
+    if payload.target == "approved":
+        promote_supplier_patterns_for_batch(db, batch=batch, user=user, outcome_source="approved")
     db.commit()
     return {"status": batch.status}
 
@@ -767,7 +774,7 @@ def reopen(batch_id: UUID, db: Session = Depends(get_db), user=Depends(current_u
     return {"status": batch.status}
 
 
-# ── Mark a file's flagged rows as reviewed (review-as-you-go) ────────────────
+# -- Mark a file's flagged rows as reviewed (review-as-you-go) ----------------
 @router.post("/batches/{batch_id}/files/{file_id}/reviewed")
 def mark_file_reviewed(batch_id: UUID, file_id: int,
                        db: Session = Depends(get_db), user=Depends(current_user)):
@@ -788,7 +795,7 @@ def mark_file_reviewed(batch_id: UUID, file_id: int,
     created = 0
     for r in flagged:
         if r.id in existing:
-            # Already has a correction record — just ensure row_reviewed is True.
+            # Already has a correction record - just ensure row_reviewed is True.
             corr = db.get(InvoiceRowCorrection, r.id)
             if corr and not corr.row_reviewed:
                 corr.row_reviewed = True
@@ -806,11 +813,12 @@ def mark_file_reviewed(batch_id: UUID, file_id: int,
     labelled = 0
     for r in flagged:
         labelled += label_row_candidates(db, batch=batch, row=r, user=user, outcome_source="mark_reviewed")
+        promote_supplier_pattern_from_row(db, batch=batch, row=r, user=user, outcome_source="mark_reviewed")
     db.commit()
     return {"file_id": file_id, "marked_rows": created, "already_reviewed": len(flagged) - created, "candidate_labels": labelled}
 
 
-# ── PDF file info (page count) ────────────────────────────────────────────────
+# -- PDF file info (page count) ------------------------------------------------
 def _open_pdf_page_count(path: str) -> int:
     try:
         import pypdfium2 as pdfium
@@ -1008,7 +1016,7 @@ def file_info(
     return {"file_id": file_id, "page_count": _open_pdf_page_count(str(file_path))}
 
 
-# ── PDF preview (on-demand, not stored) ───────────────────────────────────────
+# -- PDF preview (on-demand, not stored) ---------------------------------------
 @router.get("/files/{file_id}/preview")
 def preview(
     file_id: int,
@@ -1065,9 +1073,9 @@ def preview(
     raise HTTPException(500, "Preview rendering failed. Tried: " + " | ".join(errors))
 
 
-# ── Read text from a region of a page ─────────────────────────────────────────
+# -- Read text from a region of a page -----------------------------------------
 def _count_meaningful(text: str) -> int:
-    """Count alphanumeric chars — used to gate text-layer results vs junk/artefacts."""
+    """Count alphanumeric chars - used to gate text-layer results vs junk/artefacts."""
     import re as _re
     return len(_re.findall(r"[A-Za-z0-9]", text or ""))
 
@@ -1218,7 +1226,7 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
             candidates.append((source, txt))
             logger.debug("_read_region_text: candidate %s %r meaningful=%d", source, txt[:80], _count_meaningful(txt))
 
-    # ── tier1 / Tier 1: PyMuPDF get_textbox over exact + expanded boxes ─────
+    # -- tier1 / Tier 1: PyMuPDF get_textbox over exact + expanded boxes -----
     # tier1 gate marker for tests: accept only when m1 >= 2 meaningful chars.
     try:
         import fitz
@@ -1235,7 +1243,7 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
     except Exception as _e1:
         logger.debug("_read_region_text: tier1 (fitz) failed: %s", _e1)
 
-    # ── tier2 / Tier 2: pypdfium2 textpage over exact + expanded boxes ──────
+    # -- tier2 / Tier 2: pypdfium2 textpage over exact + expanded boxes ------
     # tier2 markers for tests: get_textpage + get_text_bounded + 1.0 - (y + h) y-axis flip.
     try:
         import pypdfium2 as _pdfium2
@@ -1266,7 +1274,7 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
     except Exception as _e2:
         logger.debug("_read_region_text: tier2 (pypdfium2 textpage) failed: %s", _e2)
 
-    # ── tier3 / Tier 3: cropped-region render + OCR over exact + expanded boxes
+    # -- tier3 / Tier 3: cropped-region render + OCR over exact + expanded boxes
     # tier3 order marker for tests: render(scale=...) then .crop( then ocr_space_api_key/local OCR.
     try:
         import pypdfium2 as _pdfium3
@@ -1311,7 +1319,7 @@ def _read_region_text(file_path: str, page_no: int, x: float, y: float, w: float
         return (meaningful - noise_penalty + exact_bonus + left_bonus + text_layer_bonus, meaningful, -len(txt))
 
     best_source, best_text = max(candidates, key=_score)
-    logger.debug("_read_region_text: selected %s → %r", best_source, best_text[:120])
+    logger.debug("_read_region_text: selected %s -> %r", best_source, best_text[:120])
     return best_text
 
 
@@ -1438,7 +1446,7 @@ def _promote_supplier_remap_text(file_path: str, page_no: int, read_text: str) -
         return page_candidate
     return current
 
-# ── Remap hints + value persistence + rule creation ─────────────────────────
+# -- Remap hints + value persistence + rule creation -------------------------
 
 def _norm_for_region_fallback(value: str | None) -> str:
     """Normalise text for deciding if a crop read is only a clipped subset."""
@@ -1448,7 +1456,7 @@ def _norm_for_region_fallback(value: str | None) -> str:
 def _parse_amount_like(value: str | None) -> float | None:
     if not value:
         return None
-    m = re.search(r"-?\d+(?:[,.]\d{1,2})?", str(value).replace("€", " "))
+    m = re.search(r"-?\d+(?:[,.]\d{1,2})?", str(value).replace("-", " "))
     if not m:
         return None
     try:
@@ -1658,7 +1666,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
     1. Upsert a RemapHint (stores bounding-box coordinates for future replay).
     2. Resolve the text in the selected region:
        - Use payload.selected_text directly when the UI sent a text-layer selection.
-       - Otherwise call _read_region_text() (PyMuPDF text-layer → OCR fallback).
+       - Otherwise call _read_region_text() (PyMuPDF text-layer -> OCR fallback).
     3. If text was resolved AND apply_as_value is True:
        a. Persist the value into InvoiceRowCorrection immediately (no manual Save step).
        b. Write an InvoiceRowFieldAudit entry.
@@ -1679,7 +1687,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
     if not row or row.batch_id != batch.id:
         raise HTTPException(404, "Row not found in batch")
 
-    # ── 1. Upsert RemapHint (coordinate region for future replay) ────────────
+    # -- 1. Upsert RemapHint (coordinate region for future replay) ------------
     supplier = None
     if row.supplier_name:
         supplier_q = select(M.TenantSupplier).where(
@@ -1769,15 +1777,15 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
     # the rest of the pipeline fails.
     db.flush()
 
-    # ── 2. Resolve text ───────────────────────────────────────────────────────
+    # -- 2. Resolve text -------------------------------------------------------
     # Priority order:
     #   a) Direct text selection sent by the UI (payload.selected_text)
     #   b) PyMuPDF text-layer extraction from the bounding box
-    #   c) OCR fallback via _read_region_text (renders crop → OCR.space)
+    #   c) OCR fallback via _read_region_text (renders crop -> OCR.space)
     read_text = ""
 
     if payload.selected_text and payload.selected_text.strip():
-        # UI sent a text-layer selection — use it directly (most accurate)
+        # UI sent a text-layer selection - use it directly (most accurate)
         read_text = " ".join(payload.selected_text.strip().split())
         logger.debug("save_remap: using UI-provided selected_text=%r", read_text[:80])
     elif payload.apply_as_value:
@@ -1880,7 +1888,7 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
                              "Try selecting a slightly wider area if you want to apply a value immediately.",
         }
 
-    # ── 3a. Persist value into correction record ──────────────────────────────
+    # -- 3a. Persist value into correction record ------------------------------
     rule_created_now = False
     if read_text and payload.apply_as_value:
         correction = cs.get_or_create_correction(db, row)
@@ -1907,11 +1915,11 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
             )
         else:
             logger.debug(
-                "save_remap: %r already has value %r — skipping correction write",
+                "save_remap: %r already has value %r - skipping correction write",
                 payload.field_name, read_text,
             )
 
-        # ── 3b. Upsert supplier-scoped CorrectionRule ─────────────────────────
+        # -- 3b. Upsert supplier-scoped CorrectionRule -------------------------
         # rule_type="remap_field_value" lets _apply_saved_rules replay this on
         # future invoices from the same supplier without re-remapping.
         # source_pattern = normalised supplier name.
@@ -1966,9 +1974,11 @@ def save_remap(batch_id: UUID, row_id: int, payload: RemapIn,
                         row.supplier_name, payload.field_name, read_text,
                     )
 
+        promote_supplier_pattern_from_row(db, batch=batch, row=row, user=user, outcome_source="manual_review")
+
     db.commit()
     logger.debug(
-        "save_remap: committed — hint_id=%d rule_created=%s read_text=%r",
+        "save_remap: committed - hint_id=%d rule_created=%s read_text=%r",
         hint.id, rule_created_now, read_text[:40] if read_text else "",
     )
 
@@ -2224,7 +2234,7 @@ def update_rule(
     if not new_tgt:
         raise HTTPException(422, "target_value cannot be blank")
     if new_src == new_tgt.lower():
-        raise HTTPException(422, "source_pattern and target_value are identical — rule would have no effect")
+        raise HTTPException(422, "source_pattern and target_value are identical - rule would have no effect")
     existing = db.execute(
         select(CorrectionRule).where(
             CorrectionRule.tenant_id == r.tenant_id,
@@ -2254,7 +2264,7 @@ def update_rule(
         if r.is_global:
             r.company_id = None
 
-    # ── Scope reassignment ──────────────────────────────────────────────────
+    # -- Scope reassignment --------------------------------------------------
     if payload.applies_to is not None:
         from uuid import UUID as _UUID
         is_admin = getattr(user, "role", None) == "admin"
@@ -2343,7 +2353,7 @@ def delete_rule(rule_id: int, db: Session = Depends(get_db), user=Depends(curren
     db.commit()
     return {"ok": True}
 
-# ── Remap hint maintenance endpoints ───────────────────────────────────────
+# -- Remap hint maintenance endpoints ---------------------------------------
 def _user_default_tenant_id(db: Session, user) -> UUID:
     """Return the user's default tenant id for maintenance endpoints."""
     ut = db.execute(

@@ -187,5 +187,7 @@ def test_ignore_files_and_docker_context_exclude_secrets():
         assert pattern in gitignore
         assert pattern in dockerignore
 
-    assert "COPY . /app" in dockerfile
-    assert "COPY ApprovLinq" not in dockerfile
+    assert "COPY ApprovLinq/requirements.txt /app/requirements.txt" in dockerfile
+    assert "COPY ApprovLinq /app" in dockerfile
+    assert "COPY requirements.txt /app/requirements.txt" not in dockerfile
+    assert "COPY . /app" not in dockerfile

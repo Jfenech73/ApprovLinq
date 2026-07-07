@@ -20,6 +20,7 @@ from app.db.review_models import InvoiceRowFieldAudit, BatchExportEvent, Invoice
 from app.services import correction_service as cs
 from app.services.candidate_outcomes import label_batch_candidates
 from app.services.exporter import workbook_from_rows
+from app.services.supplier_pattern_learning import promote_supplier_patterns_for_batch
 from app.utils.storage import batch_export_folder
 
 logger = logging.getLogger(__name__)
@@ -154,6 +155,8 @@ def export_batch_corrected(
 
     labelled_candidates = label_batch_candidates(db, batch=batch, user=user, outcome_source="export")
     logger.info("candidate outcomes labelled batch=%s labels=%d source=export", batch.id, labelled_candidates)
+    promoted_patterns = promote_supplier_patterns_for_batch(db, batch=batch, user=user, outcome_source="export")
+    logger.info("supplier pattern learning promoted batch=%s patterns=%d source=export", batch.id, promoted_patterns)
 
     ev = BatchExportEvent(
         batch_id=batch.id, export_version=next_version,

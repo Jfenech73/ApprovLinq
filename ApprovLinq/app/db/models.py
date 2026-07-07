@@ -13,6 +13,7 @@ from sqlalchemy import (
     JSON,
     UniqueConstraint,
     LargeBinary,
+    BigInteger,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -422,9 +423,7 @@ class AdminAuditLog(Base):
 
 
 class SupplierPattern(Base):
-    """Stores keyword fingerprints extracted from successfully matched invoices so
-    that future invoices from the same supplier can be identified without relying
-    solely on fuzzy name matching."""
+    """Stores supplier keyword fingerprints with explicit trust lifecycle."""
 
     __tablename__ = "supplier_patterns"
     __table_args__ = (
@@ -449,3 +448,14 @@ class SupplierPattern(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
+    status: Mapped[str] = mapped_column(String(30), default="active", nullable=False)
+    trusted_outcome_source: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_batch_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    source_row_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    activated_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    last_trusted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    proposed_keywords: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proposal_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_proposed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

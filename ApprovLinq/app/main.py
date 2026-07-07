@@ -317,9 +317,34 @@ def ensure_runtime_schema() -> None:
             "hit_count INTEGER NOT NULL DEFAULT 1,"
             "last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+            "status VARCHAR(30) NOT NULL DEFAULT 'active',"
+            "trusted_outcome_source VARCHAR(40),"
+            "source_batch_id UUID,"
+            "source_row_id BIGINT,"
+            "created_by UUID REFERENCES users(id) ON DELETE SET NULL,"
+            "activated_at TIMESTAMPTZ,"
+            "activated_by UUID REFERENCES users(id) ON DELETE SET NULL,"
+            "last_trusted_at TIMESTAMPTZ,"
+            "proposed_keywords TEXT,"
+            "proposal_count INTEGER NOT NULL DEFAULT 0,"
+            "last_proposed_at TIMESTAMPTZ,"
             "CONSTRAINT uq_supplier_pattern UNIQUE (tenant_id, company_id, supplier_id)"
             ")"
         ),
+        "ALTER TABLE supplier_patterns ADD COLUMN IF NOT EXISTS status VARCHAR(30) NOT NULL DEFAULT 'active'",
+        "ALTER TABLE supplier_patterns ADD COLUMN IF NOT EXISTS trusted_outcome_source VARCHAR(40)",
+        "ALTER TABLE supplier_patterns ADD COLUMN IF NOT EXISTS source_batch_id UUID",
+        "ALTER TABLE supplier_patterns ADD COLUMN IF NOT EXISTS source_row_id BIGINT",
+        "ALTER TABLE supplier_patterns ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES users(id) ON DELETE SET NULL",
+        "ALTER TABLE supplier_patterns ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ",
+        "ALTER TABLE supplier_patterns ADD COLUMN IF NOT EXISTS activated_by UUID REFERENCES users(id) ON DELETE SET NULL",
+        "ALTER TABLE supplier_patterns ADD COLUMN IF NOT EXISTS last_trusted_at TIMESTAMPTZ",
+        "ALTER TABLE supplier_patterns ADD COLUMN IF NOT EXISTS proposed_keywords TEXT",
+        "ALTER TABLE supplier_patterns ADD COLUMN IF NOT EXISTS proposal_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE supplier_patterns ADD COLUMN IF NOT EXISTS last_proposed_at TIMESTAMPTZ",
+        "UPDATE supplier_patterns SET status = 'active' WHERE status IS NULL OR status = ''",
+        "CREATE INDEX IF NOT EXISTS ix_supplier_patterns_tenant_company_status ON supplier_patterns(tenant_id, company_id, status)",
+        "CREATE INDEX IF NOT EXISTS ix_supplier_patterns_supplier_status ON supplier_patterns(tenant_id, company_id, supplier_id, status)",
 
         # >>> REVIEW_PACK startup_alters
         "ALTER TABLE invoice_batches ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ",

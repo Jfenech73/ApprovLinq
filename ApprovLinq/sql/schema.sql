@@ -271,11 +271,24 @@ create table if not exists supplier_patterns (
     hit_count   integer     not null default 1,
     last_seen_at timestamptz not null default now(),
     created_at  timestamptz not null default now(),
+    status      varchar(30) not null default 'active',
+    trusted_outcome_source varchar(40),
+    source_batch_id uuid,
+    source_row_id bigint,
+    created_by uuid references users(id) on delete set null,
+    activated_at timestamptz,
+    activated_by uuid references users(id) on delete set null,
+    last_trusted_at timestamptz,
+    proposed_keywords text,
+    proposal_count integer not null default 0,
+    last_proposed_at timestamptz,
     constraint uq_supplier_pattern unique (tenant_id, company_id, supplier_id)
 );
 
 create index if not exists idx_supplier_patterns_tenant_id   on supplier_patterns(tenant_id);
 create index if not exists idx_supplier_patterns_supplier_id on supplier_patterns(supplier_id);
+create index if not exists ix_supplier_patterns_tenant_company_status on supplier_patterns(tenant_id, company_id, status);
+create index if not exists ix_supplier_patterns_supplier_status on supplier_patterns(tenant_id, company_id, supplier_id, status);
 
 
 -- ---------------------------------------------------------------------------
