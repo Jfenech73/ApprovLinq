@@ -440,8 +440,7 @@ async function exportBatch(batchId) {
   const message = $("actionMessage");
   setInlineMessage(message, "Preparing export...");
   try {
-    const token = typeof getToken === "function" ? getToken() : null;
-    const headers = token ? { "Authorization": `Bearer ${token}` } : {};
+    const headers = typeof authHeaders === "function" ? authHeaders() : {};
     const response = await fetch(`/batches/${batchId}/export`, { headers });
     if (!response.ok) {
       const text = await response.text();
@@ -624,8 +623,7 @@ if (selectedExportBtn) selectedExportBtn.addEventListener("click", async () => {
   try {
     // Use fetch directly (not api()) so we can read response headers for the
     // Content-Disposition filename — matches the Review page export behavior.
-    const token = typeof getToken === "function" ? getToken() : null;
-    const headers = token ? { "Authorization": `Bearer ${token}` } : {};
+    const headers = typeof authHeaders === "function" ? authHeaders() : {};
     const response = await fetch(`/batches/${state.selectedBatchId}/export`, { headers });
     if (!response.ok) {
       const text = await response.text();
