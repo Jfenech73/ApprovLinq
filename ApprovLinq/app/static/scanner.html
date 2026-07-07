@@ -7,8 +7,8 @@
   <script>
     (function(){ try { var t = localStorage.getItem("ap_theme"); if (t==="light"||t==="dark") document.documentElement.setAttribute("data-theme", t); } catch(e){} })();
   </script>
-  <link rel="stylesheet" href="/static/css/tokens.css" />
-  <link rel="stylesheet" href="/static/css/components.css" />
+  <link rel="stylesheet" href="/static/css/tokens.css?v=20260707a" />
+  <link rel="stylesheet" href="/static/css/components.css?v=20260707a" />
 </head>
 <body class="ap-app">
   <div data-ap-shell='{"active":"scanner","crumb":[["Work",""],["Scanner","cur"]]}'></div>
@@ -113,41 +113,19 @@
           <div id="batchesSectionBody">
             <div class="table-wrap">
               <table>
-                <thead><tr><th>Batch</th><th>Status</th><th>Pages</th><th>Created</th><th>Processed</th></tr></thead>
+                <thead><tr><th>Batch</th><th>Status</th><th>Pages</th><th>Created</th><th>Processed</th><th style="text-align:right">Actions</th></tr></thead>
                 <tbody id="batchesTableBody"></tbody>
               </table>
             </div>
           </div>
         </section>
 
-        <section class="card full-width">
-          <div class="section-head">
-            <div style="display:flex;align-items:center;gap:8px">
-              <button id="rowsSectionToggle" class="btn btn-sm" type="button"
-                      aria-expanded="true" style="padding:2px 7px;font-size:12px" title="Collapse/expand">▼</button>
-              <h2 style="margin:0">Extracted rows</h2>
-            </div>
-            <div class="row gap-sm wrap">
-              <button id="refreshRowsBtn" class="btn btn-sm" type="button">Refresh rows</button>
-              <button id="reviewBtn" class="btn btn-sm" type="button">Review</button>
-              <button id="exportBtn" class="btn btn-sm btn-primary" type="button">Export Excel</button>
-            </div>
-          </div>
-          <div id="rowsSectionBody">
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th>Source file</th><th>Page</th><th>Supplier</th><th>Invoice no</th><th>Date</th><th>Description</th><th>Total</th><th>Confidence</th><th>Tool</th><th>Review</th></tr></thead>
-                <tbody id="rowsTableBody"></tbody>
-              </table>
-            </div>
-          </div>
-        </section>
       </main>
     </div>
   </div>
 
-  <script src="/static/js/common.js"></script>
-  <script src="/static/js/ap-ui.js"></script>
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/common.js?v=20260707a"></script>
+  <script src="/static/js/ap-ui.js?v=20260707a"></script>
+  <script src="/static/js/app.js?v=20260707a"></script>
 </body>
 </html>

@@ -33,6 +33,31 @@ function reviewBadge(row) {
   return row.review_required ? "Review" : "OK";
 }
 
+function batchScanComplete(batch) {
+  const status = String(batch && batch.status || "").toLowerCase();
+  if (["processed", "partial", "in_review", "approved", "exported"].includes(status)) return true;
+  return Boolean(batch && batch.processed_at);
+}
+
+function batchReviewLocked(batch) {
+  const status = String(batch && batch.status || "").toLowerCase();
+  return ["approved", "exported"].includes(status);
+}
+
+function batchActionDisabledAttr(batch, action) {
+  if (!batchScanComplete(batch)) return "disabled";
+  if (action === "review" && batchReviewLocked(batch)) return "disabled";
+  return "";
+}
+
+function batchActionTitle(batch, action) {
+  if (!batchScanComplete(batch)) return "Batch actions are enabled once scanning is complete.";
+  if (action === "review" && batchReviewLocked(batch)) return "Batch is already marked reviewed.";
+  if (action === "view") return "Preview this batch using the assigned export template.";
+  if (action === "review") return "Open the review workspace for this batch.";
+  return "Export this batch to Excel.";
+}
+
 function hideProgress() {}
 
 function stopProgressPolling() {
@@ -112,20 +137,38 @@ async function loadBatches() {
   tbody.innerHTML = "";
 
   if (!state.batches.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="muted">No batches found.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">No batches found.</td></tr>';
     return;
   }
 
   for (const batch of state.batches) {
     const tr = document.createElement("tr");
+    const actionCell = `
+      <div class="row gap-sm" style="justify-content:flex-end;flex-wrap:wrap">
+        <button class="btn btn-sm" type="button" data-batch-action="view" data-batch-id="${escapeHtml(batch.id)}" ${batchActionDisabledAttr(batch, "view")} title="${escapeHtml(batchActionTitle(batch, "view"))}">View</button>
+        <button class="btn btn-sm" type="button" data-batch-action="review" data-batch-id="${escapeHtml(batch.id)}" ${batchActionDisabledAttr(batch, "review")} title="${escapeHtml(batchActionTitle(batch, "review"))}">Review</button>
+        <button class="btn btn-sm btn-primary" type="button" data-batch-action="export" data-batch-id="${escapeHtml(batch.id)}" ${batchActionDisabledAttr(batch, "export")} title="${escapeHtml(batchActionTitle(batch, "export"))}">Export</button>
+      </div>`;
     tr.innerHTML = `
       <td><strong>${escapeHtml(batch.batch_name)}</strong><br /><span class="muted">${escapeHtml(batch.id)}</span></td>
       <td><span class="pill">${escapeHtml(batch.status || "-")}</span></td>
       <td>${batch.page_count ?? "-"}</td>
       <td>${formatDate(batch.created_at)}</td>
       <td>${formatDate(batch.processed_at)}</td>
+      <td>${actionCell}</td>
     `;
-    tr.addEventListener("click", () => selectBatch(batch.id));
+    tr.addEventListener("click", (event) => {
+      if (event.target.closest("[data-batch-action]")) return;
+      selectBatch(batch.id);
+    });
+    tr.querySelectorAll("[data-batch-action]").forEach((button) => {
+      button.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (button.disabled) return;
+        await handleBatchRowAction(button.dataset.batchAction, batch.id);
+      });
+    });
     tbody.appendChild(tr);
   }
 }
@@ -153,7 +196,6 @@ async function selectBatch(batchId, options = {}) {
   setInlineMessage($("scanModeMessage"), "");
 
   renderFiles(batch.files || []);
-  await loadRows();
 
   // One-shot paint of review cells for batches that aren't actively polling
   // (already completed batches). Safe even when mid-scan — the poller will
@@ -200,6 +242,7 @@ function renderFiles(files) {
 
 async function loadRows() {
   const tbody = $("rowsTableBody");
+  if (!tbody) return;
   tbody.innerHTML = "";
 
   if (!state.selectedBatchId) {
@@ -323,6 +366,117 @@ function reviewUrl(batchId, fileId) {
   return `/static/review.html?batch_id=${encodeURIComponent(batchId)}&file=${encodeURIComponent(fileId)}`;
 }
 
+function batchReviewUrl(batchId) {
+  return `/static/review.html?batch_id=${encodeURIComponent(batchId)}`;
+}
+
+function popupDocumentShell(title, body) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(title)}</title>
+  <style>
+    body{font-family:Arial,sans-serif;margin:0;background:#f5f7fb;color:#0f172a}
+    header{position:sticky;top:0;background:#fff;border-bottom:1px solid #d7e0ea;padding:14px 18px;z-index:2}
+    h1{font-size:18px;margin:0 0 4px}
+    .muted{color:#64748b;font-size:13px}
+    main{padding:16px 18px}
+    .table-wrap{overflow:auto;border:1px solid #d7e0ea;border-radius:8px;background:#fff}
+    table{border-collapse:collapse;width:100%;font-size:13px}
+    th,td{border-bottom:1px solid #e5edf5;padding:8px 10px;text-align:left;vertical-align:top;white-space:nowrap}
+    th{position:sticky;top:0;background:#eaf3fb;color:#415a77;text-transform:uppercase;font-size:12px;letter-spacing:.04em}
+    tr:last-child td{border-bottom:0}
+    .empty{padding:18px;color:#64748b}
+  </style>
+</head>
+<body>${body}</body>
+</html>`;
+}
+
+function renderPreviewTable(preview) {
+  const columns = preview.columns && preview.columns.length
+    ? preview.columns
+    : Object.keys((preview.rows || [])[0] || {});
+  const rows = preview.rows || [];
+  const header = `<header>
+    <h1>${escapeHtml(preview.batch_name || "Batch preview")}</h1>
+    <div class="muted">Template: ${escapeHtml(preview.template_name || "Default export")} &middot; Sheet: ${escapeHtml(preview.sheet_name || "Invoices")} &middot; ${escapeHtml(preview.row_count || rows.length)} row(s)</div>
+  </header>`;
+  if (!rows.length || !columns.length) {
+    return popupDocumentShell("Batch preview", `${header}<main><div class="table-wrap"><div class="empty">No rows are available to preview.</div></div></main>`);
+  }
+  const thead = `<thead><tr>${columns.map(c => `<th>${escapeHtml(c)}</th>`).join("")}</tr></thead>`;
+  const tbody = `<tbody>${rows.map(row =>
+    `<tr>${columns.map(c => `<td>${escapeHtml(row[c] ?? "")}</td>`).join("")}</tr>`
+  ).join("")}</tbody>`;
+  return popupDocumentShell("Batch preview", `${header}<main><div class="table-wrap"><table>${thead}${tbody}</table></div></main>`);
+}
+
+async function viewBatchPreview(batchId) {
+  const popup = window.open("", `approvlinq_batch_preview_${batchId}`, "width=1180,height=760,resizable=yes,scrollbars=yes");
+  if (!popup) {
+    setInlineMessage($("actionMessage"), "Popup blocked. Allow popups for this site to use View.", "server-error");
+    return;
+  }
+  popup.document.open();
+  popup.document.write(popupDocumentShell("Batch preview", "<header><h1>Loading batch preview...</h1><div class=\"muted\">Rendering assigned template.</div></header>"));
+  popup.document.close();
+  try {
+    const preview = await api(`/batches/${batchId}/preview`);
+    popup.document.open();
+    popup.document.write(renderPreviewTable(preview));
+    popup.document.close();
+    popup.focus();
+  } catch (error) {
+    popup.document.open();
+    popup.document.write(popupDocumentShell("Batch preview", `<header><h1>Preview unavailable</h1><div class="muted">${escapeHtml(normalizeUiErrorMessage(error.message))}</div></header>`));
+    popup.document.close();
+  }
+}
+
+async function exportBatch(batchId) {
+  const message = $("actionMessage");
+  setInlineMessage(message, "Preparing export...");
+  try {
+    const token = typeof getToken === "function" ? getToken() : null;
+    const headers = token ? { "Authorization": `Bearer ${token}` } : {};
+    const response = await fetch(`/batches/${batchId}/export`, { headers });
+    if (!response.ok) {
+      const text = await response.text();
+      setInlineMessage(message, normalizeUiErrorMessage(text), "server-error");
+      return;
+    }
+    const blob = await response.blob();
+    const cd = response.headers.get("Content-Disposition") || "";
+    const m = /filename\*?=(?:UTF-8'')?"?([^";\r\n]+)"?/i.exec(cd);
+    const filename = m ? decodeURIComponent(m[1].trim()) : `batch_${batchId}.xlsx`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    setInlineMessage(message, "Export downloaded.", "success");
+    await loadBatches();
+  } catch (error) {
+    setInlineMessage(message, normalizeUiErrorMessage(error.message), "server-error");
+  }
+}
+
+async function handleBatchRowAction(action, batchId) {
+  if (action === "view") {
+    await viewBatchPreview(batchId);
+  } else if (action === "review") {
+    window.location.href = batchReviewUrl(batchId);
+  } else if (action === "export") {
+    await exportBatch(batchId);
+  }
+}
+
 // Minimal toast implementation that stacks, auto-dismisses, and supports an
 // action link. Uses a single container that we create on demand.
 function showToast(message, kind, action) {
@@ -425,7 +579,7 @@ $("deleteBatchBtn").addEventListener("click", async () => {
     $("selectedBatchPanel").classList.add("hidden");
     $("selectedBatchEmpty").classList.remove("hidden");
     $("filesTableBody").innerHTML = '<tr><td colspan="6" class="muted">No files uploaded yet.</td></tr>';
-    $("rowsTableBody").innerHTML = '<tr><td colspan="9" class="muted">Select a batch first.</td></tr>';
+    if ($("rowsTableBody")) $("rowsTableBody").innerHTML = '<tr><td colspan="9" class="muted">Select a batch first.</td></tr>';
     setInlineMessage(message, "Batch deleted.", "success");
     await loadBatches();
   } catch (error) {
@@ -458,7 +612,8 @@ $("processBtn").addEventListener("click", async () => {
   }
 });
 
-$("exportBtn").addEventListener("click", async () => {
+const selectedExportBtn = $("exportBtn");
+if (selectedExportBtn) selectedExportBtn.addEventListener("click", async () => {
   const message = $("actionMessage");
   if (!state.selectedBatchId) {
     setInlineMessage(message, "Select a batch first.");
@@ -495,14 +650,16 @@ $("exportBtn").addEventListener("click", async () => {
   }
 });
 
-$("refreshRowsBtn").addEventListener("click", loadRows);
+const refreshRowsBtn = $("refreshRowsBtn");
+if (refreshRowsBtn) refreshRowsBtn.addEventListener("click", loadRows);
 
-$("reviewBtn").addEventListener("click", () => {
+const selectedReviewBtn = $("reviewBtn");
+if (selectedReviewBtn) selectedReviewBtn.addEventListener("click", () => {
   if (!state.selectedBatchId) {
     alert("Select a batch first.");
     return;
   }
-  window.location.href = `/static/review.html?batch_id=${state.selectedBatchId}`;
+  window.location.href = batchReviewUrl(state.selectedBatchId);
 });
 const logoutBtn = document.getElementById("logoutBtn");
 if (logoutBtn) {
@@ -568,7 +725,6 @@ initScannerPage();
 (function wireCollapsible() {
   const SECTIONS = [
     { toggleId: "batchesSectionToggle", bodyId: "batchesSectionBody", key: "ap_batches_collapsed" },
-    { toggleId: "rowsSectionToggle",    bodyId: "rowsSectionBody",    key: "ap_rows_collapsed"   },
   ];
   SECTIONS.forEach(({ toggleId, bodyId, key }) => {
     const toggle = document.getElementById(toggleId);
@@ -595,8 +751,8 @@ initPageHelp({
   sections: [
     { heading: "Tenant and company selection", items: ["Select the correct tenant first.", "Then select the company that should own the scanned invoices.", "Batches are company-specific, so changing company changes the batch list."] },
     { heading: "Create and upload", items: ["Create a new batch with a meaningful name.", "Upload one or more invoice PDFs into the selected batch.", "Review the uploaded files table for page counts and file status."] },
-    { heading: "Process and review", items: ["Use Process Batch to trigger extraction.", "Watch status and notes while processing is running.", "Use Extracted Rows to spot-check supplier, invoice number, dates, totals and review flags."] },
-    { heading: "Export", items: ["Use Export Excel after processing finishes.", "Check posting account and nominal account suggestions before posting into the ERP if your process requires review."] }
+    { heading: "Process and review", items: ["Use Process Batch to trigger extraction.", "Watch status and notes while processing is running.", "Use View, Review and Export from the batch row once scanning is complete."] },
+    { heading: "Export", items: ["Use the batch-row Export button after processing finishes.", "Check posting account and nominal account suggestions before posting into the ERP if your process requires review."] }
   ],
   quickChecks: ["Confirm the correct tenant and company before creating the batch.", "Use clear batch names such as month plus supplier or business purpose.", "Do not export until the batch status is no longer processing."]
 });

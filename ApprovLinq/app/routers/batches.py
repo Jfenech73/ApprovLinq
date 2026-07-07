@@ -5034,6 +5034,75 @@ def list_rows(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(c
     return rows
 
 
+def _nominal_account_map_for_batch(db: Session, tenant_id, company_id) -> dict[str, str]:
+    nominal_accounts = db.query(TenantNominalAccount).filter(
+        TenantNominalAccount.tenant_id == tenant_id,
+        TenantNominalAccount.company_id == company_id,
+    ).all()
+    return {
+        str(a.account_code).strip(): a.account_name
+        for a in nominal_accounts
+    }
+
+
+def _template_rows_for_batch(db: Session, batch: InvoiceBatch, tenant_id) -> tuple[str, str, list[dict], list[str]]:
+    from app.db.models import Tenant
+
+    nominal_account_map = _nominal_account_map_for_batch(db, tenant_id, batch.company_id)
+    corrected_rows = build_corrected_rows(db, batch)
+    if not corrected_rows:
+        return "No template", "Preview", [], []
+
+    company = db.get(Company, batch.company_id) if batch.company_id else None
+    tenant = db.get(Tenant, tenant_id)
+    enrichment = {
+        "company_name": company.company_name if company else "",
+        "tenant_name": tenant.tenant_name if tenant else "",
+        "batch_id": str(batch.id),
+        "batch_name": batch.batch_name or "",
+        "scan_mode": batch.scan_mode or "summary",
+        "nominal_account_name": "",
+    }
+    row_dicts = []
+    for rd in corrected_rows:
+        code = str(rd.get("nominal_account_code") or "").strip()
+        rd["nominal_account_name"] = nominal_account_map.get(code, "")
+        row_dicts.append({**enrichment, **rd})
+
+    tpl = resolve_effective_template(db, tenant_id, batch.company_id)
+    if tpl:
+        sheet_name, rendered_rows = render_template_sheet(tpl, row_dicts)
+        columns = list(rendered_rows[0].keys()) if rendered_rows else []
+        return tpl.name, sheet_name, rendered_rows, columns
+
+    default_columns = [
+        "source_filename", "page_no", "supplier_name", "supplier_posting_account",
+        "nominal_account_code", "invoice_number", "invoice_date", "description",
+        "net_amount", "vat_amount", "total_amount", "currency", "tax_code",
+    ]
+    rendered_rows = [
+        {col: rd.get(col) for col in default_columns}
+        for rd in row_dicts
+    ]
+    return "Default export", "Invoices", rendered_rows, default_columns
+
+
+@router.get("/{batch_id}/preview")
+def preview_batch_export(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
+    batch = _get_batch_for_tenant(db, batch_id, tenant_id)
+    template_name, sheet_name, rows, columns = _template_rows_for_batch(db, batch, tenant_id)
+    return {
+        "batch_id": str(batch.id),
+        "batch_name": batch.batch_name,
+        "status": batch.status,
+        "template_name": template_name,
+        "sheet_name": sheet_name,
+        "columns": columns,
+        "rows": rows,
+        "row_count": len(rows),
+    }
+
+
 @router.get("/{batch_id}/progress")
 def get_batch_progress(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)

@@ -57,9 +57,14 @@ class TestCollapsibleSections:
     def test_batches_wrapper(self):
         h=open("app/static/scanner.html").read()
         assert 'id="batchesSectionBody"' in h and 'id="batchesSectionToggle"' in h
-    def test_rows_wrapper(self):
+    def test_rows_section_removed_and_batch_actions_present(self):
         h=open("app/static/scanner.html").read()
-        assert 'id="rowsSectionBody"' in h and 'id="rowsSectionToggle"' in h
+        assert 'id="rowsSectionBody"' not in h and 'id="rowsSectionToggle"' not in h
+        assert "Actions" in h
+        js=open("app/static/js/app.js").read()
+        assert 'data-batch-action="view"' in js
+        assert 'data-batch-action="review"' in js
+        assert 'data-batch-action="export"' in js
     def test_wire_collapsible(self):
         assert "wireCollapsible" in open("app/static/js/app.js").read()
     def test_session_storage(self):
