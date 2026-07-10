@@ -68,7 +68,13 @@ CURRENT_DOCUMENT_SOURCES = {
 SOURCE_RANK = {
     "manual": 100,
     "correction_rule": 90,
+    "stable_rule_fallback": 90,
+    "rule_supplier_alias": 90,
+    "rule_text_correction": 88,
     "saved_region": 82,
+    "saved_region_fallback": 82,
+    "saved_region_stable_anchor": 84,
+    "saved_region_candidate": 82,
     "supplier_history": 72,
     "accepted_correction": 70,
     "supplier_master": 68,
@@ -104,6 +110,14 @@ class Candidate:
     source_row_id: int | None = None
     reason: str = ""
     should_apply: bool = False
+    candidate_status: str = "candidate"
+    validation_status: str | None = None
+    validation_reason: str | None = None
+    page_no: int | None = None
+    region_id: int | None = None
+    identity_score: float | None = None
+    evidence_ref_type: str | None = None
+    evidence_ref_id: str | None = None
 
 
 @dataclass
@@ -543,6 +557,14 @@ def persist_field_candidates(db: Session, batch: InvoiceBatch, row: InvoiceRow, 
                 confidence=candidate.confidence,
                 evidence=(candidate.evidence or "")[:1000],
                 reason=(candidate.reason or decision.reason or "")[:1000],
+                candidate_status=(candidate.candidate_status or "candidate")[:40],
+                validation_status=(candidate.validation_status or ("valid" if _value_valid_for_field(candidate.field_name, candidate.value, row) else "invalid"))[:40],
+                validation_reason=(candidate.validation_reason or "")[:1000],
+                page_no=candidate.page_no,
+                region_id=candidate.region_id,
+                identity_score=candidate.identity_score,
+                evidence_ref_type=(candidate.evidence_ref_type or "")[:80] or None,
+                evidence_ref_id=(candidate.evidence_ref_id or "")[:1000] or None,
                 selected=selected,
                 applied=bool(selected and decision.applied),
                 rejected_reason=_candidate_rejected_reason(decision, candidate, winner),
@@ -600,6 +622,60 @@ def _raw_candidates(row: InvoiceRow, extraction_payload: dict[str, Any] | None) 
             confidence=_raw_candidate_confidence(field_name, payload, base_conf, "azure_di_structured"),
             evidence=_raw_candidate_evidence(field_name, payload, "azure_di_structured"),
             reason="Raw structured Azure DI field captured before merge.",
+        ))
+    return out
+
+
+def _payload_field_candidates(row: InvoiceRow, extraction_payload: dict[str, Any] | None) -> list[Candidate]:
+    payload = extraction_payload or {}
+    out: list[Candidate] = []
+    for item in payload.get("_field_candidates") or []:
+        if not isinstance(item, dict):
+            continue
+        field_name = str(item.get("field_name") or "").strip()
+        if field_name not in ARBITRATION_FIELDS:
+            continue
+        value = item.get("candidate_value")
+        if not _value_valid_for_field(field_name, value, row):
+            out.append(Candidate(
+                field_name=field_name,
+                value=value,
+                source_type=str(item.get("source_type") or "field_candidate")[:80],
+                confidence=0.0,
+                evidence=str(item.get("evidence") or "")[:1000],
+                reason=str(item.get("reason") or "Payload candidate failed field validation.")[:1000],
+                candidate_status="rejected",
+                validation_status="invalid",
+                validation_reason="Value failed field validation.",
+                page_no=item.get("page_no"),
+                region_id=item.get("region_id"),
+                identity_score=item.get("identity_score"),
+                evidence_ref_type=item.get("evidence_ref_type"),
+                evidence_ref_id=item.get("evidence_ref_id"),
+            ))
+            continue
+        try:
+            confidence = float(item.get("confidence") if item.get("confidence") is not None else 0.82)
+        except Exception:
+            confidence = 0.82
+        out.append(Candidate(
+            field_name=field_name,
+            value=_normalise_field_value(field_name, value),
+            source_type=str(item.get("source_type") or "field_candidate")[:80],
+            confidence=max(0.0, min(confidence, 0.99)),
+            evidence=str(item.get("evidence") or "")[:1000],
+            rule_id=item.get("rule_id"),
+            remap_hint_id=item.get("remap_hint_id") or item.get("region_id"),
+            reason=str(item.get("reason") or "Candidate emitted before resolver selection.")[:1000],
+            should_apply=bool(item.get("should_apply", True)),
+            candidate_status=str(item.get("candidate_status") or "candidate")[:40],
+            validation_status=str(item.get("validation_status") or "valid")[:40],
+            validation_reason=str(item.get("validation_reason") or "")[:1000] or None,
+            page_no=item.get("page_no"),
+            region_id=item.get("region_id"),
+            identity_score=item.get("identity_score"),
+            evidence_ref_type=item.get("evidence_ref_type"),
+            evidence_ref_id=item.get("evidence_ref_id"),
         ))
     return out
 
@@ -858,6 +934,7 @@ def arbitrate_invoice_row(
     perf_ctx = (context or {}).get("perf_ctx") if isinstance(context, dict) else None
     candidates: list[Candidate] = []
     candidates.extend(_raw_candidates(row, extraction_payload))
+    candidates.extend(_payload_field_candidates(row, extraction_payload))
     candidates.extend(_audit_candidates(db, row))
     with (perf_ctx.timed("rule_application") if perf_ctx else _nullcontext()):
         candidates.extend(_rule_candidates(db, batch, row))
@@ -1010,4 +1087,6 @@ def arbitrate_invoice_row(
     # which values are selected or applied.
     # Backward-compatible call shape retained for static guards: persist_field_candidates(db, batch, row, result)
     persist_field_candidates(db, batch, row, result, perf_ctx=perf_ctx)
+    if isinstance(extraction_payload, dict):
+        extraction_payload["_candidates_arbitrated"] = True
     return result

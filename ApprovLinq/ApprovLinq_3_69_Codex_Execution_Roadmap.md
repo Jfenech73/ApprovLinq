@@ -326,11 +326,11 @@ Create trustworthy financial insights from approved/exported data only.
 # Standard Codex planning prompt
 
 ```text
-Read:
+Read attached :
 
-docs/ApprovLinq_3_69_Codex_Execution_Roadmap.md
+ApprovLinq_3_69_Codex_Execution_Roadmap.md and build zip
 
-Focus only on Phase [NUMBER] — [PHASE NAME].
+Focus only on Phase 6 — Candidate-only saved regions and rules.
 
 Inspect the current implementation and prepare a detailed implementation plan.
 
@@ -355,11 +355,11 @@ Do not implement later phases.
 # Standard Codex implementation prompt
 
 ```text
-Read:
+Read attached :
 
-docs/ApprovLinq_3_69_Codex_Execution_Roadmap.md
+ApprovLinq_3_69_Codex_Execution_Roadmap.md and build zip
 
-Implement only Phase [NUMBER] — [PHASE NAME], following the approved plan.
+Implement only Phase 6 — Candidate-only saved regions and rules, following the approved plan.
 
 Requirements:
 

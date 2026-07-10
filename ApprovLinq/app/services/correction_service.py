@@ -152,8 +152,8 @@ def apply_field_changes(
 
         rule_created = False
         if field in save_as_rule_fields and field in ("supplier_name", "nominal_account_code") and new_val:
-            src = (str(row.supplier_name or "") if field == "supplier_name"
-                   else str(row.nominal_account_code or "")).strip().lower()
+            src_raw = str(row.supplier_name or "") if field == "supplier_name" else str(row.nominal_account_code or "")
+            src = " ".join(src_raw.strip().lower().split())
             tgt = str(new_val).strip()
             if src and src != tgt.lower():
                 rule_type = "supplier_alias" if field == "supplier_name" else "nominal_remap"

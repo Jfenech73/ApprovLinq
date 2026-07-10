@@ -94,7 +94,10 @@ class TestRemapInSchema:
 class TestSaveRemapStructure:
     def _fn(self) -> str:
         src = _src("app/routers/review.py")
-        return src[src.find("def save_remap"):src.find("\n# ── Rules management")]
+        tree = ast.parse(src)
+        node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "save_remap")
+        lines = src.splitlines()
+        return "\n".join(lines[node.lineno - 1:node.end_lineno])
 
     def test_selected_text_prioritised_over_ocr(self):
         fn = self._fn()

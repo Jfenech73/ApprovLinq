@@ -889,6 +889,14 @@ def row_field_candidates(
             "confidence": float(c.confidence) if c.confidence is not None else None,
             "evidence": c.evidence,
             "reason": c.reason,
+            "candidate_status": getattr(c, "candidate_status", None),
+            "validation_status": getattr(c, "validation_status", None),
+            "validation_reason": getattr(c, "validation_reason", None),
+            "page_no": getattr(c, "page_no", None),
+            "region_id": getattr(c, "region_id", None),
+            "identity_score": float(c.identity_score) if getattr(c, "identity_score", None) is not None else None,
+            "evidence_ref_type": getattr(c, "evidence_ref_type", None),
+            "evidence_ref_id": getattr(c, "evidence_ref_id", None),
             "selected": bool(c.selected),
             "applied": bool(c.applied),
             "conflict": bool(c.conflict),
@@ -2281,6 +2289,11 @@ def list_rules_tenant(
     from app.db.models import UserTenant as _UT
     from uuid import UUID as _UUID
 
+    if x_tenant_id is not None and not isinstance(x_tenant_id, str):
+        x_tenant_id = None
+    if company_id is not None and not isinstance(company_id, str):
+        company_id = None
+
     q = select(CorrectionRule)
     hint_q = select(RemapHint).where(RemapHint.deleted_at.is_(None))
     is_admin = getattr(user, "role", None) == "admin"
@@ -2599,12 +2612,27 @@ def apply_saved_regions_to_row(
 
     try:
         from app.routers.batches import _apply_remap_hints, _apply_master_data_enrichment, _apply_saved_rules
-        _apply_remap_hints(db, batch, row)
+        from app.services.invoice_arbitration import arbitrate_invoice_row
+
+        replay_payload: dict[str, object] = {
+            "supplier_name": row.supplier_name,
+            "invoice_number": row.invoice_number,
+            "invoice_date": row.invoice_date,
+            "net_amount": row.net_amount,
+            "vat_amount": row.vat_amount,
+            "total_amount": row.total_amount,
+            "nominal_account_code": row.nominal_account_code,
+            "description": row.description,
+            "currency": row.currency,
+            "tax_code": row.tax_code,
+            "method_used": row.method_used,
+            "confidence_score": row.confidence_score,
+            "_field_candidates": [],
+        }
+        _apply_remap_hints(db, batch, row, candidate_payload=replay_payload)
+        _apply_saved_rules(db, batch, row, candidate_payload=replay_payload)
+        arbitrate_invoice_row(db, batch, row, replay_payload)
         if row.supplier_name != supplier_before:
-            _apply_master_data_enrichment(db, batch.tenant_id, batch.company_id, row)
-        supplier_before_rules = row.supplier_name
-        _apply_saved_rules(db, batch, row)
-        if row.supplier_name != supplier_before_rules:
             _apply_master_data_enrichment(db, batch.tenant_id, batch.company_id, row)
     except Exception as exc:
         logger.warning("apply_saved_regions_to_row failed row_id=%s: %s", row_id, exc)

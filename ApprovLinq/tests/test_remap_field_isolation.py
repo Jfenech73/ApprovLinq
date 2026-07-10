@@ -214,7 +214,10 @@ class TestRemapHintsSupplierProtection:
         return src[src.find("def _apply_remap_hints"):src.find("def _is_suspect_field_value")]
 
     def test_invoice_like_guard_present(self):
-        assert "_is_inv_like" in self._hints_src()
+        src = _src("app/routers/batches.py")
+        fn = src[src.find("def _saved_region_value_is_valid"):src.find("def _get_pdf_page_count_safe")]
+        assert 'field_name == "supplier_name"' in fn
+        assert "invoice_number" in fn
 
     def test_supplier_name_guarded(self):
         fn = self._hints_src()
@@ -222,10 +225,10 @@ class TestRemapHintsSupplierProtection:
 
     def test_continue_on_invoice_like(self):
         fn = self._hints_src()
-        inv_idx = fn.find("_is_inv_like")
-        # continue must appear after the _is_inv_like check
-        assert "continue" in fn[inv_idx:inv_idx+700], \
-            "continue must follow _is_inv_like check in _apply_remap_hints"
+        assert "_saved_region_value_is_valid(hint.field_name, text)" in fn
+        invalid_idx = fn.find("saved_region_invalid")
+        assert "continue" in fn[invalid_idx:invalid_idx+700], \
+            "invalid saved-region supplier values must be rejected before candidate/apply"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

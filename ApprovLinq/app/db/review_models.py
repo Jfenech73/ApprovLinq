@@ -26,6 +26,9 @@ CORRECTABLE_FIELDS: tuple[str, ...] = (
 )
 
 
+_BIGINT_PK = BigInteger().with_variant(Integer, "sqlite")
+
+
 class InvoiceRowCorrection(Base):
     __tablename__ = "invoice_row_corrections"
     row_id: Mapped[int] = mapped_column(ForeignKey("invoice_rows.id", ondelete="CASCADE"), primary_key=True)
@@ -50,7 +53,7 @@ class InvoiceRowCorrection(Base):
 
 class InvoiceRowFieldAudit(Base):
     __tablename__ = "invoice_row_field_audits"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_BIGINT_PK, primary_key=True, autoincrement=True)
     batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
     scan_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True)
     row_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -80,10 +83,12 @@ class InvoiceFieldCandidate(Base):
         Index("ix_field_candidates_field_name", "field_name"),
         Index("ix_field_candidates_source_type", "source_type"),
         Index("ix_field_candidates_selected", "selected"),
+        Index("ix_field_candidates_status", "candidate_status"),
+        Index("ix_field_candidates_region", "region_id"),
         Index("ix_field_candidates_created_at", "created_at"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_BIGINT_PK, primary_key=True, autoincrement=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     company_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
     batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
@@ -98,6 +103,14 @@ class InvoiceFieldCandidate(Base):
     confidence: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True)
     evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_status: Mapped[str] = mapped_column(String(40), default="candidate", nullable=False)
+    validation_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    validation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    page_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    region_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    identity_score: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True)
+    evidence_ref_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    evidence_ref_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     selected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     applied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     rejected_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -157,7 +170,7 @@ class InvoiceDuplicateCandidate(Base):
 
 class CorrectionRule(Base):
     __tablename__ = "correction_rules"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_BIGINT_PK, primary_key=True, autoincrement=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     company_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=True)
     rule_type: Mapped[str] = mapped_column(String(40), nullable=False)

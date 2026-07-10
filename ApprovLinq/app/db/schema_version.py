@@ -6,7 +6,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
 
-CURRENT_ALEMBIC_REVISION = "20260710_0009"
+CURRENT_ALEMBIC_REVISION = "20260710_0010"
 
 KNOWN_ALEMBIC_REVISIONS = frozenset({
     "20260411_0001",
@@ -18,6 +18,7 @@ KNOWN_ALEMBIC_REVISIONS = frozenset({
     "20260707_0006",
     "20260710_0007",
     "20260710_0008",
+    "20260710_0009",
     CURRENT_ALEMBIC_REVISION,
 })
 

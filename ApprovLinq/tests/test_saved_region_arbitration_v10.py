@@ -59,7 +59,8 @@ def test_manual_apply_saved_regions_endpoint_and_ui_present():
     assert "Apply saved rules to row" in html
     assert "apply-saved-regions" in js
     assert "Saved rules checked" in js
-    assert "_apply_saved_rules(db, batch, row)" in review
+    assert "_apply_saved_rules(db, batch, row, candidate_payload=replay_payload)" in review
+    assert "arbitrate_invoice_row(db, batch, row, replay_payload)" in review
 
 
 def test_saved_rules_button_is_maintenance_not_invisible_action():
@@ -100,6 +101,6 @@ def test_saved_region_values_are_field_type_validated_before_apply():
 
 def test_saved_region_query_is_company_aware():
     src = _read("app/routers/batches.py")
-    fn = src[src.find("def _apply_remap_hints"):src.find("def _is_suspect_field_value")]
+    fn = src[src.find("def _get_active_saved_regions_for_batch"):src.find("def _apply_remap_hints")]
     assert "RemapHint.company_id == batch.company_id" in fn
-    assert "tenant-wide fallbacks" in fn
+    assert "RemapHint.company_id.is_(None)" in fn

@@ -22,7 +22,7 @@ def test_schema_version_validator_accepts_only_current_head():
     validate_alembic_revision(CURRENT_ALEMBIC_REVISION)
 
     with pytest.raises(SchemaVersionError, match="behind build head"):
-        validate_alembic_revision("20260710_0008")
+        validate_alembic_revision("20260710_0009")
 
     with pytest.raises(SchemaVersionError, match="not versioned"):
         validate_alembic_revision(None)
@@ -65,15 +65,25 @@ def test_invoice_read_detail_provider_fields_are_prefixed_not_case_colliding():
     assert collisions == {}
 
 
-def test_phase5_alembic_migration_declares_current_head_and_backfill():
+def test_phase5_alembic_migration_declares_backfill():
     src = (ROOT / "alembic/versions/2026_07_10_0009_database_migration_foundation.py").read_text(
         encoding="utf-8"
     )
-    assert f'revision = "{CURRENT_ALEMBIC_REVISION}"' in src
+    assert 'revision = "20260710_0009"' in src
     assert 'down_revision = "20260710_0008"' in src
     for token in ["di_description", "di_quantity", "di_unit_price"]:
         assert token in src
     for token in ['"Description"', '"Quantity"', '"UnitPrice"']:
+        assert token in src
+
+
+def test_phase6_alembic_migration_declares_current_head_and_candidate_envelope():
+    src = (ROOT / "alembic/versions/2026_07_10_0010_candidate_envelope_saved_regions_rules.py").read_text(
+        encoding="utf-8"
+    )
+    assert f'revision = "{CURRENT_ALEMBIC_REVISION}"' in src
+    assert 'down_revision = "20260710_0009"' in src
+    for token in ["candidate_status", "validation_status", "region_id", "identity_score"]:
         assert token in src
 
 

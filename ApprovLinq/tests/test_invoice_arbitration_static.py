@@ -23,7 +23,7 @@ def test_invoice_arbitration_service_exists_with_required_contract():
 def test_batch_pipeline_calls_arbitration_after_rules_and_before_bcrs():
     src = Path('app/routers/batches.py').read_text()
     assert 'from app.services.invoice_arbitration import arbitrate_invoice_row' in src
-    apply_idx = src.index('_apply_saved_rules(db, batch, row)')
+    apply_idx = src.index('_apply_saved_rules(db, batch, row, candidate_payload=r)')
     arb_idx = src.index('arbitrate_invoice_row(db, batch, row, r')
     bcrs_idx = src.index('_decide_bcrs_split(db, batch, row, r, [row])')
     assert apply_idx < arb_idx < bcrs_idx

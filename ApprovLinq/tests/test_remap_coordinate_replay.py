@@ -111,12 +111,14 @@ class TestTextCorrectionSeparation:
         fn = _rules_fn()
         tc_idx = fn.find('if chosen_rule.rule_type == "text_correction"')
         assert tc_idx > 0, "text_correction handler must exist"
-        block  = fn[tc_idx:tc_idx + 1000]
-        setattr_idx = block.find("setattr(row, field, val)")
-        assert setattr_idx > 0, "text_correction must use setattr with val"
+        block  = fn[tc_idx:tc_idx + 2200]
+        candidate_idx = block.find('source_type="rule_text_correction"')
+        legacy_setattr_idx = block.find("setattr(row, field, val)")
+        assert candidate_idx > 0, "text_correction must emit a rule_text_correction candidate"
+        assert legacy_setattr_idx > 0, "legacy direct apply path must remain for callers without candidate_payload"
         match_idx = block.find("current_norm")
-        assert match_idx < setattr_idx, \
-            "text_correction must check match before setattr"
+        assert match_idx < candidate_idx < legacy_setattr_idx, \
+            "text_correction must check match before emitting/applying target_value"
 
     def test_text_correction_does_not_call_read_region_text(self):
         fn = _rules_fn()

@@ -62,7 +62,7 @@ def company_row(db, tenant_row):
 @pytest.fixture()
 def user_row(db):
     u = User(id=uuid.uuid4(), email="test@example.com", full_name="Test User",
-             hashed_password="x", role="user")
+             password_hash="x", role="user")
     db.add(u)
     db.flush()
     return u
@@ -71,7 +71,7 @@ def user_row(db):
 @pytest.fixture()
 def admin_row(db):
     u = User(id=uuid.uuid4(), email="admin@example.com", full_name="Admin",
-             hashed_password="x", role="admin")
+             password_hash="x", role="admin")
     db.add(u)
     db.flush()
     return u

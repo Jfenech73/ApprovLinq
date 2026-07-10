@@ -484,6 +484,14 @@ create table if not exists invoice_field_candidates (
     confidence       numeric(6,4),
     evidence         text,
     reason           text,
+    candidate_status varchar(40) not null default 'candidate',
+    validation_status varchar(40),
+    validation_reason text,
+    page_no          integer,
+    region_id        bigint,
+    identity_score   numeric(6,4),
+    evidence_ref_type varchar(80),
+    evidence_ref_id  text,
     selected         boolean     not null default false,
     applied          boolean     not null default false,
     rejected_reason  text,
@@ -502,6 +510,8 @@ create index if not exists ix_field_candidates_batch_row     on invoice_field_ca
 create index if not exists ix_field_candidates_field_name    on invoice_field_candidates(field_name);
 create index if not exists ix_field_candidates_source_type   on invoice_field_candidates(source_type);
 create index if not exists ix_field_candidates_selected      on invoice_field_candidates(selected);
+create index if not exists ix_field_candidates_status        on invoice_field_candidates(candidate_status);
+create index if not exists ix_field_candidates_region        on invoice_field_candidates(region_id);
 create index if not exists ix_field_candidates_created_at    on invoice_field_candidates(created_at);
 create index if not exists ix_field_candidates_scan_run      on invoice_field_candidates(scan_run_id);
 

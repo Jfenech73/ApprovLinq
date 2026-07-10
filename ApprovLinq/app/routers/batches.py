@@ -388,6 +388,55 @@ def _candidate_text(value: object) -> str | None:
     return text or None
 
 
+def _emit_field_candidate(
+    payload: dict,
+    *,
+    field_name: str,
+    candidate_value: object,
+    source_type: str,
+    source_id: str | None = None,
+    confidence: float | None = None,
+    evidence: object = None,
+    reason: str = "candidate_emitted_for_resolver",
+    rule_id: int | None = None,
+    remap_hint_id: int | None = None,
+    page_no: int | None = None,
+    region_id: int | None = None,
+    identity_score: float | None = None,
+    validation_status: str = "valid",
+    validation_reason: str | None = None,
+    candidate_status: str = "candidate",
+    conflict: bool = False,
+) -> None:
+    value_text = _candidate_text(candidate_value)
+    if not field_name or value_text is None:
+        return
+    payload.setdefault("_field_candidates", []).append({
+        "field_name": field_name,
+        "candidate_value": value_text,
+        "normalised_value": value_text,
+        "source_type": source_type,
+        "source_id": source_id,
+        "confidence": confidence,
+        "evidence": _candidate_text(evidence),
+        "reason": reason,
+        "rule_id": rule_id,
+        "remap_hint_id": remap_hint_id,
+        "region_id": region_id if region_id is not None else remap_hint_id,
+        "page_no": page_no,
+        "identity_score": identity_score,
+        "validation_status": validation_status,
+        "validation_reason": validation_reason,
+        "candidate_status": candidate_status,
+        "selected": False,
+        "applied": False,
+        "conflict": conflict,
+        "should_apply": True,
+        "evidence_ref_type": "remap_hint" if remap_hint_id else ("rule" if rule_id else None),
+        "evidence_ref_id": str(remap_hint_id or rule_id) if (remap_hint_id or rule_id) else None,
+    })
+
+
 def _persist_selected_field_candidates(
     db: Session,
     *,
@@ -456,7 +505,7 @@ def _persist_selected_field_candidates(
             conflict=False,
         ))
 
-    for extra in payload.get("_field_candidates") or []:
+    for extra in ([] if payload.get("_candidates_arbitrated") else (payload.get("_field_candidates") or [])):
         if not isinstance(extra, dict):
             continue
         field_name = _candidate_text(extra.get("field_name"))
@@ -478,6 +527,14 @@ def _persist_selected_field_candidates(
             confidence=extra.get("confidence"),
             evidence=_candidate_text(extra.get("evidence")),
             reason=_candidate_text(extra.get("reason")) or "field_candidate",
+            candidate_status=_candidate_text(extra.get("candidate_status")) or "candidate",
+            validation_status=_candidate_text(extra.get("validation_status")),
+            validation_reason=_candidate_text(extra.get("validation_reason")),
+            page_no=extra.get("page_no"),
+            region_id=extra.get("region_id") or extra.get("remap_hint_id"),
+            identity_score=extra.get("identity_score"),
+            evidence_ref_type=_candidate_text(extra.get("evidence_ref_type")),
+            evidence_ref_id=_candidate_text(extra.get("evidence_ref_id")),
             selected=bool(extra.get("selected", False)),
             applied=bool(extra.get("applied", False)),
             rejected_reason=_candidate_text(extra.get("rejected_reason")),
@@ -665,23 +722,19 @@ def _apply_blank_field_stable_rules(
         target = _coerce_rule_target(field_name, rule.target_value)
         if _candidate_text(target) is None:
             continue
-        setattr(row, field_name, target)
-        payload[field_name] = target
         if field_name in {"supplier_name", "invoice_number", "invoice_date", "total_amount"}:
             critical_filled.append(field_name)
-        candidates.append({
-            "field_name": field_name,
-            "candidate_value": _candidate_text(target),
-            "normalised_value": _candidate_text(target),
-            "source_type": "stable_rule_fallback",
-            "source_id": f"rule:{rule.id}",
-            "confidence": None,
-            "evidence": evidence[:2000],
-            "reason": "filled_blank_from_stable_identifier_rule",
-            "selected": True,
-            "applied": True,
-            "conflict": False,
-        })
+        _emit_field_candidate(
+            payload,
+            field_name=field_name,
+            candidate_value=target,
+            source_type="stable_rule_fallback",
+            source_id=f"rule:{rule.id}",
+            confidence=0.86,
+            evidence=evidence[:2000],
+            reason="candidate_from_stable_identifier_rule",
+            rule_id=rule.id,
+        )
         _audit_rule_application(
             db,
             batch,
@@ -690,11 +743,8 @@ def _apply_blank_field_stable_rules(
             None,
             target,
             rule,
-            "blank field filled by stable identifier rule",
+            "blank field candidate emitted by stable identifier rule",
         )
-
-    if candidates:
-        payload["_field_candidates"] = candidates
     if critical_filled:
         row.review_required = True
         row.auto_approved = False
@@ -721,39 +771,22 @@ def _apply_blank_saved_regions_as_candidates(
     blank_before = {field for field, value in before.items() if _candidate_text(value) is None}
     if not blank_before:
         return
-    _apply_remap_hints(db, batch, row, perf_ctx=perf_ctx)
-    candidates = list(payload.get("_field_candidates") or [])
-    critical_filled: list[str] = []
-    for field_name in sorted(blank_before):
-        after = getattr(row, field_name, None)
-        if _candidate_text(after) is None:
-            continue
-        payload[field_name] = after
-        if field_name in {"supplier_name", "invoice_number", "invoice_date", "total_amount"}:
-            critical_filled.append(field_name)
-        candidates.append({
-            "field_name": field_name,
-            "candidate_value": _candidate_text(after),
-            "normalised_value": _candidate_text(after),
-            "source_type": "saved_region_fallback",
-            "source_id": "remap_hint",
-            "confidence": None,
-            "evidence": _candidate_text(after),
-            "reason": "filled_blank_from_saved_region",
-            "selected": True,
-            "applied": True,
-            "conflict": False,
-        })
-    if candidates:
-        payload["_field_candidates"] = candidates
-    if critical_filled:
+    before_count = len(payload.get("_field_candidates") or [])
+    _apply_remap_hints(db, batch, row, perf_ctx=perf_ctx, candidate_payload=payload)
+    new_candidates = (payload.get("_field_candidates") or [])[before_count:]
+    critical_candidates = [
+        c.get("field_name")
+        for c in new_candidates
+        if c.get("field_name") in {"supplier_name", "invoice_number", "invoice_date", "total_amount"}
+    ]
+    if critical_candidates:
         row.review_required = True
         row.auto_approved = False
         row.validation_status = "review_saved_region_fallback_used"
         existing_reasons = row.review_reasons or ""
         reason = "saved_region_used_for_critical_field"
         row.review_reasons = reason if not existing_reasons else f"{existing_reasons}|{reason}"
-        row.review_fields = "|".join(sorted(set((row.review_fields or "").split("|") + critical_filled) - {""}))
+        row.review_fields = "|".join(sorted(set((row.review_fields or "").split("|") + critical_candidates) - {""}))
 
 
 def _apply_stable_anchor_saved_regions_as_candidates(
@@ -774,36 +807,23 @@ def _apply_stable_anchor_saved_regions_as_candidates(
         "supplier_name", "invoice_number", "invoice_date", "net_amount",
         "vat_amount", "total_amount", "description", "nominal_account_code",
     )
-    before = {field: getattr(row, field, None) for field in tracked_fields}
-    _apply_remap_hints(db, batch, row, perf_ctx=perf_ctx)
-    candidates = list(payload.get("_field_candidates") or [])
-    changed_critical: list[str] = []
+    before_count = len(payload.get("_field_candidates") or [])
+    _apply_remap_hints(db, batch, row, perf_ctx=perf_ctx, candidate_payload=payload)
+    new_candidates = (payload.get("_field_candidates") or [])[before_count:]
+    changed_critical: list[str] = [
+        c.get("field_name")
+        for c in new_candidates
+        if c.get("field_name") in {"supplier_name", "invoice_number", "invoice_date", "total_amount"}
+    ]
     conflict_fields: list[str] = []
-    for field_name in tracked_fields:
-        before_val = before.get(field_name)
-        after_val = getattr(row, field_name, None)
-        if str(before_val or "").strip() == str(after_val or "").strip():
-            continue
-        payload[field_name] = after_val
-        if field_name in {"supplier_name", "invoice_number", "invoice_date", "total_amount"}:
-            changed_critical.append(field_name)
-        if _candidate_text(before_val) is not None:
-            conflict_fields.append(field_name)
-        candidates.append({
-            "field_name": field_name,
-            "candidate_value": _candidate_text(after_val),
-            "normalised_value": _candidate_text(after_val),
-            "source_type": "saved_region_stable_anchor",
-            "source_id": "remap_hint:stable_anchor",
-            "confidence": None,
-            "evidence": "; ".join(f"{k}={v}" for k, v in sorted(row_identifiers))[:2000],
-            "reason": "applied_saved_region_matched_by_stable_identifier",
-            "selected": True,
-            "applied": True,
-            "conflict": field_name in conflict_fields,
-        })
-    if candidates:
-        payload["_field_candidates"] = candidates
+    for candidate in new_candidates:
+        if candidate.get("field_name") in tracked_fields:
+            candidate["source_type"] = "saved_region_stable_anchor"
+            candidate["reason"] = "candidate_saved_region_matched_by_stable_identifier"
+            candidate["evidence"] = "; ".join(f"{k}={v}" for k, v in sorted(row_identifiers))[:2000]
+            if _candidate_text(getattr(row, candidate.get("field_name"), None)) is not None:
+                candidate["conflict"] = True
+                conflict_fields.append(candidate.get("field_name"))
     if changed_critical:
         row.review_required = True
         row.auto_approved = False
@@ -848,7 +868,6 @@ def _apply_supplier_name_rules_as_candidates(
     else:
         rules_q = rules_q.filter((CorrectionRule.company_id.is_(None)) | (CorrectionRule.is_global.is_(True)))
 
-    candidates = list(payload.get("_field_candidates") or [])
     for rule in rules_q.order_by(CorrectionRule.is_global.asc(), CorrectionRule.id.desc()).all():
         src = _normalize_rule_value(rule.source_pattern)
         target = (rule.target_value or "").strip()
@@ -857,9 +876,7 @@ def _apply_supplier_name_rules_as_candidates(
         old_val = row.supplier_name
         if str(old_val or "").strip() == target:
             return
-        row.supplier_name = target
-        payload["supplier_name"] = target
-        _append_method_tag(row, f"rule:{rule.rule_type}:supplier_name")
+        _append_method_tag(row, f"rule_candidate:{rule.rule_type}:supplier_name")
         _audit_rule_application(
             db,
             batch,
@@ -868,22 +885,20 @@ def _apply_supplier_name_rules_as_candidates(
             old_val,
             target,
             rule,
-            "Applied explicit supplier-name rule during baseline scan",
+            "Emitted explicit supplier-name rule candidate during baseline scan",
         )
-        candidates.append({
-            "field_name": "supplier_name",
-            "candidate_value": target,
-            "normalised_value": target,
-            "source_type": f"rule_{rule.rule_type}",
-            "source_id": f"rule:{rule.id}",
-            "confidence": None,
-            "evidence": str(old_val or "")[:2000],
-            "reason": "applied_explicit_supplier_name_rule",
-            "selected": True,
-            "applied": True,
-            "conflict": True,
-        })
-        payload["_field_candidates"] = candidates
+        _emit_field_candidate(
+            payload,
+            field_name="supplier_name",
+            candidate_value=target,
+            source_type=f"rule_{rule.rule_type}",
+            source_id=f"rule:{rule.id}",
+            confidence=0.88,
+            evidence=str(old_val or "")[:2000],
+            reason="candidate_from_explicit_supplier_name_rule",
+            rule_id=rule.id,
+            conflict=True,
+        )
         row.review_required = True
         row.auto_approved = False
         reasons = [x for x in re.split(r"[|]", row.review_reasons or "") if x]
@@ -1306,7 +1321,13 @@ def _supplier_rule_source_matches(current_norm: str | None, source_norm: str | N
     return False
 
 
-def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> None:
+def _apply_saved_rules(
+    db: Session,
+    batch: InvoiceBatch,
+    row: InvoiceRow,
+    *,
+    candidate_payload: dict | None = None,
+) -> None:
     """Apply active CorrectionRules to this row.
 
     Rule types handled:
@@ -1355,11 +1376,25 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                 )
                 old_val = row.supplier_name
                 new_supplier_name = rule.target_value
-                row.supplier_name = new_supplier_name
-                _append_method_tag(row, "rule:supplier_alias")
+                if candidate_payload is not None:
+                    _emit_field_candidate(
+                        candidate_payload,
+                        field_name="supplier_name",
+                        candidate_value=new_supplier_name,
+                        source_type="rule_supplier_alias",
+                        source_id=f"rule:{rule.id}",
+                        confidence=0.90,
+                        evidence=old_val,
+                        reason="candidate_from_supplier_alias_rule",
+                        rule_id=rule.id,
+                    )
+                    _append_method_tag(row, "rule_candidate:supplier_alias")
+                else:
+                    row.supplier_name = new_supplier_name
+                    _append_method_tag(row, "rule:supplier_alias")
                 _audit_rule_application(
                     db, batch, row, "supplier_name", old_val, new_supplier_name,
-                    rule, "Applied supplier alias rule during scan"
+                    rule, "Emitted supplier alias rule candidate during scan" if candidate_payload is not None else "Applied supplier alias rule during scan"
                 )
         elif rule.rule_type == "nominal_remap":
             # Existing semantics: nominal_remap means old nominal value → new
@@ -1372,11 +1407,25 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                     row.nominal_account_code, rule.target_value, row.id,
                 )
                 old_val = row.nominal_account_code
-                row.nominal_account_code = rule.target_value
-                _append_method_tag(row, "rule:nominal_remap")
+                if candidate_payload is not None:
+                    _emit_field_candidate(
+                        candidate_payload,
+                        field_name="nominal_account_code",
+                        candidate_value=rule.target_value,
+                        source_type="correction_rule",
+                        source_id=f"rule:{rule.id}",
+                        confidence=0.90,
+                        evidence=old_val,
+                        reason="candidate_from_nominal_remap_rule",
+                        rule_id=rule.id,
+                    )
+                    _append_method_tag(row, "rule_candidate:nominal_remap")
+                else:
+                    row.nominal_account_code = rule.target_value
+                    _append_method_tag(row, "rule:nominal_remap")
                 _audit_rule_application(
                     db, batch, row, "nominal_account_code", old_val, rule.target_value,
-                    rule, "Applied nominal remap rule during scan"
+                    rule, "Emitted nominal remap rule candidate during scan" if candidate_payload is not None else "Applied nominal remap rule during scan"
                 )
 
     # ── 2. remap_field_value / text_correction rules ────────────────────
@@ -1516,11 +1565,25 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                         # text_correction: val == chosen_rule.target_value.strip()
                         # Use val to keep the actual assignment out of the remap_field_value block.
                         # The comment above _apply_saved_rules documents setattr semantics.
-                        setattr(row, field, val)
-                        _append_method_tag(row, f"rule:text_correction:{field}")
+                        if candidate_payload is not None:
+                            _emit_field_candidate(
+                                candidate_payload,
+                                field_name=field,
+                                candidate_value=val,
+                                source_type="rule_text_correction",
+                                source_id=f"rule:{rule.id}",
+                                confidence=0.88,
+                                evidence=current_raw,
+                                reason="candidate_from_text_correction_rule",
+                                rule_id=rule.id,
+                            )
+                            _append_method_tag(row, f"rule_candidate:text_correction:{field}")
+                        else:
+                            setattr(row, field, val)
+                            _append_method_tag(row, f"rule:text_correction:{field}")
                         _audit_rule_application(
                             db, batch, row, field, old_val, val, rule,
-                            "Applied text correction rule during scan"
+                            "Emitted text correction rule candidate during scan" if candidate_payload is not None else "Applied text correction rule during scan"
                         )
                         logger.debug(
                             "_apply_saved_rules: text_correction applied "
@@ -1662,11 +1725,28 @@ def _apply_saved_rules(db: Session, batch: InvoiceBatch, row: InvoiceRow) -> Non
                         f"Skipped saved-region supplier overwrite because the region did not match the existing supplier relationship; remap_hint_id={hint.id}"
                     )
                     continue
-            setattr(row, field, fresh_text)
-            _append_method_tag(row, f"rule:remap_field_value:{field}")
+            if candidate_payload is not None:
+                _emit_field_candidate(
+                    candidate_payload,
+                    field_name=field,
+                    candidate_value=fresh_text,
+                    source_type="saved_region_candidate",
+                    source_id=f"remap_hint:{hint.id}",
+                    confidence=0.84,
+                    evidence=fresh_text,
+                    reason="candidate_from_saved_region_rule_coordinate_replay",
+                    rule_id=rule.id,
+                    remap_hint_id=hint.id,
+                    page_no=used_page_no or hint.page_no or row.page_no,
+                    region_id=hint.id,
+                )
+                _append_method_tag(row, f"rule_candidate:remap_field_value:{field}")
+            else:
+                setattr(row, field, fresh_text)
+                _append_method_tag(row, f"rule:remap_field_value:{field}")
             _audit_rule_application(
                 db, batch, row, field, old_val, fresh_text, rule,
-                f"Applied saved-region rule during scan; remap_hint_id={hint.id}"
+                f"Emitted saved-region rule candidate during scan; remap_hint_id={hint.id}" if candidate_payload is not None else f"Applied saved-region rule during scan; remap_hint_id={hint.id}"
             )
             logger.debug(
                 "_apply_saved_rules: remap_field_value coordinate-replay "
@@ -1985,7 +2065,14 @@ def _get_active_saved_regions_for_batch(db: Session, batch: InvoiceBatch, perf_c
     return hints
 
 
-def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_ctx: ScanPerformanceContext | None = None) -> None:
+def _apply_remap_hints(
+    db: Session,
+    batch: InvoiceBatch,
+    row: InvoiceRow,
+    perf_ctx: ScanPerformanceContext | None = None,
+    *,
+    candidate_payload: dict | None = None,
+) -> None:
     """Apply saved RemapHints as extraction guidance.
 
     Fills a field when:
@@ -2315,7 +2402,25 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
                     target_fields.discard(hint.field_name)
                     continue
 
-                setattr(row, hint.field_name, text)
+                if candidate_payload is not None:
+                    _emit_field_candidate(
+                        candidate_payload,
+                        field_name=hint.field_name,
+                        candidate_value=text,
+                        source_type="saved_region_candidate",
+                        source_id=f"remap_hint:{hint.id}",
+                        confidence=0.84 if stable_anchor_matched else 0.82,
+                        evidence=text,
+                        reason="candidate_from_saved_region_replay",
+                        remap_hint_id=hint.id,
+                        page_no=used_page_no or hint.page_no or row.page_no,
+                        region_id=hint.id,
+                        identity_score=1.0 if stable_anchor_matched else None,
+                    )
+                    _append_method_tag(row, f"remap_hint_candidate:{hint.field_name}")
+                else:
+                    setattr(row, hint.field_name, text)
+                    _append_method_tag(row, f"remap_hint:{hint.field_name}")
                 if hint.field_name == "supplier_name" and text:
                     # Keep the maintenance table useful: once a saved region reads
                     # a cleaner supplier title, store that as the snapshot used for
@@ -2326,13 +2431,12 @@ def _apply_remap_hints(db: Session, batch: InvoiceBatch, row: InvoiceRow, perf_c
                             hint.supplier_name_snapshot = text
                     except Exception:
                         pass
-                _append_method_tag(row, f"remap_hint:{hint.field_name}")
                 if perf_ctx is not None:
                     perf_ctx.inc("saved_regions_applied")
                 _audit_saved_region_action(
                     db, batch, row, hint.field_name, old_val, text, hint,
-                    "saved_region_apply",
-                    f"Applied supplier-linked saved region during scan; confidence=medium; saved_page={hint.page_no}; used_page={used_page_no}; reason={'stable_identifier_anchor' if stable_anchor_matched else 'supplier_match_page_independent_region'}",
+                    "saved_region_candidate" if candidate_payload is not None else "saved_region_apply",
+                    f"{'Emitted candidate from' if candidate_payload is not None else 'Applied'} supplier-linked saved region during scan; confidence=medium; saved_page={hint.page_no}; used_page={used_page_no}; reason={'stable_identifier_anchor' if stable_anchor_matched else 'supplier_match_page_independent_region'}",
                     perf_ctx=perf_ctx,
                 )
                 target_fields.discard(hint.field_name)
@@ -4551,7 +4655,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                     )
                                 _supplier_before_remap = row.supplier_name
                                 with perf_ctx.timed("saved_region_replay"):
-                                    _apply_remap_hints(db, batch, row, perf_ctx=perf_ctx)
+                                    _apply_remap_hints(db, batch, row, perf_ctx=perf_ctx, candidate_payload=r)
                                 # Supplier-name saved regions are allowed to confirm/fix a supplier
                                 # after the first master-data suggestion pass.  Re-run suggestions
                                 # so posting account / supplier match data follow the corrected name.
@@ -4563,7 +4667,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                             payload=r,
                                         )
                                 with perf_ctx.timed("rule_application"):
-                                    _apply_saved_rules(db, batch, row)
+                                    _apply_saved_rules(db, batch, row, candidate_payload=r)
                                 # Deterministic post-extraction arbitration: compare raw extraction,
                                 # rules, saved-region activity, supplier history/master data and
                                 # totals evidence before final review/BCRS decisions.
@@ -4588,7 +4692,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                     "total_amount": row.total_amount,
                                 }
                                 with perf_ctx.timed("rule_application"):
-                                    _apply_saved_rules(db, batch, row)
+                                    _apply_saved_rules(db, batch, row, candidate_payload=r)
                                 baseline_changed = [
                                     field for field, before_value in baseline_before_rules.items()
                                     if str(getattr(row, field, None) or "").strip() != str(before_value or "").strip()

@@ -15,7 +15,9 @@ def test_invoice_field_candidate_model_exists_with_required_columns_and_indexes(
         "tenant_id", "company_id", "batch_id", "row_id", "source_file_id",
         "field_name", "candidate_value", "normalised_value", "source_type", "source_id",
         "confidence", "evidence", "reason", "selected", "applied",
-        "rejected_reason", "conflict", "created_at",
+        "rejected_reason", "conflict", "candidate_status", "validation_status",
+        "validation_reason", "page_no", "region_id", "identity_score",
+        "evidence_ref_type", "evidence_ref_id", "created_at",
     ]:
         assert token in src
     for index_name in [
@@ -24,6 +26,8 @@ def test_invoice_field_candidate_model_exists_with_required_columns_and_indexes(
         "ix_field_candidates_field_name",
         "ix_field_candidates_source_type",
         "ix_field_candidates_selected",
+        "ix_field_candidates_status",
+        "ix_field_candidates_region",
         "ix_field_candidates_created_at",
     ]:
         assert index_name in src
