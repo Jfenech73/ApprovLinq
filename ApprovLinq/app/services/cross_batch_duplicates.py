@@ -179,6 +179,7 @@ def _score(current: DuplicateIdentity, candidate: DuplicateIdentity) -> tuple[De
         and abs(current.total_cents - candidate.total_cents) <= 1
     )
     currency_match = bool(current.currency and current.currency == candidate.currency)
+    currency_compatible = currency_match or not current.currency or not candidate.currency
     supplier_match = bool(current.supplier_key and current.supplier_key == candidate.supplier_key)
     document_type_match = bool(current.document_type and current.document_type == candidate.document_type)
     fingerprint_match = bool(current.fingerprint and current.fingerprint == candidate.fingerprint)
@@ -193,7 +194,7 @@ def _score(current: DuplicateIdentity, candidate: DuplicateIdentity) -> tuple[De
     score += Decimal("0.10") if fingerprint_match else Decimal("0.00")
     score = min(score, Decimal("1.00"))
 
-    core_match = invoice_match and date_match and total_match and currency_match
+    core_match = invoice_match and date_match and total_match and currency_compatible
     strong = core_match and supplier_match and score >= STRONG_DUPLICATE_THRESHOLD
     review = core_match and score >= REVIEW_DUPLICATE_THRESHOLD
     status = "blocked_duplicate" if strong else "review_only" if review else "ignored"
@@ -202,6 +203,7 @@ def _score(current: DuplicateIdentity, candidate: DuplicateIdentity) -> tuple[De
         "invoice_date_match": date_match,
         "total_match": total_match,
         "currency_match": currency_match,
+        "currency_compatible": currency_compatible,
         "supplier_match": supplier_match,
         "document_type_match": document_type_match,
         "document_fingerprint_match": fingerprint_match,

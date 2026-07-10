@@ -205,6 +205,30 @@ def test_ambiguous_cross_batch_duplicate_is_review_only_and_still_exportable():
     assert float(candidate.confidence) < 0.9
 
 
+def test_strong_cross_batch_duplicate_blocks_when_currency_is_missing():
+    db = _db()
+    _tenant, _company, _user, _prior_batch, _prior_run, _prior_row, current_batch, current_run = _exported_prior_row(db)
+    current_row = _row(db, current_batch, current_run, "INV-100", currency="")
+    prior_row = db.execute(
+        select(InvoiceRow).where(InvoiceRow.batch_id != current_batch.id)
+    ).scalar_one()
+    prior_row.currency = None
+    headers = db.execute(select(InvoiceReadHeader)).scalars().all()
+    for header in headers:
+        header.currency = None
+        header.CurrencyCode = None
+    db.commit()
+
+    flagged = detect_cross_batch_duplicates(db, current_batch, current_run.id)
+
+    assert flagged == 1
+    row = db.get(InvoiceRow, current_row.id)
+    assert row.row_status == "blocked_duplicate"
+    candidate = db.execute(select(InvoiceDuplicateCandidate)).scalar_one()
+    assert candidate.match_status == "blocked_duplicate"
+    assert '"currency_compatible": true' in candidate.evidence_json
+
+
 def test_cross_batch_duplicate_detection_is_tenant_company_isolated():
     db = _db()
     tenant_a, company_a, _user_a = _tenant_company(db, "a")
