@@ -97,6 +97,23 @@ function renderRowExplainability(r) {
     parts.push(`<div><strong>BCRS/Discount:</strong> ${bcrs.bcrs_detected ? "BCRS/deposit evidence" : ""}${bcrs.bcrs_detected && bcrs.discount_detected ? " · " : ""}${bcrs.discount_detected ? "discount evidence" : ""}</div>`);
   }
   if (r.method_used) parts.push(`<div><strong>Method:</strong> <code>${esc(r.method_used)}</code></div>`);
+  const duplicates = r.duplicate_candidates || ex.duplicates || row.cross_batch_duplicates || [];
+  if (duplicates.length) {
+    const duplicateHtml = duplicates.slice(0, 3).map(d => {
+      const evidence = d.evidence || {};
+      const bits = [];
+      if (evidence.invoice_number_match) bits.push("invoice number");
+      if (evidence.invoice_date_match) bits.push("date");
+      if (evidence.total_match) bits.push("total");
+      if (evidence.currency_match) bits.push("currency");
+      if (evidence.supplier_match) bits.push("supplier/VAT");
+      const label = d.candidate_batch_name || d.candidate_batch_id || "previous batch";
+      const status = (d.match_status || "").replaceAll("_", " ");
+      const conf = d.confidence != null ? ` ${esc(pct(d.confidence))}` : "";
+      return `<div class="muted">Cross-batch duplicate ${esc(status)}${conf}: ${esc(label)} row ${esc(d.candidate_row_id || "")}${bits.length ? ` (${esc(bits.join(", "))})` : ""}</div>`;
+    }).join("");
+    parts.push(`<div><strong>Duplicate check:</strong>${duplicateHtml}</div>`);
+  }
   if (reasons.length) parts.push(`<div class="review-explain-reasons"><strong>Why review:</strong> ${reasons.map(x => esc(compactReason(x))).join(" · ")}</div>`);
   if (tags.length) {
     const tagHtml = tags.slice(0, 12).map(t => `<span class="evidence-tag">${esc(t)}</span>`).join(" ");

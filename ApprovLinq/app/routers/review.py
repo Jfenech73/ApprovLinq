@@ -1,6 +1,7 @@
 """Review, correction, audit, remap, rules, reopen, preview routes."""
 from __future__ import annotations
 import io
+import json
 import logging
 import re
 from datetime import datetime
@@ -15,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.db import models as M
 from app.db.review_models import (
-    InvoiceRowCorrection, InvoiceRowFieldAudit, CorrectionRule, RemapHint, BatchExportEvent, InvoiceFieldCandidate,
+    InvoiceDuplicateCandidate, InvoiceRowCorrection, InvoiceRowFieldAudit, CorrectionRule, RemapHint, BatchExportEvent, InvoiceFieldCandidate,
 )
 from app.db.session import get_db
 from app.routers.auth import current_user
@@ -176,6 +177,34 @@ def _build_row_explainability(row: M.InvoiceRow, correction: InvoiceRowCorrectio
     }
     return {"row": row_level, "fields": field_map}
 
+
+def _duplicate_candidate_payload(candidate: InvoiceDuplicateCandidate) -> dict[str, Any]:
+    try:
+        evidence = json.loads(candidate.evidence_json or "{}")
+    except Exception:
+        evidence = {}
+    return {
+        "id": candidate.id,
+        "match_status": candidate.match_status,
+        "confidence": float(candidate.confidence) if candidate.confidence is not None else None,
+        "candidate_batch_id": str(candidate.candidate_batch_id),
+        "candidate_batch_name": evidence.get("candidate_batch_name"),
+        "candidate_row_id": candidate.candidate_row_id,
+        "candidate_scan_run_id": str(candidate.candidate_scan_run_id) if candidate.candidate_scan_run_id else None,
+        "normalized_invoice_number": candidate.normalized_invoice_number,
+        "invoice_date": candidate.invoice_date.isoformat() if candidate.invoice_date else None,
+        "total_cents": candidate.total_cents,
+        "currency": candidate.currency,
+        "supplier_key": candidate.supplier_key,
+        "supplier_vat": candidate.supplier_vat,
+        "document_type": candidate.document_type,
+        "document_fingerprint": candidate.document_fingerprint,
+        "evidence": evidence,
+        "resolved_at": candidate.resolved_at.isoformat() if candidate.resolved_at else None,
+        "resolved_by": str(candidate.resolved_by) if candidate.resolved_by else None,
+    }
+
+
 def _extract_confidence(note: str | None) -> float | None:
     if not note:
         return None
@@ -321,6 +350,7 @@ def get_review_workspace(batch_id: UUID, db: Session = Depends(get_db), user=Dep
     ).scalars().all()
     cmap = cs.load_correction_map(db, batch_id)
     row_audits: dict[int, list[InvoiceRowFieldAudit]] = {}
+    duplicate_candidates: dict[int, list[dict[str, Any]]] = {}
     row_ids = [r.id for r in rows]
     if row_ids:
         all_audits = db.execute(
@@ -330,6 +360,16 @@ def get_review_workspace(batch_id: UUID, db: Session = Depends(get_db), user=Dep
         ).scalars().all()
         for a in all_audits:
             row_audits.setdefault(a.row_id, []).append(a)
+        all_duplicates = db.execute(
+            select(InvoiceDuplicateCandidate)
+            .where(
+                InvoiceDuplicateCandidate.batch_id == batch_id,
+                InvoiceDuplicateCandidate.row_id.in_(row_ids),
+            )
+            .order_by(desc(InvoiceDuplicateCandidate.created_at), desc(InvoiceDuplicateCandidate.id))
+        ).scalars().all()
+        for dup in all_duplicates:
+            duplicate_candidates.setdefault(dup.row_id, []).append(_duplicate_candidate_payload(dup))
     out_rows = []
     corrected = 0
     flagged = 0
@@ -345,6 +385,10 @@ def get_review_workspace(batch_id: UUID, db: Session = Depends(get_db), user=Dep
         if r.review_required:
             flagged += 1
         explanation = _build_row_explainability(r, c, row_audits.get(r.id, []), eff)
+        row_duplicates = duplicate_candidates.get(r.id, [])
+        if row_duplicates:
+            explanation["duplicates"] = row_duplicates
+            explanation.setdefault("row", {})["cross_batch_duplicates"] = row_duplicates
         out_rows.append({
             "id": r.id,
             "source_filename": r.source_filename,
@@ -370,6 +414,7 @@ def get_review_workspace(batch_id: UUID, db: Session = Depends(get_db), user=Dep
             "current": eff,
             "explainability": explanation,
             "field_evidence": explanation.get("fields", {}),
+            "duplicate_candidates": row_duplicates,
         })
     return {
         "batch": {
@@ -492,6 +537,7 @@ def restore_review_row(
         raise HTTPException(404, "Row not found in batch")
     note = note if isinstance(note, str) else None
     old_status = _row_status_snapshot(row)
+    old_reason = getattr(row, "row_status_reason", None)
     row.row_status = M.INVOICE_ROW_STATUS_ACTIVE
     row.row_status_reason = None
     row.row_status_note = note
@@ -509,6 +555,30 @@ def restore_review_row(
         user_id=user.id,
         username=getattr(user, "email", None) or getattr(user, "full_name", None),
     ))
+    if old_status == "blocked_duplicate" and old_reason == "cross_batch_duplicate":
+        duplicate_records = db.execute(
+            select(InvoiceDuplicateCandidate).where(
+                InvoiceDuplicateCandidate.batch_id == batch.id,
+                InvoiceDuplicateCandidate.row_id == row.id,
+                InvoiceDuplicateCandidate.match_status == "blocked_duplicate",
+            )
+        ).scalars().all()
+        for record in duplicate_records:
+            record.match_status = "overridden"
+            record.resolved_at = datetime.utcnow()
+            record.resolved_by = user.id
+        db.add(InvoiceRowFieldAudit(
+            batch_id=batch.id,
+            scan_run_id=getattr(row, "scan_run_id", None),
+            row_id=row.id,
+            field_name="_row",
+            old_value="blocked_duplicate",
+            new_value=M.INVOICE_ROW_STATUS_ACTIVE,
+            action="cross_batch_duplicate_override",
+            note=note or "Reviewer overrode a cross-batch duplicate export block.",
+            user_id=user.id,
+            username=getattr(user, "email", None) or getattr(user, "full_name", None),
+        ))
     db.commit()
     return {
         "restored": True,

@@ -506,6 +506,44 @@ create index if not exists ix_field_candidates_created_at    on invoice_field_ca
 create index if not exists ix_field_candidates_scan_run      on invoice_field_candidates(scan_run_id);
 
 
+-- ---------------------------------------------------------------------------
+-- CROSS-BATCH DUPLICATE CANDIDATES
+-- ---------------------------------------------------------------------------
+create table if not exists invoice_duplicate_candidates (
+    id                        serial      primary key,
+    tenant_id                 uuid        not null references tenants(id) on delete cascade,
+    company_id                uuid        references companies(id) on delete set null,
+    batch_id                  uuid        not null references invoice_batches(id) on delete cascade,
+    scan_run_id               uuid        references scan_runs(id) on delete set null,
+    row_id                    bigint      not null references invoice_rows(id) on delete cascade,
+    candidate_batch_id        uuid        not null references invoice_batches(id) on delete cascade,
+    candidate_scan_run_id     uuid        references scan_runs(id) on delete set null,
+    candidate_row_id          bigint      not null references invoice_rows(id) on delete cascade,
+    match_type                varchar(40) not null default 'cross_batch',
+    match_status              varchar(40) not null,
+    confidence                numeric(6,4),
+    evidence_json             text,
+    normalized_invoice_number varchar(160),
+    document_type             varchar(80),
+    supplier_key              varchar(255),
+    supplier_vat              varchar(100),
+    invoice_date              date,
+    total_cents               bigint,
+    currency                  varchar(20),
+    document_fingerprint      varchar(80),
+    created_at                timestamptz not null default now(),
+    resolved_at               timestamptz,
+    resolved_by               uuid        references users(id)
+);
+
+create index if not exists ix_duplicate_candidates_tenant_company on invoice_duplicate_candidates(tenant_id, company_id);
+create index if not exists ix_duplicate_candidates_batch_row      on invoice_duplicate_candidates(batch_id, row_id);
+create index if not exists ix_duplicate_candidates_candidate_row  on invoice_duplicate_candidates(candidate_batch_id, candidate_row_id);
+create index if not exists ix_duplicate_candidates_scan_run       on invoice_duplicate_candidates(scan_run_id);
+create index if not exists ix_duplicate_candidates_status         on invoice_duplicate_candidates(match_status);
+create unique index if not exists uq_duplicate_candidates_pair_type on invoice_duplicate_candidates(row_id, candidate_row_id, match_type);
+
+
 -- =============================================================================
 -- End of schema
 -- =============================================================================

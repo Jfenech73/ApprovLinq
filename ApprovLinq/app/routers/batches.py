@@ -32,6 +32,7 @@ from app.services.exporter import workbook_from_rows
 from app.services.corrected_exporter import build_corrected_rows, export_batch_corrected
 # <<< REVIEW_PACK corrected_export_import
 from app.services.description_summary import summarise_total_invoice_description
+from app.services.cross_batch_duplicates import detect_cross_batch_duplicates
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
 from app.services.invoice_arbitration import arbitrate_invoice_row
 from app.services.scan_performance import ScanPerformanceContext
@@ -41,7 +42,7 @@ from app.services.supplier_pattern_learning import (
     match_supplier_by_active_pattern,
     record_supplier_pattern_proposals_for_batch,
 )
-from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceFieldCandidate, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
+from app.db.review_models import BatchExportEvent, CorrectionRule, InvoiceDuplicateCandidate, InvoiceFieldCandidate, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
 from app.services.template_render_service import render_template_sheet, resolve_effective_template
 from app.utils.storage import batch_upload_folder, batch_export_folder, resolve_upload_path
 from app.utils.persistent_files import attach_invoice_file_bytes, materialize_invoice_file
@@ -4781,6 +4782,14 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
             if duplicate_review_count:
                 review_required_count += duplicate_review_count
                 logger.info("duplicate invoice review flags batch=%s count=%d", batch_id, duplicate_review_count)
+            cross_batch_duplicate_count = detect_cross_batch_duplicates(db, batch, scan_run_id)
+            if cross_batch_duplicate_count:
+                review_required_count += cross_batch_duplicate_count
+                logger.info(
+                    "cross-batch duplicate review flags batch=%s count=%d",
+                    batch_id,
+                    cross_batch_duplicate_count,
+                )
 
         # ── Final status via direct UPDATE (atomic, no ORM stale-state risk) ──
         if processed_files and not failed_files and not partial_files:
@@ -4966,6 +4975,10 @@ def delete_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
 
     db.query(InvoiceRowFieldAudit).filter(InvoiceRowFieldAudit.batch_id == batch.id).delete(synchronize_session=False)
     db.query(InvoiceRowCorrection).filter(InvoiceRowCorrection.batch_id == batch.id).delete(synchronize_session=False)
+    db.query(InvoiceDuplicateCandidate).filter(
+        (InvoiceDuplicateCandidate.batch_id == batch.id)
+        | (InvoiceDuplicateCandidate.candidate_batch_id == batch.id)
+    ).delete(synchronize_session=False)
     db.query(BatchExportEvent).filter(BatchExportEvent.batch_id == batch.id).delete(synchronize_session=False)
     db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch.id).delete(synchronize_session=False)
     db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch.id).delete(synchronize_session=False)

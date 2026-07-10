@@ -112,6 +112,49 @@ class InvoiceFieldCandidate(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
+class InvoiceDuplicateCandidate(Base):
+    """Persisted evidence for cross-batch duplicate decisions.
+
+    The row itself remains the export gate via InvoiceRow.row_status.  This
+    table explains why a row was blocked or sent to review and records reviewer
+    overrides without changing extraction values.
+    """
+    __tablename__ = "invoice_duplicate_candidates"
+    __table_args__ = (
+        Index("ix_duplicate_candidates_tenant_company", "tenant_id", "company_id"),
+        Index("ix_duplicate_candidates_batch_row", "batch_id", "row_id"),
+        Index("ix_duplicate_candidates_candidate_row", "candidate_batch_id", "candidate_row_id"),
+        Index("ix_duplicate_candidates_scan_run", "scan_run_id"),
+        Index("ix_duplicate_candidates_status", "match_status"),
+        Index("uq_duplicate_candidates_pair_type", "row_id", "candidate_row_id", "match_type", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    company_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
+    batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
+    scan_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True)
+    row_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("invoice_rows.id", ondelete="CASCADE"), nullable=False)
+    candidate_batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
+    candidate_scan_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True)
+    candidate_row_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("invoice_rows.id", ondelete="CASCADE"), nullable=False)
+    match_type: Mapped[str] = mapped_column(String(40), default="cross_batch", nullable=False)
+    match_status: Mapped[str] = mapped_column(String(40), nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True)
+    evidence_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    normalized_invoice_number: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    document_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    supplier_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    supplier_vat: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    invoice_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    total_cents: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    document_fingerprint: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
 class CorrectionRule(Base):
     __tablename__ = "correction_rules"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)

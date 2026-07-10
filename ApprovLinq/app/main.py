@@ -156,7 +156,7 @@ def ensure_runtime_schema() -> None:
         # idempotently on restart; never rebuild them with DROP TABLE from an
         # app startup or deploy command.
         """CREATE TABLE IF NOT EXISTS invoice_read_headers (
-            id BIGSERIAL PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             batch_id UUID NOT NULL REFERENCES invoice_batches(id) ON DELETE CASCADE,
             tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL,
             company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
@@ -586,6 +586,37 @@ def ensure_runtime_schema() -> None:
         SET scan_run_id = b.current_scan_run_id
         FROM invoice_batches b
         WHERE c.scan_run_id IS NULL AND c.batch_id = b.id""",
+        """CREATE TABLE IF NOT EXISTS invoice_duplicate_candidates (
+            id BIGSERIAL PRIMARY KEY,
+            tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
+            batch_id UUID NOT NULL REFERENCES invoice_batches(id) ON DELETE CASCADE,
+            scan_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL,
+            row_id BIGINT NOT NULL REFERENCES invoice_rows(id) ON DELETE CASCADE,
+            candidate_batch_id UUID NOT NULL REFERENCES invoice_batches(id) ON DELETE CASCADE,
+            candidate_scan_run_id UUID REFERENCES scan_runs(id) ON DELETE SET NULL,
+            candidate_row_id BIGINT NOT NULL REFERENCES invoice_rows(id) ON DELETE CASCADE,
+            match_type VARCHAR(40) NOT NULL DEFAULT 'cross_batch',
+            match_status VARCHAR(40) NOT NULL,
+            confidence NUMERIC(6,4),
+            evidence_json TEXT,
+            normalized_invoice_number VARCHAR(160),
+            document_type VARCHAR(80),
+            supplier_key VARCHAR(255),
+            supplier_vat VARCHAR(100),
+            invoice_date DATE,
+            total_cents BIGINT,
+            currency VARCHAR(20),
+            document_fingerprint VARCHAR(80),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            resolved_at TIMESTAMPTZ,
+            resolved_by UUID REFERENCES users(id))""",
+        "CREATE INDEX IF NOT EXISTS ix_duplicate_candidates_tenant_company ON invoice_duplicate_candidates(tenant_id, company_id)",
+        "CREATE INDEX IF NOT EXISTS ix_duplicate_candidates_batch_row ON invoice_duplicate_candidates(batch_id, row_id)",
+        "CREATE INDEX IF NOT EXISTS ix_duplicate_candidates_candidate_row ON invoice_duplicate_candidates(candidate_batch_id, candidate_row_id)",
+        "CREATE INDEX IF NOT EXISTS ix_duplicate_candidates_scan_run ON invoice_duplicate_candidates(scan_run_id)",
+        "CREATE INDEX IF NOT EXISTS ix_duplicate_candidates_status ON invoice_duplicate_candidates(match_status)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_duplicate_candidates_pair_type ON invoice_duplicate_candidates(row_id, candidate_row_id, match_type)",
         "CREATE INDEX IF NOT EXISTS ix_export_events_batch ON batch_export_events(batch_id)",
         # <<< REVIEW_PACK startup_alters
 
