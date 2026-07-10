@@ -14,6 +14,18 @@ from app.db.session import engine
 from app.routers import analytics, auth, admin, admin_export_templates, batches, health, tenant
 
 logger = logging.getLogger(__name__)
+ALEMBIC_HEAD_REVISION = "20260710_0008"
+KNOWN_ALEMBIC_REVISIONS = frozenset({
+    "20260411_0001",
+    "20260513_0001",
+    "20260513_0002",
+    "20260516_0003",
+    "20260516_0004",
+    "20260707_0005",
+    "20260707_0006",
+    "20260710_0007",
+    ALEMBIC_HEAD_REVISION,
+})
 
 try:
     models.Base.metadata.create_all(bind=engine)
@@ -699,10 +711,42 @@ def ensure_runtime_schema() -> None:
     logger.info("ensure_runtime_schema: %d applied, %d already-present/skipped", ok, skipped)
 
 
+def ensure_alembic_head_marker() -> None:
+    """Keep Alembic's version marker aligned with startup-managed schema.
+
+    Existing deployments may have been advanced by create_all()/startup DDL
+    before Alembic was used.  Running the whole migration chain in-process can
+    then fail on already-existing objects, so startup first applies idempotent
+    schema DDL and then stamps the known head revision.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS alembic_version "
+            "(version_num VARCHAR(32) NOT NULL PRIMARY KEY)"
+        ))
+        current = conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1")).scalar()
+        if current == ALEMBIC_HEAD_REVISION:
+            return
+        if current and current not in KNOWN_ALEMBIC_REVISIONS:
+            logger.warning(
+                "Unknown alembic revision %s; leaving version marker unchanged",
+                current,
+            )
+            return
+        if current:
+            conn.execute(text("UPDATE alembic_version SET version_num = :head"), {"head": ALEMBIC_HEAD_REVISION})
+        else:
+            conn.execute(text("INSERT INTO alembic_version(version_num) VALUES (:head)"), {"head": ALEMBIC_HEAD_REVISION})
+    logger.info("Alembic version marker ensured at %s", ALEMBIC_HEAD_REVISION)
+
+
 try:
     ensure_runtime_schema()
+    ensure_alembic_head_marker()
 except Exception as exc:
-    logger.warning("ensure_runtime_schema failed (non-fatal): %s", exc)
+    logger.warning("startup schema/version ensure failed (non-fatal): %s", exc)
 
 app = FastAPI(title=settings.app_name)
 base_dir = Path(__file__).resolve().parent

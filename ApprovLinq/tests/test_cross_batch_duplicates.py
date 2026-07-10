@@ -315,3 +315,5 @@ def test_cross_batch_duplicate_schema_tokens_are_declared():
     assert "detect_cross_batch_duplicates" in batches_src
     assert "cross_batch_duplicate_override" in review_src
     assert "Duplicate check" in js_src
+    assert "ALEMBIC_HEAD_REVISION = \"20260710_0008\"" in main_src
+    assert "ensure_alembic_head_marker" in main_src
