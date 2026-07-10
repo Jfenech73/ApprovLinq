@@ -4782,14 +4782,14 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
             if duplicate_review_count:
                 review_required_count += duplicate_review_count
                 logger.info("duplicate invoice review flags batch=%s count=%d", batch_id, duplicate_review_count)
-            cross_batch_duplicate_count = detect_cross_batch_duplicates(db, batch, scan_run_id)
-            if cross_batch_duplicate_count:
-                review_required_count += cross_batch_duplicate_count
-                logger.info(
-                    "cross-batch duplicate review flags batch=%s count=%d",
-                    batch_id,
-                    cross_batch_duplicate_count,
-                )
+        cross_batch_duplicate_count = detect_cross_batch_duplicates(db, batch, scan_run_id)
+        if cross_batch_duplicate_count:
+            review_required_count += cross_batch_duplicate_count
+            logger.info(
+                "cross-batch duplicate review flags batch=%s count=%d",
+                batch_id,
+                cross_batch_duplicate_count,
+            )
 
         # ── Final status via direct UPDATE (atomic, no ORM stale-state risk) ──
         if processed_files and not failed_files and not partial_files:

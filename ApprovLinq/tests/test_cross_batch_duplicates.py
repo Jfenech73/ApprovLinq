@@ -354,6 +354,13 @@ def test_cross_batch_duplicate_schema_tokens_are_declared():
     for token in ["cross_batch_duplicate", "blocked_duplicate", "review_only"]:
         assert token in service_src
     assert "detect_cross_batch_duplicates" in batches_src
+    baseline_gate = batches_src.find("if not provider_baseline_mode:")
+    cross_call = batches_src.find("cross_batch_duplicate_count = detect_cross_batch_duplicates", baseline_gate)
+    final_status = batches_src.find("Final status", baseline_gate)
+    assert baseline_gate != -1 and cross_call != -1 and final_status != -1
+    assert cross_call < final_status
+    gated_block = batches_src[baseline_gate:cross_call]
+    assert "cross_batch_duplicate_count = detect_cross_batch_duplicates" not in gated_block
     assert "cross_batch_duplicate_override" in review_src
     assert "Duplicate check" in js_src
     assert "ALEMBIC_HEAD_REVISION = \"20260710_0008\"" in main_src
