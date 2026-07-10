@@ -26,7 +26,7 @@ from app.db.review_models import (
 from app.services.supplier_history import normalise_supplier_key
 
 
-STRONG_DUPLICATE_THRESHOLD = Decimal("0.90")
+STRONG_DUPLICATE_THRESHOLD = Decimal("0.70")
 REVIEW_DUPLICATE_THRESHOLD = Decimal("0.70")
 
 
@@ -40,6 +40,7 @@ class DuplicateIdentity:
     total_cents: int | None
     currency: str
     supplier_key: str
+    supplier_name_key: str
     supplier_vat: str
     document_type: str
     fingerprint: str
@@ -116,7 +117,8 @@ def _identity(
 ) -> DuplicateIdentity:
     supplier_vat = _norm_token(_header_value(header, "supplier_vat", "VendorTaxId"))
     supplier_name = _final_value(row, correction, "supplier_name") or _header_value(header, "supplier_name", "VendorName")
-    supplier_key = f"vat:{supplier_vat}" if len(supplier_vat) >= 4 else normalise_supplier_key(supplier_name)
+    supplier_name_key = normalise_supplier_key(supplier_name)
+    supplier_key = f"vat:{supplier_vat}" if len(supplier_vat) >= 4 else supplier_name_key
     document_type = _norm_token(_header_value(header, "document_type", "DocType"))
     invoice_number = _norm_token(_final_value(row, correction, "invoice_number") or _header_value(header, "invoice_number", "InvoiceId"))
     invoice_date = _as_date(_final_value(row, correction, "invoice_date") or _header_value(header, "invoice_date", "InvoiceDate"))
@@ -140,6 +142,7 @@ def _identity(
         total_cents=total_cents,
         currency=currency,
         supplier_key=supplier_key,
+        supplier_name_key=supplier_name_key,
         supplier_vat=supplier_vat,
         document_type=document_type,
         fingerprint=fingerprint,
@@ -180,7 +183,17 @@ def _score(current: DuplicateIdentity, candidate: DuplicateIdentity) -> tuple[De
     )
     currency_match = bool(current.currency and current.currency == candidate.currency)
     currency_compatible = currency_match or not current.currency or not candidate.currency
-    supplier_match = bool(current.supplier_key and current.supplier_key == candidate.supplier_key)
+    supplier_vat_match = bool(
+        len(current.supplier_vat) >= 4
+        and len(candidate.supplier_vat) >= 4
+        and current.supplier_vat == candidate.supplier_vat
+    )
+    supplier_name_match = bool(
+        current.supplier_name_key
+        and candidate.supplier_name_key
+        and current.supplier_name_key == candidate.supplier_name_key
+    )
+    supplier_match = supplier_vat_match or supplier_name_match
     document_type_match = bool(current.document_type and current.document_type == candidate.document_type)
     fingerprint_match = bool(current.fingerprint and current.fingerprint == candidate.fingerprint)
 
@@ -194,9 +207,14 @@ def _score(current: DuplicateIdentity, candidate: DuplicateIdentity) -> tuple[De
     score += Decimal("0.10") if fingerprint_match else Decimal("0.00")
     score = min(score, Decimal("1.00"))
 
-    core_match = invoice_match and date_match and total_match and currency_compatible
-    strong = core_match and supplier_match and score >= STRONG_DUPLICATE_THRESHOLD
-    review = core_match and score >= REVIEW_DUPLICATE_THRESHOLD
+    dated_core_match = invoice_match and date_match and total_match and currency_compatible
+    supplier_supported_core_match = invoice_match and total_match and supplier_match and currency_compatible
+    strong = supplier_supported_core_match and (
+        date_match
+        or fingerprint_match
+        or document_type_match
+    ) and score >= STRONG_DUPLICATE_THRESHOLD
+    review = (dated_core_match or (invoice_match and total_match)) and score >= Decimal("0.50")
     status = "blocked_duplicate" if strong else "review_only" if review else "ignored"
     evidence = {
         "invoice_number_match": invoice_match,
@@ -205,6 +223,8 @@ def _score(current: DuplicateIdentity, candidate: DuplicateIdentity) -> tuple[De
         "currency_match": currency_match,
         "currency_compatible": currency_compatible,
         "supplier_match": supplier_match,
+        "supplier_vat_match": supplier_vat_match,
+        "supplier_name_match": supplier_name_match,
         "document_type_match": document_type_match,
         "document_fingerprint_match": fingerprint_match,
         "confidence": float(score),
@@ -360,7 +380,7 @@ def detect_cross_batch_duplicates(db: Session, batch: M.InvoiceBatch, scan_run_i
     changed = 0
     for row in current_rows:
         identity = _identity(row, correction=corrections.get(row.id), header=headers.get(row.id))
-        if len(identity.invoice_number) < 3 or identity.invoice_date is None or identity.total_cents is None:
+        if len(identity.invoice_number) < 3 or identity.total_cents is None:
             continue
         best: DuplicateMatch | None = None
         for candidate_row, candidate_batch, candidate_identity in candidate_identities:

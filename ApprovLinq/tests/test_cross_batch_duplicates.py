@@ -110,7 +110,7 @@ def _row(
     total: float = 123.45,
     supplier: str = "Supplier Ltd",
     supplier_vat: str | None = "MT12345678",
-    invoice_date: date = date(2026, 7, 1),
+    invoice_date: date | None = date(2026, 7, 1),
     currency: str = "EUR",
 ) -> InvoiceRow:
     row = InvoiceRow(
@@ -140,7 +140,7 @@ def _row(
         supplier_name=supplier,
         supplier_vat=supplier_vat,
         invoice_number=invoice_number,
-        invoice_date=invoice_date.isoformat(),
+        invoice_date=invoice_date.isoformat() if invoice_date else None,
         total_amount=total,
         currency=currency,
     ))
@@ -227,6 +227,47 @@ def test_strong_cross_batch_duplicate_blocks_when_currency_is_missing():
     candidate = db.execute(select(InvoiceDuplicateCandidate)).scalar_one()
     assert candidate.match_status == "blocked_duplicate"
     assert '"currency_compatible": true' in candidate.evidence_json
+
+
+def test_strong_cross_batch_duplicate_blocks_when_date_is_missing():
+    db = _db()
+    _tenant, _company, _user, _prior_batch, _prior_run, _prior_row, current_batch, current_run = _exported_prior_row(db)
+    current_row = _row(db, current_batch, current_run, "INV-100", invoice_date=None)
+    prior_row = db.execute(
+        select(InvoiceRow).where(InvoiceRow.batch_id != current_batch.id)
+    ).scalar_one()
+    prior_row.invoice_date = None
+    headers = db.execute(select(InvoiceReadHeader)).scalars().all()
+    for header in headers:
+        header.invoice_date = None
+        header.InvoiceDate = None
+    db.commit()
+
+    flagged = detect_cross_batch_duplicates(db, current_batch, current_run.id)
+
+    assert flagged == 1
+    row = db.get(InvoiceRow, current_row.id)
+    assert row.row_status == "blocked_duplicate"
+    candidate = db.execute(select(InvoiceDuplicateCandidate)).scalar_one()
+    assert candidate.match_status == "blocked_duplicate"
+    assert '"invoice_date_match": false' in candidate.evidence_json
+
+
+def test_strong_cross_batch_duplicate_blocks_when_only_one_side_has_supplier_vat():
+    db = _db()
+    _tenant, _company, _user, _prior_batch, _prior_run, _prior_row, current_batch, current_run = _exported_prior_row(db)
+    current_row = _row(db, current_batch, current_run, "INV-100", supplier_vat=None)
+    db.commit()
+
+    flagged = detect_cross_batch_duplicates(db, current_batch, current_run.id)
+
+    assert flagged == 1
+    row = db.get(InvoiceRow, current_row.id)
+    assert row.row_status == "blocked_duplicate"
+    candidate = db.execute(select(InvoiceDuplicateCandidate)).scalar_one()
+    assert candidate.match_status == "blocked_duplicate"
+    assert '"supplier_name_match": true' in candidate.evidence_json
+    assert '"supplier_vat_match": false' in candidate.evidence_json
 
 
 def test_cross_batch_duplicate_detection_is_tenant_company_isolated():
