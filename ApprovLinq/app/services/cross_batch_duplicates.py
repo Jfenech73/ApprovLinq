@@ -305,9 +305,18 @@ def _upsert_candidate(
 
 
 def _apply_match(db: Session, batch: M.InvoiceBatch, row: M.InvoiceRow, match: DuplicateMatch) -> None:
-    candidate_label = f"batch {match.candidate_batch.batch_name} row {match.candidate_row.id}"
+    candidate_label = (
+        f"batch '{match.candidate_batch.batch_name}' "
+        f"({match.candidate_batch.id}) row {match.candidate_row.id}"
+    )
+    invoice_ref = match.candidate_identity.invoice_number or _norm_token(row.invoice_number)
+    duplicate_remark = (
+        f"Duplicate of {candidate_label}; "
+        f"invoice={invoice_ref or 'unknown'}; "
+        f"total_cents={match.candidate_identity.total_cents if match.candidate_identity.total_cents is not None else 'unknown'}."
+    )
     note = (
-        f"Cross-batch duplicate candidate: {candidate_label}; "
+        f"Cross-batch duplicate candidate: {duplicate_remark} "
         f"confidence={float(match.confidence):.2f}; status={match.status}."
     )
     row.review_required = True

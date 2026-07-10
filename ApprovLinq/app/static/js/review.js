@@ -89,6 +89,9 @@ function renderRowExplainability(r) {
   const parts = [];
   if (r.blocked_from_export || (r.row_status && r.row_status !== "active")) {
     parts.push(`<div><strong>Export status:</strong> ${esc((r.row_status || "blocked").replaceAll("_", " "))}</div>`);
+    if (r.row_status_note) {
+      parts.push(`<div><strong>Duplicate remark:</strong> ${esc(compactReason(r.row_status_note, 240))}</div>`);
+    }
   }
   parts.push(`<div><strong>Confidence:</strong> ${r.confidence_score != null ? esc(pct(r.confidence_score)) : "—"}</div>`);
   parts.push(`<div><strong>Review:</strong> ${r.review_required ? "Required" : "Not required"}</div>`);
@@ -110,7 +113,7 @@ function renderRowExplainability(r) {
       const label = d.candidate_batch_name || d.candidate_batch_id || "previous batch";
       const status = (d.match_status || "").replaceAll("_", " ");
       const conf = d.confidence != null ? ` ${esc(pct(d.confidence))}` : "";
-      return `<div class="muted">Cross-batch duplicate ${esc(status)}${conf}: ${esc(label)} row ${esc(d.candidate_row_id || "")}${bits.length ? ` (${esc(bits.join(", "))})` : ""}</div>`;
+      return `<div class="muted">Cross-batch duplicate ${esc(status)}${conf}: duplicate of ${esc(label)} (${esc(d.candidate_batch_id || "")}) row ${esc(d.candidate_row_id || "")}${bits.length ? ` (${esc(bits.join(", "))})` : ""}</div>`;
     }).join("");
     parts.push(`<div><strong>Duplicate check:</strong>${duplicateHtml}</div>`);
   }

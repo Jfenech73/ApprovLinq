@@ -171,6 +171,9 @@ def test_strong_cross_batch_duplicate_blocks_export_and_preserves_evidence():
     row = db.get(InvoiceRow, current_row.id)
     assert row.row_status == "blocked_duplicate"
     assert row.row_status_reason == "cross_batch_duplicate"
+    assert "Duplicate of batch 'Prior exported'" in row.row_status_note
+    assert str(_prior_batch.id) in row.row_status_note
+    assert f"row {prior_row.id}" in row.row_status_note
     assert row.review_required is True
     assert "possible_cross_batch_duplicate" in row.review_reasons
     assert build_corrected_rows(db, current_batch) == []
@@ -321,6 +324,7 @@ def test_cross_batch_duplicate_review_payload_and_override_audit():
     workspace = get_review_workspace(current_batch.id, db=db, user=user)
     row_payload = workspace["rows"][0]
     assert row_payload["blocked_from_export"] is True
+    assert "Duplicate of batch 'Prior exported'" in row_payload["row_status_note"]
     assert row_payload["duplicate_candidates"][0]["match_status"] == "blocked_duplicate"
     assert row_payload["explainability"]["duplicates"][0]["candidate_batch_name"] == "Prior exported"
 
@@ -363,5 +367,7 @@ def test_cross_batch_duplicate_schema_tokens_are_declared():
     assert "cross_batch_duplicate_count = detect_cross_batch_duplicates" not in gated_block
     assert "cross_batch_duplicate_override" in review_src
     assert "Duplicate check" in js_src
+    assert "Duplicate remark" in js_src
+    assert "duplicate of" in js_src
     assert "ALEMBIC_HEAD_REVISION = \"20260710_0008\"" in main_src
     assert "ensure_alembic_head_marker" in main_src
