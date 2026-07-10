@@ -128,7 +128,19 @@ def workbook_from_rows(
         "page_text_raw",
     ]
 
-    skip_cols = {"id", "batch_id", "tenant_id", "company_id", "source_file_id", "created_at"}
+    skip_cols = {
+        "id",
+        "batch_id",
+        "tenant_id",
+        "company_id",
+        "source_file_id",
+        "created_at",
+        "row_status",
+        "row_status_reason",
+        "row_status_note",
+        "row_status_changed_at",
+        "row_status_changed_by",
+    }
 
     existing_preferred = [c for c in preferred_order if c in df.columns]
     other_cols = [c for c in df.columns if c not in existing_preferred and c not in skip_cols]

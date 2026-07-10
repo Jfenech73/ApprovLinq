@@ -357,6 +357,12 @@ def get_review_workspace(batch_id: UUID, db: Session = Depends(get_db), user=Dep
             "review_reasons": _split_tokens(r.review_reasons),
             "method_used": r.method_used or "",
             "totals_reconciliation_status": getattr(r, "totals_reconciliation_status", None),
+            "row_status": getattr(r, "row_status", M.INVOICE_ROW_STATUS_ACTIVE) or M.INVOICE_ROW_STATUS_ACTIVE,
+            "row_status_reason": getattr(r, "row_status_reason", None),
+            "row_status_note": getattr(r, "row_status_note", None),
+            "row_status_changed_at": r.row_status_changed_at.isoformat() if getattr(r, "row_status_changed_at", None) else None,
+            "row_status_changed_by": str(r.row_status_changed_by) if getattr(r, "row_status_changed_by", None) else None,
+            "blocked_from_export": not M.invoice_row_export_active(r),
             "row_reviewed": bool(c.row_reviewed) if c else False,
             "reviewed_fields": (c.reviewed_fields or "").split(",") if c and c.reviewed_fields else [],
             "is_corrected": was_corrected,
@@ -400,7 +406,7 @@ def save_corrections(batch_id: UUID, row_id: int, payload: RowCorrectionIn,
     except ValueError as e:
         raise HTTPException(422, str(e))
     labelled = 0
-    if audits:
+    if audits and M.invoice_row_export_active(row):
         labelled = label_row_candidates(db, batch=batch, row=row, user=user, outcome_source="manual_review")
         promote_supplier_pattern_from_row(db, batch=batch, row=row, user=user, outcome_source="manual_review")
     db.commit()
@@ -409,35 +415,107 @@ def save_corrections(batch_id: UUID, row_id: int, payload: RowCorrectionIn,
 
 
 
-@router.delete("/batches/{batch_id}/rows/{row_id}")
-def delete_review_row(batch_id: UUID, row_id: int,
-                      db: Session = Depends(get_db), user=Depends(current_user)):
-    """Delete a review row so it is blocked from export.
+def _validate_row_status(status: str) -> str:
+    status = (status or "").strip()
+    if status not in M.INVOICE_ROW_STATUSES:
+        raise HTTPException(422, f"Unsupported row status: {status}")
+    return status
 
-    This is intended for duplicates/false rows caught during arbitration review.
-    The immutable source PDF remains; only the extracted/export row is removed.
-    """
+
+def _row_status_snapshot(row: M.InvoiceRow) -> str:
+    return getattr(row, "row_status", None) or M.INVOICE_ROW_STATUS_ACTIVE
+
+
+@router.delete("/batches/{batch_id}/rows/{row_id}")
+def delete_review_row(
+    batch_id: UUID,
+    row_id: int,
+    row_status: str = Query(default="blocked_false_positive"),
+    reason: str | None = Query(default=None),
+    note: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    """Soft-block a review row so it is excluded from export."""
     batch = _get_batch(db, batch_id)
     if cs.normalise_status(batch.status) == "exported":
-        raise HTTPException(409, "Batch is exported; reopen before deleting rows.")
+        raise HTTPException(409, "Batch is exported; reopen before blocking rows.")
     row = db.get(M.InvoiceRow, row_id)
     if not row or row.batch_id != batch.id:
         raise HTTPException(404, "Row not found in batch")
+    row_status = _validate_row_status(row_status)
+    if row_status == M.INVOICE_ROW_STATUS_ACTIVE:
+        raise HTTPException(422, "Use the restore endpoint to make a row active.")
+    reason = reason if isinstance(reason, str) else None
+    note = note if isinstance(note, str) else None
+    old_status = _row_status_snapshot(row)
+    row.row_status = row_status
+    row.row_status_reason = (reason or row_status)[:80]
+    row.row_status_note = note
+    row.row_status_changed_at = datetime.utcnow()
+    row.row_status_changed_by = user.id
     db.add(InvoiceRowFieldAudit(
         batch_id=batch.id,
         scan_run_id=getattr(row, "scan_run_id", None),
         row_id=row.id,
         field_name="_row",
-        old_value=f"{row.supplier_name or ''} | {row.invoice_number or ''} | {row.total_amount or ''}"[:500],
-        new_value="deleted_blocked_from_export",
-        action="row_delete_block_export",
-        note="Reviewer deleted this row so it is excluded from export.",
+        old_value=old_status,
+        new_value=row_status,
+        action="row_soft_block_export",
+        note=note or "Reviewer blocked this row so it is excluded from export.",
         user_id=user.id,
         username=getattr(user, "email", None) or getattr(user, "full_name", None),
     ))
-    db.delete(row)
     db.commit()
-    return {"deleted": True, "row_id": row_id, "blocked_from_export": True}
+    return {
+        "deleted": False,
+        "row_id": row_id,
+        "row_status": row_status,
+        "blocked_from_export": True,
+    }
+
+
+@router.post("/batches/{batch_id}/rows/{row_id}/restore")
+def restore_review_row(
+    batch_id: UUID,
+    row_id: int,
+    note: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+):
+    """Restore a soft-blocked row to export eligibility."""
+    batch = _get_batch(db, batch_id)
+    if cs.normalise_status(batch.status) == "exported":
+        raise HTTPException(409, "Batch is exported; reopen before restoring rows.")
+    row = db.get(M.InvoiceRow, row_id)
+    if not row or row.batch_id != batch.id:
+        raise HTTPException(404, "Row not found in batch")
+    note = note if isinstance(note, str) else None
+    old_status = _row_status_snapshot(row)
+    row.row_status = M.INVOICE_ROW_STATUS_ACTIVE
+    row.row_status_reason = None
+    row.row_status_note = note
+    row.row_status_changed_at = datetime.utcnow()
+    row.row_status_changed_by = user.id
+    db.add(InvoiceRowFieldAudit(
+        batch_id=batch.id,
+        scan_run_id=getattr(row, "scan_run_id", None),
+        row_id=row.id,
+        field_name="_row",
+        old_value=old_status,
+        new_value=M.INVOICE_ROW_STATUS_ACTIVE,
+        action="row_restore_export",
+        note=note or "Reviewer restored this row to export eligibility.",
+        user_id=user.id,
+        username=getattr(user, "email", None) or getattr(user, "full_name", None),
+    ))
+    db.commit()
+    return {
+        "restored": True,
+        "row_id": row_id,
+        "row_status": M.INVOICE_ROW_STATUS_ACTIVE,
+        "blocked_from_export": False,
+    }
 
 
 @router.post("/batches/{batch_id}/rows/{row_id}/duplicate")
@@ -823,6 +901,8 @@ def mark_file_reviewed(batch_id: UUID, file_id: int,
         created += 1
     labelled = 0
     for r in flagged:
+        if not M.invoice_row_export_active(r):
+            continue
         labelled += label_row_candidates(db, batch=batch, row=r, user=user, outcome_source="mark_reviewed")
         promote_supplier_pattern_from_row(db, batch=batch, row=r, user=user, outcome_source="mark_reviewed")
     db.commit()

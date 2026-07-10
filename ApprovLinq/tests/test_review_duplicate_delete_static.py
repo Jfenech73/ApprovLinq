@@ -24,7 +24,9 @@ def test_duplicate_detection_and_delete_endpoint_exist():
     assert "possible_duplicate_invoice" in batches
     assert "arbitrated:duplicate_check" in batches
     assert "@router.delete(\"/batches/{batch_id}/rows/{row_id}\")" in review
-    assert "row_delete_block_export" in review
+    assert "row_soft_block_export" in review
+    assert "@router.post(\"/batches/{batch_id}/rows/{row_id}/restore\")" in review
+    assert "db.delete(row)" not in review[review.find("def delete_review_row"):review.find("@router.post(\"/batches/{batch_id}/rows/{row_id}/duplicate\")")]
 
 
 def test_review_row_selection_preserves_natural_order_and_scroll_position():

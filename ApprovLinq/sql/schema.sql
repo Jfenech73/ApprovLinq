@@ -273,6 +273,11 @@ create table if not exists invoice_rows (
     confidence_score         numeric(5,2),
     validation_status        varchar(100),
     review_required          boolean      not null default false,
+    row_status               varchar(40)  not null default 'active',
+    row_status_reason        varchar(80),
+    row_status_note          text,
+    row_status_changed_at    timestamptz,
+    row_status_changed_by    uuid         references users(id) on delete set null,
     header_raw               text,
     totals_raw               text,
     page_text_raw            text,
@@ -285,6 +290,12 @@ alter table invoice_rows add column if not exists company_id              uuid  
 alter table invoice_rows add column if not exists scan_run_id             uuid         references scan_runs(id)     on delete set null;
 alter table invoice_rows add column if not exists supplier_posting_account varchar(100);
 alter table invoice_rows add column if not exists nominal_account_code    varchar(100);
+alter table invoice_rows add column if not exists row_status              varchar(40)  not null default 'active';
+alter table invoice_rows add column if not exists row_status_reason       varchar(80);
+alter table invoice_rows add column if not exists row_status_note         text;
+alter table invoice_rows add column if not exists row_status_changed_at   timestamptz;
+alter table invoice_rows add column if not exists row_status_changed_by   uuid references users(id) on delete set null;
+update invoice_rows set row_status = 'active' where row_status is null or row_status = '';
 
 -- Widen method_used if it was created as varchar(50) on older installs
 alter table invoice_rows alter column method_used type varchar(200);
@@ -293,6 +304,7 @@ create index if not exists idx_invoice_rows_batch_id    on invoice_rows(batch_id
 create index if not exists idx_invoice_rows_tenant_id   on invoice_rows(tenant_id);
 create index if not exists idx_invoice_rows_company_id  on invoice_rows(company_id);
 create index if not exists ix_invoice_rows_scan_run     on invoice_rows(scan_run_id);
+create index if not exists ix_invoice_rows_export_status on invoice_rows(batch_id, scan_run_id, row_status);
 
 
 -- ---------------------------------------------------------------------------

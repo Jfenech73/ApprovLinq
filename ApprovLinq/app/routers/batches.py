@@ -15,7 +15,7 @@ from sqlalchemy import inspect, or_
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
-from app.db.models import Company, InvoiceBatch, InvoiceFile, InvoiceReadDetail, InvoiceReadHeader, InvoiceRow, IssueLog, TenantNominalAccount, TenantSupplier, User
+from app.db.models import INVOICE_ROW_STATUS_ACTIVE, Company, InvoiceBatch, InvoiceFile, InvoiceReadDetail, InvoiceReadHeader, InvoiceRow, IssueLog, TenantNominalAccount, TenantSupplier, User
 
 try:
     from app.services.classify_lines import classify_line as _classify_line
@@ -4275,6 +4275,10 @@ def _current_rows_query(db: Session, batch: InvoiceBatch):
     return q
 
 
+def _exportable_rows_query(db: Session, batch: InvoiceBatch):
+    return _current_rows_query(db, batch).filter(InvoiceRow.row_status == INVOICE_ROW_STATUS_ACTIVE)
+
+
 def _process_batch_job(batch_id: UUID, tenant_id) -> None:
     db = SessionLocal()
     try:
@@ -4975,7 +4979,7 @@ def delete_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
 @router.get("/{batch_id}/rows", response_model=list[InvoiceRowOut])
 def list_rows(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)
-    rows = _current_rows_query(db, batch).order_by(InvoiceRow.id.asc()).all()
+    rows = _exportable_rows_query(db, batch).order_by(InvoiceRow.id.asc()).all()
     return rows
 
 

@@ -87,6 +87,9 @@ function renderRowExplainability(r) {
   const totals = row.totals_reconciliation_status || r.totals_reconciliation_status || "";
   const bcrs = row.bcrs_or_discount || {};
   const parts = [];
+  if (r.blocked_from_export || (r.row_status && r.row_status !== "active")) {
+    parts.push(`<div><strong>Export status:</strong> ${esc((r.row_status || "blocked").replaceAll("_", " "))}</div>`);
+  }
   parts.push(`<div><strong>Confidence:</strong> ${r.confidence_score != null ? esc(pct(r.confidence_score)) : "—"}</div>`);
   parts.push(`<div><strong>Review:</strong> ${r.review_required ? "Required" : "Not required"}</div>`);
   if (totals) parts.push(`<div><strong>Totals:</strong> ${esc(totals)}</div>`);
@@ -218,11 +221,13 @@ function render() {
       (r.review_required ? " flagged" : "") +
       (r.is_corrected    ? " corrected" : "") +
       (r.row_reviewed    ? " reviewed" : "") +
+      (r.blocked_from_export ? " blocked" : "") +
       ((isUrgent || isHighPriority) ? " urgent" : "") +
       (r.id === state.selected ? " selected" : "");
 
     // Badge line
     const badges = [];
+    if (r.blocked_from_export) badges.push(`<span class="row-badge row-badge-blocked">Blocked</span>`);
     if (isUrgent || isHighPriority) badges.push(`<span class="row-badge row-badge-urgent">Needs review</span>`);
     else if (r.review_required && r.row_reviewed) badges.push(`<span class="row-badge row-badge-reviewed">Reviewed</span>`);
     else if (r.is_corrected) badges.push(`<span class="row-badge row-badge-corrected">Corrected</span>`);
@@ -290,6 +295,8 @@ function ensureExplainabilityStyles() {
     .selected-explain-head h3{margin:0;font-size:13px;font-weight:700;color:var(--ap-text-muted,#536476)}
     .review-explain-card{border:1px solid var(--ap-border,#d7e0ea);background:var(--ap-surface,#fff);border-radius:10px;padding:10px;margin-bottom:0;font-size:12px;line-height:1.45;overflow-wrap:anywhere}
     .review-explain-reasons{color:var(--ap-warning-text,#7a4b00)}
+    .review-row.blocked{opacity:.78}
+    .row-badge-blocked{background:#fff1f1;color:#7a1f1f;border-color:#f0c2c2}
     .evidence-badge{display:inline-block;border:1px solid var(--ap-border,#d7e0ea);border-radius:999px;padding:1px 6px;font-size:11px;background:var(--ap-surface-muted,#f5f7fa);margin-right:4px}
     .evidence-tag{display:inline-block;border-radius:999px;padding:1px 6px;font-size:11px;background:var(--ap-surface-muted,#eef3f8);margin:2px 2px 0 0}
     .field-evidence{grid-column:1 / -1;margin:-4px 0 6px 0;padding:6px 8px;border-left:3px solid var(--ap-border,#d7e0ea);background:rgba(90,120,160,.06);border-radius:6px;font-size:12px}
@@ -314,7 +321,20 @@ function renderEditor() {
   ensureExplainabilityStyles();
   const r = state.rows.find(x => x.id === state.selected);
   const ed = $("rowEditor");
-  if (!r) { ed.innerHTML = '<div class="muted">Select a row from the left.</div>'; return; }
+  const deleteBtn = $("deleteRowBtn");
+  if (!r) {
+    if (deleteBtn) {
+      deleteBtn.textContent = "Delete / Block Export";
+      deleteBtn.title = "Block this row from export, or restore it if already blocked";
+    }
+    ed.innerHTML = '<div class="muted">Select a row from the left.</div>';
+    return;
+  }
+  if (deleteBtn) {
+    const blocked = !!r.blocked_from_export;
+    deleteBtn.textContent = blocked ? "Restore Export" : "Block Export";
+    deleteBtn.title = blocked ? "Restore this row to export eligibility" : "Block this row from export without deleting evidence";
+  }
 
   // ── Header block: tool label + reasons (rendered OUTSIDE .field-grid) ────
   let header = '';
@@ -592,14 +612,19 @@ $("deleteRowBtn").onclick = async () => {
   if (state.selected == null) { msg("Select a row first.", "error"); return; }
   const row = state.rows.find(x => x.id === state.selected);
   const label = row ? `${row.current?.supplier_name || "row"} ${row.current?.invoice_number || ""}`.trim() : "selected row";
-  if (!confirm(`Delete/block this row from export?\n\n${label}\n\nThis removes the row from the review list and it will not be exported.`)) return;
+  const isBlocked = !!row?.blocked_from_export;
+  const actionText = isBlocked ? "Restore this row to export eligibility?" : "Block this row from export?";
+  const detailText = isBlocked
+    ? "The row and its evidence remain available, and it will be included in export again."
+    : "The row and its evidence remain available, but it will not be exported.";
+  if (!confirm(`${actionText}\n\n${label}\n\n${detailText}`)) return;
   try {
-    const r = await fetch(`/review/batches/${batchId}/rows/${state.selected}`, {
-      method: "DELETE", headers: hdrs(),
-    });
+    const url = isBlocked
+      ? `/review/batches/${batchId}/rows/${state.selected}/restore`
+      : `/review/batches/${batchId}/rows/${state.selected}`;
+    const r = await fetch(url, { method: isBlocked ? "POST" : "DELETE", headers: hdrs() });
     if (!r.ok) { msg(await r.text(), "error"); return; }
-    msg("Row deleted and blocked from export.", "success");
-    state.selected = null;
+    msg(isBlocked ? "Row restored to export." : "Row blocked from export.", "success");
     await load();
   } catch (e) { msg(String(e), "error"); }
 };

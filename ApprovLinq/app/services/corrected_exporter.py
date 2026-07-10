@@ -74,7 +74,10 @@ def _build_di_candidate_summary_map(db: Session, batch_id, scan_run_id=None) -> 
 
 def build_corrected_rows(db: Session, batch: M.InvoiceBatch) -> list[dict]:
     scan_run_id = getattr(batch, "current_scan_run_id", None)
-    row_query = select(M.InvoiceRow).where(M.InvoiceRow.batch_id == batch.id)
+    row_query = select(M.InvoiceRow).where(
+        M.InvoiceRow.batch_id == batch.id,
+        M.InvoiceRow.row_status == M.INVOICE_ROW_STATUS_ACTIVE,
+    )
     if scan_run_id is not None:
         row_query = row_query.where(M.InvoiceRow.scan_run_id == scan_run_id)
     rows = db.execute(

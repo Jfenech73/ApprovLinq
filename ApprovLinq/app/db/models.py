@@ -22,6 +22,19 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+INVOICE_ROW_STATUS_ACTIVE = "active"
+INVOICE_ROW_BLOCKED_STATUSES = frozenset({
+    "blocked_duplicate",
+    "blocked_false_positive",
+    "superseded",
+})
+INVOICE_ROW_STATUSES = frozenset({INVOICE_ROW_STATUS_ACTIVE, *INVOICE_ROW_BLOCKED_STATUSES})
+
+
+def invoice_row_export_active(row: object) -> bool:
+    return (getattr(row, "row_status", None) or INVOICE_ROW_STATUS_ACTIVE) == INVOICE_ROW_STATUS_ACTIVE
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -246,6 +259,11 @@ class InvoiceRow(Base):
     review_reasons: Mapped[str | None] = mapped_column(Text, nullable=True)
     review_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
     auto_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    row_status: Mapped[str] = mapped_column(String(40), default=INVOICE_ROW_STATUS_ACTIVE, nullable=False)
+    row_status_reason: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    row_status_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    row_status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    row_status_changed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     page_quality_score: Mapped[float | None] = mapped_column(Numeric(4, 2), nullable=True)
     classification_method: Mapped[str | None] = mapped_column(String(50), nullable=True)
     supplier_match_method: Mapped[str | None] = mapped_column(String(50), nullable=True)

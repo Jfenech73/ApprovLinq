@@ -126,7 +126,10 @@ def label_batch_candidates(
     outcome_source: str = "export",
 ) -> int:
     """Label candidates for all rows in a batch at export/acceptance time."""
-    row_query = select(M.InvoiceRow).where(M.InvoiceRow.batch_id == batch.id)
+    row_query = select(M.InvoiceRow).where(
+        M.InvoiceRow.batch_id == batch.id,
+        M.InvoiceRow.row_status == M.INVOICE_ROW_STATUS_ACTIVE,
+    )
     if getattr(batch, "current_scan_run_id", None) is not None:
         row_query = row_query.where(M.InvoiceRow.scan_run_id == batch.current_scan_run_id)
     rows = db.execute(row_query).scalars().all()

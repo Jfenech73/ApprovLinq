@@ -6,7 +6,15 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import InvoiceBatch, InvoiceRow, SupplierPattern, TenantSupplier, User
+from app.db.models import (
+    INVOICE_ROW_STATUS_ACTIVE,
+    InvoiceBatch,
+    InvoiceRow,
+    SupplierPattern,
+    TenantSupplier,
+    User,
+    invoice_row_export_active,
+)
 from app.db.review_models import InvoiceRowCorrection
 
 
@@ -194,6 +202,8 @@ def promote_supplier_pattern_from_row(
     """Promote one row's supplier fingerprint after a trusted outcome."""
     if outcome_source not in TRUSTED_PATTERN_OUTCOME_SOURCES:
         return False
+    if not invoice_row_export_active(row):
+        return False
     supplier_name = _final_supplier_name(db, row)
     supplier = _supplier_for_row_value(
         db,
@@ -262,7 +272,10 @@ def promote_supplier_patterns_for_batch(
     """Promote all eligible supplier fingerprints in a trusted batch outcome."""
     if outcome_source not in TRUSTED_PATTERN_OUTCOME_SOURCES:
         return 0
-    q = db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch.id)
+    q = db.query(InvoiceRow).filter(
+        InvoiceRow.batch_id == batch.id,
+        InvoiceRow.row_status == INVOICE_ROW_STATUS_ACTIVE,
+    )
     if getattr(batch, "current_scan_run_id", None) is not None:
         q = q.filter(InvoiceRow.scan_run_id == batch.current_scan_run_id)
     rows = q.all()

@@ -424,6 +424,11 @@ class InvoiceRowOut(BaseModel):
     review_reasons: str | None = None
     review_fields: str | None = None
     auto_approved: bool = False
+    row_status: str = "active"
+    row_status_reason: str | None = None
+    row_status_note: str | None = None
+    row_status_changed_at: datetime | None = None
+    row_status_changed_by: UUID | None = None
     page_quality_score: float | None = None
     classification_method: str | None = None
     supplier_match_method: str | None = None

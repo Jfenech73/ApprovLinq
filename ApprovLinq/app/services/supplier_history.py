@@ -18,7 +18,7 @@ from typing import Any
 from sqlalchemy import desc, or_, select
 from sqlalchemy.orm import Session
 
-from app.db.models import InvoiceBatch, InvoiceRow
+from app.db.models import InvoiceBatch, InvoiceRow, invoice_row_export_active
 from app.db.review_models import CorrectionRule, InvoiceRowCorrection, InvoiceRowFieldAudit, RemapHint
 
 HISTORY_FIELDS: tuple[str, ...] = (
@@ -139,6 +139,8 @@ def _display_value(field_name: str, value: Any) -> Any:
 
 def _is_row_accepted(db: Session, row: InvoiceRow, correction: InvoiceRowCorrection | None = None) -> bool:
     """Only learn from explicit acceptance signals, not unreviewed raw rows."""
+    if not invoice_row_export_active(row):
+        return False
     if correction and correction.row_reviewed:
         return True
     # Rows in exported batches have passed the user's export gate.
