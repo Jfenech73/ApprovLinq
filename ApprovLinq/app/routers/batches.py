@@ -31,6 +31,7 @@ from app.services.exporter import workbook_from_rows
 # >>> REVIEW_PACK corrected_export_import
 from app.services.corrected_exporter import build_corrected_rows, export_batch_corrected
 # <<< REVIEW_PACK corrected_export_import
+from app.services.description_summary import summarise_total_invoice_description
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
 from app.services.invoice_arbitration import arbitrate_invoice_row
 from app.services.scan_performance import ScanPerformanceContext
@@ -4457,6 +4458,12 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                         r.get("page_no"),
                                     )
                                 # ----------------------------------------------
+                            description = r.get("description")
+                            if (batch.scan_mode or "summary").lower() == "summary":
+                                description = summarise_total_invoice_description(
+                                    description,
+                                    r.get("line_items_raw"),
+                                )
                             row = InvoiceRow(
                                 batch_id=batch_id,
                                 tenant_id=batch.tenant_id,
@@ -4468,7 +4475,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                 supplier_name=supplier_name,
                                 invoice_number=r.get("invoice_number"),
                                 invoice_date=r.get("invoice_date"),
-                                description=r.get("description"),
+                                description=description,
                                 line_items_raw=r.get("line_items_raw"),
                                 net_amount=r.get("net_amount"),
                                 vat_amount=r.get("vat_amount"),
@@ -5171,6 +5178,8 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
                 "company_name": company.company_name if company else "",
                 "tenant_name": tenant.tenant_name if tenant else "",
                 "batch_id": str(batch.id),
+                "batch_name": batch.batch_name or "",
+                "scan_mode": batch.scan_mode or "summary",
                 "nominal_account_name": "",
             }
             # Build the template sheet from the same corrected overlay rows used by

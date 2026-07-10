@@ -19,6 +19,7 @@ from app.db import models as M
 from app.db.review_models import InvoiceRowFieldAudit, BatchExportEvent, InvoiceFieldCandidate
 from app.services import correction_service as cs
 from app.services.candidate_outcomes import label_batch_candidates
+from app.services.description_summary import summarise_total_invoice_description
 from app.services.exporter import workbook_from_rows
 from app.services.supplier_pattern_learning import promote_supplier_patterns_for_batch
 from app.utils.storage import batch_export_folder
@@ -98,6 +99,8 @@ def build_corrected_rows(db: Session, batch: M.InvoiceBatch) -> list[dict]:
                 v = getattr(c, f, None)
                 if v is not None:
                     d[f] = v
+        if (getattr(batch, "scan_mode", None) or "summary").lower() == "summary":
+            d["description"] = summarise_total_invoice_description(d.get("description"), d.get("line_items_raw"))
         d["di_candidate_summary"] = di_summary_by_row.get(r.id)
         out.append(d)
     return out

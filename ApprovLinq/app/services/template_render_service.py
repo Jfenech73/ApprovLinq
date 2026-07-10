@@ -38,6 +38,7 @@ AVAILABLE_FIELDS: list[str] = [
     "supplier_match_method",
     "totals_reconciliation_status",
     "batch_id",
+    "batch_name",
     "company_name",
     "tenant_name",
     "header_raw",

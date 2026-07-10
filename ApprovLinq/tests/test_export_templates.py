@@ -71,6 +71,7 @@ def _make_invoice_row(**kwargs):
         "nominal_account_code": "5001",
         "validation_status": "ok",
         "review_required": False,
+        "batch_name": "March invoices",
     }
     defaults.update(kwargs)
     return defaults
@@ -213,6 +214,12 @@ class TestRenderTemplateSheet:
             enrichment={"company_name": "Acme Ltd"},
         )
         assert rows[0]["Company"] == "Acme Ltd"
+
+    def test_batch_name_can_be_mapped(self):
+        cols = [_make_column(1, "Batch", "mapped_field", source_field="batch_name", col_order=0)]
+        tpl = _make_template("Test", cols)
+        _, rows = render_template_sheet(tpl, [_make_invoice_row(batch_name="March invoices")])
+        assert rows[0]["Batch"] == "March invoices"
 
     def test_transform_applied_to_mapped_field(self):
         cols = [_make_column(1, "Supplier UC", "mapped_field", source_field="supplier_name", transform_rule="uppercase", col_order=0)]
@@ -359,6 +366,7 @@ class TestAvailableFields:
             "supplier_name", "invoice_number", "invoice_date",
             "net_amount", "vat_amount", "total_amount",
             "currency", "nominal_account_code", "validation_status",
+            "batch_name",
         ]
         for f in required:
             assert f in AVAILABLE_FIELDS, f"Expected {f!r} in AVAILABLE_FIELDS"

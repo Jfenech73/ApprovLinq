@@ -66,6 +66,7 @@ _SAMPLE_ROW = {
     "company_name": "Demo Company Ltd",
     "tenant_name": "Demo Tenant",
     "batch_id": "batch-00000000-0001",
+    "batch_name": "Demo Batch",
 }
 
 
