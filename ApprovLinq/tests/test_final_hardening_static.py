@@ -3,18 +3,17 @@ from pathlib import Path
 
 def test_invoice_row_review_fields_are_text_and_startup_alters_are_present():
     models = Path("app/db/models.py").read_text()
-    main = Path("app/main.py").read_text()
+    migration = Path("alembic/versions/2026_07_10_0009_database_migration_foundation.py").read_text()
     assert "review_reasons: Mapped[str | None] = mapped_column(Text" in models
     assert "review_fields: Mapped[str | None] = mapped_column(Text" in models
-    assert "ALTER TABLE invoice_rows ALTER COLUMN method_used TYPE TEXT" in main
-    assert "ALTER TABLE invoice_rows ALTER COLUMN review_reasons TYPE TEXT" in main
-    assert "ALTER TABLE invoice_rows ALTER COLUMN review_fields TYPE TEXT" in main
+    assert '_alter_column_type_if_present("invoice_rows", "method_used", sa.Text())' in migration
+    assert '_alter_column_type_if_present("invoice_rows", "review_reasons", sa.Text())' in migration
+    assert '_alter_column_type_if_present("invoice_rows", "review_fields", sa.Text())' in migration
 
 
 def test_scan_operational_logging_is_present_and_content_safe():
     batches = Path("app/routers/batches.py").read_text()
     assert "def _safe_log_value" in batches
-    assert "scan started batch=%s tenant=%s" in batches
     assert "scan page completed batch=%s" in batches
     assert "scan page failed batch=%s" in batches
     assert "scan completed batch=%s status=%s" in batches

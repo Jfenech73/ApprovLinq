@@ -20,15 +20,15 @@ def test_candidate_model_has_outcome_label_fields():
         assert token in src
 
 
-def test_startup_schema_repairs_candidate_outcome_columns():
-    src = read("app/main.py")
+def test_alembic_schema_adds_candidate_outcome_columns():
+    src = read("alembic/versions/2026_05_13_0002_candidate_outcome_labels.py")
     for token in [
-        "ALTER TABLE invoice_field_candidates ADD COLUMN IF NOT EXISTS user_accepted",
-        "ALTER TABLE invoice_field_candidates ADD COLUMN IF NOT EXISTS user_corrected",
-        "ALTER TABLE invoice_field_candidates ADD COLUMN IF NOT EXISTS final_value",
-        "ALTER TABLE invoice_field_candidates ADD COLUMN IF NOT EXISTS finalised_at",
-        "ALTER TABLE invoice_field_candidates ADD COLUMN IF NOT EXISTS finalised_by",
-        "ALTER TABLE invoice_field_candidates ADD COLUMN IF NOT EXISTS outcome_source",
+        "user_accepted",
+        "user_corrected",
+        "final_value",
+        "finalised_at",
+        "finalised_by",
+        "outcome_source",
     ]:
         assert token in src
 

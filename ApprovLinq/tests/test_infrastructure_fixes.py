@@ -186,8 +186,13 @@ class TestRetentionCleanup:
         should_remove = age > retention_seconds
         assert not should_remove, "Recent export must NOT be removed"
 
-    def test_startup_handler_registered(self):
+    def test_startup_handler_registered(self, monkeypatch):
         """run_file_retention_cleanup must be a registered startup handler."""
+        import sys
+
+        monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
+        for module_name in ("app.main", "app.db.session", "app.config"):
+            sys.modules.pop(module_name, None)
         from app.main import app
         startup_handlers = [
             getattr(h, "__name__", str(h))

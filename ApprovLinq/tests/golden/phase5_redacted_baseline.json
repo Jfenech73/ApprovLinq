@@ -1,0 +1,41 @@
+{
+  "pack": "phase5-redacted-golden-invoice-regression",
+  "version": 1,
+  "records": [
+    {
+      "case_id": "redacted_standard_invoice",
+      "text": "REDACTED SUPPLIER LTD\nInvoice No: RED-001\nDate: 01/02/2026\nSub Total: 100.00\nVAT: 18.00\nTotal: 118.00",
+      "expected": {
+        "supplier_name": "Redacted Supplier Ltd",
+        "invoice_number": "RED-001",
+        "invoice_date": "2026-02-01",
+        "net_amount": 100.0,
+        "vat_amount": 18.0,
+        "total_amount": 118.0
+      },
+      "baseline_metrics": {
+        "bcrs_detected": false,
+        "duplicate_status": "not_applicable_without_database_history",
+        "review_rate": "not_recorded_for_text_fixture",
+        "max_runtime_ms": 250
+      }
+    },
+    {
+      "case_id": "redacted_invoice_with_bcrs_text_evidence",
+      "text": "REDACTED MERCHANT\nInvoice No: RED-002\nDate: 02/02/2026\nNet: 50.00\nVAT: 9.00\nBCRS 0.50\nTotal: 59.50",
+      "expected": {
+        "invoice_number": "RED-002",
+        "invoice_date": "2026-02-02",
+        "vat_amount": 9.0,
+        "total_amount": 59.5,
+        "deposit_candidate": 0.5
+      },
+      "baseline_metrics": {
+        "bcrs_detected": true,
+        "duplicate_status": "not_applicable_without_database_history",
+        "review_rate": "not_recorded_for_text_fixture",
+        "max_runtime_ms": 250
+      }
+    }
+  ]
+}

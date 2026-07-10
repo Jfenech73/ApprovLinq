@@ -17,11 +17,11 @@ def test_remap_hint_governance_columns_exist():
         assert token in src
 
 
-def test_startup_schema_has_governance_alters():
-    src = read('app/main.py')
-    assert 'ALTER TABLE remap_hints ADD COLUMN IF NOT EXISTS is_primary' in src
-    assert 'ALTER TABLE remap_hints ADD COLUMN IF NOT EXISTS archived' in src
-    assert 'ALTER TABLE remap_hints ADD COLUMN IF NOT EXISTS last_result' in src
+def test_alembic_schema_has_governance_columns_and_indexes():
+    src = read('alembic/versions/2026_04_11_0001_review_layer.py')
+    assert 'sa.Column("is_primary"' in src
+    assert 'sa.Column("archived"' in src
+    assert 'sa.Column("last_result"' in src
     assert 'ix_remap_governance' in src
 
 

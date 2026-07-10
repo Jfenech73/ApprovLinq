@@ -7,6 +7,7 @@ Create Date: 2026-04-11
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+from app.db.models import Base
 
 revision = "20260411_0001"
 down_revision = None
@@ -16,6 +17,7 @@ depends_on = None
 
 def upgrade() -> None:
     bind = op.get_bind()
+    Base.metadata.create_all(bind=bind)
     insp = sa.inspect(bind)
 
     existing_batch_cols = {c["name"] for c in insp.get_columns("invoice_batches")}

@@ -26,11 +26,12 @@ def test_review_preview_uses_materialized_pdf_path():
     assert "PDF missing from local disk and no database file copy" in read("app/utils/persistent_files.py")
 
 
-def test_startup_schema_adds_durable_file_columns():
-    src = read("app/main.py")
-    assert "ALTER TABLE invoice_files ADD COLUMN IF NOT EXISTS file_bytes BYTEA" in src
-    assert "ALTER TABLE invoice_files ADD COLUMN IF NOT EXISTS storage_backend" in src
-    assert "ALTER TABLE batch_export_events ADD COLUMN IF NOT EXISTS file_bytes BYTEA" in src
+def test_alembic_schema_adds_durable_file_columns():
+    src = read("alembic/versions/2026_04_11_0001_review_layer.py")
+    assert '"invoice_files"' in src
+    assert '"batch_export_events"' in src
+    assert "file_bytes" in src
+    assert "storage_backend" in src
 
 
 def test_export_event_stores_generated_workbook_bytes():

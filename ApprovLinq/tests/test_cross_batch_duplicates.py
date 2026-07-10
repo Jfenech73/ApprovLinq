@@ -340,7 +340,7 @@ def test_cross_batch_duplicate_review_payload_and_override_audit():
 def test_cross_batch_duplicate_schema_tokens_are_declared():
     model_src = (ROOT / "app/db/review_models.py").read_text()
     service_src = (ROOT / "app/services/cross_batch_duplicates.py").read_text()
-    main_src = (ROOT / "app/main.py").read_text()
+    schema_version_src = (ROOT / "app/db/schema_version.py").read_text()
     schema_src = (ROOT / "sql/schema.sql").read_text()
     migration_src = (ROOT / "alembic/versions/2026_07_10_0008_cross_batch_duplicates.py").read_text()
     review_src = (ROOT / "app/routers/review.py").read_text()
@@ -352,7 +352,6 @@ def test_cross_batch_duplicate_schema_tokens_are_declared():
         "uq_duplicate_candidates_pair_type",
     ]:
         assert token in model_src
-        assert token in main_src
         assert token in schema_src
         assert token in migration_src
     for token in ["cross_batch_duplicate", "blocked_duplicate", "review_only"]:
@@ -369,5 +368,5 @@ def test_cross_batch_duplicate_schema_tokens_are_declared():
     assert "Duplicate check" in js_src
     assert "Duplicate remark" in js_src
     assert "duplicate of" in js_src
-    assert "ALEMBIC_HEAD_REVISION = \"20260710_0008\"" in main_src
-    assert "ensure_alembic_head_marker" in main_src
+    assert 'CURRENT_ALEMBIC_REVISION = "20260710_0009"' in schema_version_src
+    assert '"20260710_0008"' in schema_version_src

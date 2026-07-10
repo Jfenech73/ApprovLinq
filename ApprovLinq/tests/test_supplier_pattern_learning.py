@@ -195,6 +195,5 @@ def test_supplier_pattern_trust_schema_is_declared():
         assert column in model_columns
 
     migration = open("alembic/versions/2026_07_07_0005_supplier_pattern_trust.py", encoding="utf-8").read()
-    startup = open("app/main.py", encoding="utf-8").read()
     assert 'revision = "20260707_0005"' in migration
-    assert "ALTER TABLE supplier_patterns ADD COLUMN IF NOT EXISTS status" in startup
+    assert 'sa.Column("status"' in migration

@@ -52,8 +52,8 @@ def test_arbitration_does_not_audit_noop_conflict_when_winner_confirms_current_v
 
 def test_method_used_is_text_not_varchar_200_to_avoid_koyeb_runtime_truncation():
     model_src = Path('app/db/models.py').read_text()
-    main_src = Path('app/main.py').read_text()
+    migration_src = Path('alembic/versions/2026_07_10_0009_database_migration_foundation.py').read_text()
     batch_src = Path('app/routers/batches.py').read_text()
     assert 'method_used: Mapped[str | None] = mapped_column(Text, nullable=True)' in model_src
-    assert 'ALTER TABLE invoice_rows ALTER COLUMN method_used TYPE TEXT' in main_src
+    assert '_alter_column_type_if_present("invoice_rows", "method_used", sa.Text())' in migration_src
     assert 'row.method_used = "+".join(parts)[:255]' not in batch_src
