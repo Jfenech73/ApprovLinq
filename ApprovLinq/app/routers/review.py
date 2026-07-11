@@ -2611,8 +2611,9 @@ def apply_saved_regions_to_row(
     ) or 0
 
     try:
-        from app.routers.batches import _apply_remap_hints, _apply_master_data_enrichment, _apply_saved_rules
-        from app.services.invoice_arbitration import arbitrate_invoice_row
+        from app.services.account_nominal_resolver import apply_master_data_enrichment
+        from app.services.field_resolver import resolve_invoice_row
+        from app.services.saved_region_service import apply_saved_region_candidates, apply_saved_rule_candidates
 
         replay_payload: dict[str, object] = {
             "supplier_name": row.supplier_name,
@@ -2629,11 +2630,11 @@ def apply_saved_regions_to_row(
             "confidence_score": row.confidence_score,
             "_field_candidates": [],
         }
-        _apply_remap_hints(db, batch, row, candidate_payload=replay_payload)
-        _apply_saved_rules(db, batch, row, candidate_payload=replay_payload)
-        arbitrate_invoice_row(db, batch, row, replay_payload)
+        apply_saved_region_candidates(db, batch, row, candidate_payload=replay_payload)
+        apply_saved_rule_candidates(db, batch, row, candidate_payload=replay_payload)
+        resolve_invoice_row(db, batch, row, replay_payload)
         if row.supplier_name != supplier_before:
-            _apply_master_data_enrichment(db, batch.tenant_id, batch.company_id, row)
+            apply_master_data_enrichment(db, batch.tenant_id, batch.company_id, row)
     except Exception as exc:
         logger.warning("apply_saved_regions_to_row failed row_id=%s: %s", row_id, exc)
         raise HTTPException(500, f"Saved rule replay failed: {exc}")

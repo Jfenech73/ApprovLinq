@@ -59,8 +59,8 @@ def test_manual_apply_saved_regions_endpoint_and_ui_present():
     assert "Apply saved rules to row" in html
     assert "apply-saved-regions" in js
     assert "Saved rules checked" in js
-    assert "_apply_saved_rules(db, batch, row, candidate_payload=replay_payload)" in review
-    assert "arbitrate_invoice_row(db, batch, row, replay_payload)" in review
+    assert "apply_saved_rule_candidates(db, batch, row, candidate_payload=replay_payload)" in review
+    assert "resolve_invoice_row(db, batch, row, replay_payload)" in review
 
 
 def test_saved_rules_button_is_maintenance_not_invisible_action():

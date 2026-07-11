@@ -32,11 +32,16 @@ from app.services.exporter import workbook_from_rows
 from app.services.corrected_exporter import build_corrected_rows, export_batch_corrected
 # <<< REVIEW_PACK corrected_export_import
 from app.services.description_summary import summarise_total_invoice_description
-from app.services.cross_batch_duplicates import detect_cross_batch_duplicates
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
-from app.services.invoice_arbitration import arbitrate_invoice_row
+from app.services.account_nominal_resolver import apply_master_data_enrichment
+from app.services.amount_resolver import apply_bcrs_split, decide_bcrs_split
+from app.services.duplicate_resolver import detect_prior_batch_duplicates, detect_within_batch_duplicates
+from app.services.field_resolver import resolve_invoice_row
+from app.services.provider_gateway import process_page_rows_with_timeout
 from app.services.scan_performance import ScanPerformanceContext
 from app.services.scan_runs import create_scan_run, mark_scan_run_completed
+from app.services.saved_region_service import apply_saved_region_candidates, apply_saved_rule_candidates
+from app.services.supplier_resolver import resolve_supplier_identity
 from app.services.supplier_pattern_learning import (
     extract_pattern_keywords as _trusted_extract_pattern_keywords,
     match_supplier_by_active_pattern,
@@ -85,32 +90,14 @@ def _process_page_rows_with_timeout(
     openai_api_key: str | None,
     account_company_name: str | None,
 ) -> list[dict]:
-    """Run page extraction with a hard batch-progress timeout.
-
-    Provider libraries can occasionally block below their own timeout layer.
-    This wrapper lets the batch mark the page for review and continue.
-    """
-    import concurrent.futures as _cf
-
-    timeout_s = float(getattr(settings, "extraction_page_timeout_s", 120) or 120)
-    pool = _cf.ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(
-        process_pdf_page_rows,
+    """Compatibility wrapper for the Phase 7 provider gateway."""
+    return process_page_rows_with_timeout(
         pdf_path,
         page_index=page_index,
         scan_mode=scan_mode,
         openai_api_key=openai_api_key,
         account_company_name=account_company_name,
     )
-    try:
-        return future.result(timeout=timeout_s)
-    except _cf.TimeoutError as exc:
-        future.cancel()
-        pool.shutdown(wait=False, cancel_futures=True)
-        raise TimeoutError(f"Page extraction timed out after {timeout_s:.0f}s") from exc
-    finally:
-        if future.done():
-            pool.shutdown(wait=False, cancel_futures=True)
 
 
 
@@ -4642,40 +4629,40 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             )
                             if not provider_baseline_mode:
                                 with perf_ctx.timed("supplier_resolver"):
-                                    _resolve_supplier_identity(
+                                    resolve_supplier_identity(
                                         db, tenant_id, batch.company_id, row,
                                         supplier_vat=supplier_vat,
                                         batch=batch,
                                     )
                                 with perf_ctx.timed("supplier_history_lookup"):
-                                    _apply_master_data_enrichment(
+                                    apply_master_data_enrichment(
                                         db, tenant_id, batch.company_id, row,
                                         supplier_vat=supplier_vat,
                                         payload=r,
                                     )
                                 _supplier_before_remap = row.supplier_name
                                 with perf_ctx.timed("saved_region_replay"):
-                                    _apply_remap_hints(db, batch, row, perf_ctx=perf_ctx, candidate_payload=r)
+                                    apply_saved_region_candidates(db, batch, row, perf_ctx=perf_ctx, candidate_payload=r)
                                 # Supplier-name saved regions are allowed to confirm/fix a supplier
                                 # after the first master-data suggestion pass.  Re-run suggestions
                                 # so posting account / supplier match data follow the corrected name.
                                 if row.supplier_name != _supplier_before_remap:
                                     with perf_ctx.timed("supplier_history_lookup"):
-                                        _apply_master_data_enrichment(
+                                        apply_master_data_enrichment(
                                             db, tenant_id, batch.company_id, row,
                                             supplier_vat=supplier_vat,
                                             payload=r,
                                         )
                                 with perf_ctx.timed("rule_application"):
-                                    _apply_saved_rules(db, batch, row, candidate_payload=r)
+                                    apply_saved_rule_candidates(db, batch, row, candidate_payload=r)
                                 # Deterministic post-extraction arbitration: compare raw extraction,
                                 # rules, saved-region activity, supplier history/master data and
                                 # totals evidence before final review/BCRS decisions.
                                 with perf_ctx.timed("arbitration"):
-                                    arbitrate_invoice_row(db, batch, row, r, context={"scan_mode": batch.scan_mode or "summary", "perf_ctx": perf_ctx})
+                                    resolve_invoice_row(db, batch, row, r, context={"scan_mode": batch.scan_mode or "summary", "perf_ctx": perf_ctx})
                             else:
                                 with perf_ctx.timed("supplier_history_lookup"):
-                                    _apply_master_data_enrichment(
+                                    apply_master_data_enrichment(
                                         db, tenant_id, batch.company_id, row,
                                         supplier_vat=supplier_vat,
                                         payload=r,
@@ -4692,7 +4679,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                     "total_amount": row.total_amount,
                                 }
                                 with perf_ctx.timed("rule_application"):
-                                    _apply_saved_rules(db, batch, row, candidate_payload=r)
+                                    apply_saved_rule_candidates(db, batch, row, candidate_payload=r)
                                 baseline_changed = [
                                     field for field, before_value in baseline_before_rules.items()
                                     if str(getattr(row, field, None) or "").strip() != str(before_value or "").strip()
@@ -4703,7 +4690,7 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                     _append_method_tag(row, "provider_baseline_rules_checked")
                                 if row.supplier_name != baseline_before_rules.get("supplier_name"):
                                     with perf_ctx.timed("supplier_history_lookup"):
-                                        _apply_master_data_enrichment(
+                                        apply_master_data_enrichment(
                                             db, tenant_id, batch.company_id, row,
                                             supplier_vat=supplier_vat,
                                             payload=r,
@@ -4737,9 +4724,9 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             total_rows += 1
                             if (batch.scan_mode or "summary").lower() == "lines":
                                 continue
-                            bcrs_outcome, bcrs_amount, bcrs_reason = _decide_bcrs_split(db, batch, row, r, [row])
+                            bcrs_outcome, bcrs_amount, bcrs_reason = decide_bcrs_split(db, batch, row, r, [row])
                             if bcrs_outcome == "auto_split" and bcrs_amount and bcrs_amount > 0:
-                                _apply_bcrs_split(db, row, bcrs_amount)
+                                apply_bcrs_split(db, row, bcrs_amount)
                                 inserted_rows += 1
                                 total_rows += 1
                             elif bcrs_outcome == "review_suggest_split":
@@ -4753,9 +4740,9 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             anchor_payload = dict(row_payloads[0])
                             page_rows = current_page_rows
                             if page_rows:
-                                outcome, bcrs_amount, bcrs_reason = _decide_bcrs_split(db, batch, page_rows[0], anchor_payload, page_rows)
+                                outcome, bcrs_amount, bcrs_reason = decide_bcrs_split(db, batch, page_rows[0], anchor_payload, page_rows)
                                 if outcome == "auto_split" and bcrs_amount and bcrs_amount > 0:
-                                    _apply_bcrs_split(db, page_rows[0], bcrs_amount)
+                                    apply_bcrs_split(db, page_rows[0], bcrs_amount)
                                     inserted_rows += 1
                                     total_rows += 1
                                 elif outcome == "review_suggest_split":
@@ -4882,11 +4869,11 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 failed_files += 1
 
         if not provider_baseline_mode:
-            duplicate_review_count = _mark_duplicate_invoice_rows(db, batch_id, scan_run_id)
+            duplicate_review_count = detect_within_batch_duplicates(db, batch_id, scan_run_id)
             if duplicate_review_count:
                 review_required_count += duplicate_review_count
                 logger.info("duplicate invoice review flags batch=%s count=%d", batch_id, duplicate_review_count)
-        cross_batch_duplicate_count = detect_cross_batch_duplicates(db, batch, scan_run_id)
+        cross_batch_duplicate_count = detect_prior_batch_duplicates(db, batch, scan_run_id)
         if cross_batch_duplicate_count:
             review_required_count += cross_batch_duplicate_count
             logger.info(
@@ -5060,7 +5047,9 @@ def process_batch(batch_id: UUID, background_tasks: BackgroundTasks, db: Session
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)
     if not _set_active(batch.id):
         raise HTTPException(status_code=409, detail="Batch is already processing")
-    background_tasks.add_task(_process_batch_job, batch.id, tenant_id)
+    from app.services.scan_orchestrator import process_batch_job
+
+    background_tasks.add_task(process_batch_job, batch.id, tenant_id)
     batch.status = "processing"
     batch.notes = "Processing started"
     db.commit()
