@@ -1356,12 +1356,21 @@ def _apply_saved_rules(
             continue
         if rule.rule_type == "supplier_alias":
             current = _normalize_rule_value(row.supplier_name)
-            if current and _supplier_rule_source_matches(current, src) and rule.target_value:
+            original_supplier = None
+            if candidate_payload is not None:
+                original_values = candidate_payload.get("_original_field_values") or {}
+                original_supplier = original_values.get("supplier_name")
+            original_current = _normalize_rule_value(original_supplier)
+            source_matched = (
+                (current and _supplier_rule_source_matches(current, src))
+                or (original_current and _supplier_rule_source_matches(original_current, src))
+            )
+            if source_matched and rule.target_value:
                 logger.debug(
                     "_apply_saved_rules: supplier_alias %r→%r row=%d",
-                    row.supplier_name, rule.target_value, row.id,
+                    original_supplier or row.supplier_name, rule.target_value, row.id,
                 )
-                old_val = row.supplier_name
+                old_val = original_supplier or row.supplier_name
                 new_supplier_name = rule.target_value
                 if candidate_payload is not None:
                     _emit_field_candidate(
@@ -3875,6 +3884,7 @@ def _apply_master_data_enrichment(
         }
         candidates.append(candidate)
         if payload is not None:
+            payload.setdefault("_original_field_values", {}).setdefault(field_name, payload.get(field_name))
             payload.setdefault("_field_candidates", []).append(candidate)
             payload[field_name] = value
 

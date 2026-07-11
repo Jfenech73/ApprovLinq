@@ -923,11 +923,7 @@ def _choose_candidate(field_name: str, candidates: list[Candidate]) -> tuple[Can
     strong = [c for c in valid if c.confidence >= 0.78 or SOURCE_RANK.get(c.source_type, 0) >= 80]
     conflicts = [c for c in strong if not _values_equivalent(field_name, c.value, winner.value)]
     if winner.source_type in EXPLICIT_RULE_SOURCES:
-        conflicts = [
-            c for c in conflicts
-            if c.source_type not in CURRENT_DOCUMENT_SOURCES
-            and c.source_type not in {"raw_extraction", "header_rule"}
-        ]
+        conflicts = [c for c in conflicts if c.source_type in EXPLICIT_RULE_SOURCES]
     if conflicts:
         other = conflicts[0]
         return winner, True, f"Strong candidate conflict: {winner.source_type}={winner.value!r} vs {other.source_type}={other.value!r}."
