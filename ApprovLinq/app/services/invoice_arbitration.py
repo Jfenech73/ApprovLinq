@@ -65,6 +65,12 @@ CURRENT_DOCUMENT_SOURCES = {
     "manual",
 }
 
+EXPLICIT_RULE_SOURCES = {
+    "correction_rule",
+    "rule_supplier_alias",
+    "rule_text_correction",
+}
+
 SOURCE_RANK = {
     "manual": 100,
     "correction_rule": 90,
@@ -916,6 +922,12 @@ def _choose_candidate(field_name: str, candidates: list[Candidate]) -> tuple[Can
     winner = valid[0]
     strong = [c for c in valid if c.confidence >= 0.78 or SOURCE_RANK.get(c.source_type, 0) >= 80]
     conflicts = [c for c in strong if not _values_equivalent(field_name, c.value, winner.value)]
+    if winner.source_type in EXPLICIT_RULE_SOURCES:
+        conflicts = [
+            c for c in conflicts
+            if c.source_type not in CURRENT_DOCUMENT_SOURCES
+            and c.source_type not in {"raw_extraction", "header_rule"}
+        ]
     if conflicts:
         other = conflicts[0]
         return winner, True, f"Strong candidate conflict: {winner.source_type}={winner.value!r} vs {other.source_type}={other.value!r}."
@@ -1034,7 +1046,7 @@ def arbitrate_invoice_row(
             field_name == "supplier_name"
             and not same
             and not weak_current
-            and winner.source_type != "correction_rule"
+            and winner.source_type not in EXPLICIT_RULE_SOURCES
         ):
             can_apply = False
 
