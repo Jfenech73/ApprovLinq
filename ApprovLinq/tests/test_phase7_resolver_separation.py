@@ -133,6 +133,60 @@ def test_supplier_alias_rule_overrides_strong_raw_supplier_after_resolver_split(
         db.close()
 
 
+def test_supplier_alias_rule_writes_target_even_when_supplier_names_are_similar():
+    from app.routers.batches import _apply_saved_rules
+    from app.services.field_resolver import resolve_invoice_row
+
+    db = _session()
+    try:
+        tenant, company, batch = _tenant_company_batch(db)
+        row = InvoiceRow(
+            batch_id=batch.id,
+            tenant_id=tenant.id,
+            company_id=company.id,
+            source_filename="phase7.pdf",
+            page_no=1,
+            supplier_name="SUPPLY CO.",
+            invoice_number="INV-SIMILAR",
+            net_amount=10.0,
+            vat_amount=1.8,
+            total_amount=11.8,
+            confidence_score=0.95,
+            review_required=False,
+        )
+        db.add(row)
+        db.add(CorrectionRule(
+            tenant_id=tenant.id,
+            company_id=company.id,
+            rule_type="supplier_alias",
+            field_name="supplier_name",
+            source_pattern="supply co",
+            target_value="BR SUPPLY CO.",
+            active=True,
+        ))
+        db.commit()
+
+        payload = {
+            "_field_candidates": [],
+            "supplier_name": "SUPPLY CO.",
+            "invoice_number": "INV-SIMILAR",
+            "net_amount": 10.0,
+            "vat_amount": 1.8,
+            "total_amount": 11.8,
+            "confidence_score": 0.95,
+        }
+        _apply_saved_rules(db, batch, row, candidate_payload=payload)
+        result = resolve_invoice_row(db, batch, row, payload)
+
+        decision = result.decisions["supplier_name"]
+        assert decision.winning_candidate is not None
+        assert decision.winning_candidate.source_type == "rule_supplier_alias"
+        assert decision.applied is True
+        assert row.supplier_name == "BR SUPPLY CO."
+    finally:
+        db.close()
+
+
 def test_supplier_alias_rule_overrides_competing_supplier_master_candidate():
     from app.routers.batches import _apply_saved_rules
     from app.services.field_resolver import resolve_invoice_row

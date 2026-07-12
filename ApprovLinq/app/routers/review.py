@@ -2599,7 +2599,8 @@ def apply_saved_regions_to_row(
         "nominal_account_code", "supplier_posting_account",
         "description", "currency", "tax_code",
     )
-    before = {f: getattr(row, f, None) for f in tracked}
+    correction_before = db.get(InvoiceRowCorrection, row.id)
+    before = {f: cs.effective_value(row, correction_before, f) for f in tracked}
     supplier_before = row.supplier_name
     reasons_before = row.review_reasons or ""
     method_before = row.method_used or ""
@@ -2653,6 +2654,11 @@ def apply_saved_regions_to_row(
             conflict_fields.append(f)
 
     if changed:
+        correction = cs.get_or_create_correction(db, row)
+        for field in changed:
+            setattr(correction, field, after[field])
+        correction.updated_at = datetime.utcnow()
+        correction.updated_by = user.id
         row.review_required = True
         row.validation_status = row.validation_status or "saved_region_applied"
         reasons = [x for x in re.split(r"[|]", row.review_reasons or "") if x]

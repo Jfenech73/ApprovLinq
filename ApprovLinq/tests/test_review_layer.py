@@ -268,6 +268,53 @@ def test_save_as_rule_creates_correction_rule(db, fixtures):
     assert rule.target_value == "Acme Ltd"
 
 
+def test_apply_saved_rules_updates_review_correction_overlay(db, fixtures):
+    from app.routers.review import apply_saved_regions_to_row, get_review_workspace
+
+    f = fixtures
+    row = f["row"]
+    row.supplier_name = "SUPPLY CO."
+    row.invoice_number = "INV-REPLAY"
+    row.net_amount = 10.0
+    row.vat_amount = 1.8
+    row.total_amount = 11.8
+    row.confidence_score = 0.95
+    db.add(InvoiceRowCorrection(
+        row_id=row.id,
+        batch_id=f["batch"].id,
+        scan_run_id=getattr(row, "scan_run_id", None),
+        supplier_name="SUPPLY CO.",
+    ))
+    db.add(CorrectionRule(
+        tenant_id=f["tenant"].id,
+        company_id=f["company"].id,
+        rule_type="supplier_alias",
+        field_name="supplier_name",
+        source_pattern="supply co",
+        target_value="BR SUPPLY CO.",
+        active=True,
+    ))
+    db.commit()
+
+    result = apply_saved_regions_to_row(
+        f["batch"].id,
+        row.id,
+        x_tenant_id=str(f["tenant"].id),
+        db=db,
+        user=f["user"],
+    )
+
+    correction = db.get(InvoiceRowCorrection, row.id)
+    assert result["changed_fields"] == ["supplier_name"]
+    assert row.supplier_name == "BR SUPPLY CO."
+    assert correction.supplier_name == "BR SUPPLY CO."
+
+    workspace = get_review_workspace(f["batch"].id, db=db, user=f["user"])
+    visible_row = next(r for r in workspace["rows"] if r["id"] == row.id)
+    assert visible_row["current"]["supplier_name"] == "BR SUPPLY CO."
+    assert visible_row["original"]["supplier_name"] == "BR SUPPLY CO."
+
+
 def test_revert_clears_overlay(db, fixtures):
     f = fixtures
     cs.apply_field_changes(db, batch=f["batch"], row=f["row"],

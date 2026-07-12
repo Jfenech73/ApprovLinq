@@ -326,6 +326,15 @@ def _values_equivalent(field_name: str, a: Any, b: Any) -> bool:
     return _norm_text(a) == _norm_text(b)
 
 
+def _rule_target_already_selected(field_name: str, current: Any, target: Any) -> bool:
+    """Rules are commands, so fuzzy supplier equivalence is not enough."""
+    if current is None or current == "" or target is None or target == "":
+        return False
+    if field_name in AMOUNT_FIELDS or field_name == "invoice_date":
+        return _values_equivalent(field_name, current, target)
+    return _norm_text(current) == _norm_text(target)
+
+
 def _current_value_is_weak(row: InvoiceRow, field_name: str) -> bool:
     value = getattr(row, field_name, None)
     if value is None or str(value).strip() == "":
@@ -1004,7 +1013,11 @@ def arbitrate_invoice_row(
             continue
 
         weak_current = _current_value_is_weak(row, field_name)
-        same = _values_equivalent(field_name, current, winner.value)
+        same = (
+            _rule_target_already_selected(field_name, current, winner.value)
+            if winner.source_type in RULE_FIRST_SOURCES
+            else _values_equivalent(field_name, current, winner.value)
+        )
 
         # If the winning candidate confirms the value that is already on the row,
         # do not create an arbitration_conflict audit just because another strong
