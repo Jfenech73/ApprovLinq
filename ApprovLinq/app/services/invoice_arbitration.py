@@ -71,6 +71,10 @@ EXPLICIT_RULE_SOURCES = {
     "rule_text_correction",
 }
 
+RULE_FIRST_SOURCES = EXPLICIT_RULE_SOURCES | {
+    "stable_rule_fallback",
+}
+
 SOURCE_RANK = {
     "manual": 100,
     "correction_rule": 90,
@@ -431,6 +435,8 @@ def _candidate_allowed_for_light_validation(field_name: str, candidate: Candidat
     if field_name not in LIGHT_VALIDATION_FIELDS:
         return True
     if candidate.source_type in CURRENT_DOCUMENT_SOURCES:
+        return True
+    if candidate.source_type in RULE_FIRST_SOURCES and candidate.should_apply:
         return True
     if field_name in {"invoice_number", "invoice_date"}:
         return False
@@ -918,6 +924,18 @@ def _choose_candidate(field_name: str, candidates: list[Candidate]) -> tuple[Can
     valid = [c for c in candidates if _value_valid_for_field(field_name, c.value)]
     if not valid:
         return None, False, "No valid candidates."
+    rule_candidates = [c for c in valid if c.source_type in RULE_FIRST_SOURCES]
+    if rule_candidates:
+        rule_candidates.sort(
+            key=lambda c: (
+                SOURCE_RANK.get(c.source_type, 0),
+                c.confidence,
+                c.rule_id if c.rule_id is not None else -1,
+            ),
+            reverse=True,
+        )
+        winner = rule_candidates[0]
+        return winner, False, "Explicit rule candidate selected before provider, master-data, history, or raw extraction candidates."
     valid.sort(key=lambda c: (SOURCE_RANK.get(c.source_type, 0), c.confidence), reverse=True)
     winner = valid[0]
     strong = [c for c in valid if c.confidence >= 0.78 or SOURCE_RANK.get(c.source_type, 0) >= 80]
@@ -1046,7 +1064,7 @@ def arbitrate_invoice_row(
         ):
             can_apply = False
 
-        if field_name in LIGHT_VALIDATION_FIELDS:
+        if field_name in LIGHT_VALIDATION_FIELDS and winner.source_type not in RULE_FIRST_SOURCES:
             if not same and winner and winner.source_type not in {"manual", "saved_region", "azure_di", "native_text", "ocr_space", "raw_extraction"}:
                 can_apply = False
             if not weak_current and field_name in {"invoice_number", "invoice_date", "description"}:

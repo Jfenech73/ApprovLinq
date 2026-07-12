@@ -195,6 +195,129 @@ def test_supplier_alias_rule_overrides_competing_supplier_master_candidate():
         db.close()
 
 
+def test_newest_matching_supplier_alias_rule_wins_deterministically():
+    from app.routers.batches import _apply_saved_rules
+    from app.services.field_resolver import resolve_invoice_row
+
+    db = _session()
+    try:
+        tenant, company, batch = _tenant_company_batch(db)
+        row = InvoiceRow(
+            batch_id=batch.id,
+            tenant_id=tenant.id,
+            company_id=company.id,
+            source_filename="phase7.pdf",
+            page_no=1,
+            supplier_name="Wrong Supplier",
+            invoice_number="INV-NEWEST",
+            net_amount=10.0,
+            vat_amount=1.8,
+            total_amount=11.8,
+            confidence_score=0.95,
+        )
+        db.add(row)
+        db.add(CorrectionRule(
+            tenant_id=tenant.id,
+            company_id=company.id,
+            rule_type="supplier_alias",
+            field_name="supplier_name",
+            source_pattern="wrong supplier",
+            target_value="Old Target Ltd",
+            active=True,
+        ))
+        db.flush()
+        db.add(CorrectionRule(
+            tenant_id=tenant.id,
+            company_id=company.id,
+            rule_type="supplier_alias",
+            field_name="supplier_name",
+            source_pattern="wrong supplier",
+            target_value="Amended Target Ltd",
+            active=True,
+        ))
+        db.commit()
+
+        payload = {
+            "_field_candidates": [],
+            "supplier_name": "Wrong Supplier",
+            "invoice_number": "INV-NEWEST",
+            "net_amount": 10.0,
+            "vat_amount": 1.8,
+            "total_amount": 11.8,
+            "confidence_score": 0.95,
+        }
+        _apply_saved_rules(db, batch, row, candidate_payload=payload)
+
+        assert [c["candidate_value"] for c in payload["_field_candidates"] if c["source_type"] == "rule_supplier_alias"] == [
+            "Old Target Ltd",
+            "Amended Target Ltd",
+        ]
+
+        result = resolve_invoice_row(db, batch, row, payload)
+
+        decision = result.decisions["supplier_name"]
+        assert decision.winning_candidate is not None
+        assert decision.winning_candidate.value == "Amended Target Ltd"
+        assert decision.applied is True
+        assert decision.conflict is False
+        assert row.supplier_name == "Amended Target Ltd"
+    finally:
+        db.close()
+
+
+def test_text_correction_rule_can_write_light_field_through_resolver():
+    from app.routers.batches import _apply_saved_rules
+    from app.services.field_resolver import resolve_invoice_row
+
+    db = _session()
+    try:
+        tenant, company, batch = _tenant_company_batch(db)
+        row = InvoiceRow(
+            batch_id=batch.id,
+            tenant_id=tenant.id,
+            company_id=company.id,
+            source_filename="phase7.pdf",
+            page_no=1,
+            supplier_name="Known Supplier",
+            invoice_number="BAD-READ",
+            net_amount=10.0,
+            vat_amount=1.8,
+            total_amount=11.8,
+            confidence_score=0.95,
+        )
+        db.add(row)
+        db.add(CorrectionRule(
+            tenant_id=tenant.id,
+            company_id=company.id,
+            rule_type="text_correction",
+            field_name="invoice_number",
+            source_pattern="BAD-READ",
+            target_value="INV-100",
+            active=True,
+        ))
+        db.commit()
+
+        payload = {
+            "_field_candidates": [],
+            "supplier_name": "Known Supplier",
+            "invoice_number": "BAD-READ",
+            "net_amount": 10.0,
+            "vat_amount": 1.8,
+            "total_amount": 11.8,
+            "confidence_score": 0.95,
+        }
+        _apply_saved_rules(db, batch, row, candidate_payload=payload)
+        result = resolve_invoice_row(db, batch, row, payload)
+
+        decision = result.decisions["invoice_number"]
+        assert decision.winning_candidate is not None
+        assert decision.winning_candidate.source_type == "rule_text_correction"
+        assert decision.applied is True
+        assert row.invoice_number == "INV-100"
+    finally:
+        db.close()
+
+
 def test_supplier_alias_rule_matches_original_supplier_after_master_enrichment_changes_payload():
     from app.routers.batches import _apply_saved_rules
 
