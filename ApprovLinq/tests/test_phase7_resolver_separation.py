@@ -239,6 +239,85 @@ def test_supplier_alias_rule_matches_original_supplier_after_master_enrichment_c
         db.close()
 
 
+def test_provider_baseline_resolves_explicit_rule_candidate_before_payload_sync():
+    from app.routers.batches import _has_new_provider_baseline_rule_candidate
+    from app.services.field_resolver import resolve_invoice_row
+    from app.services.saved_region_service import apply_saved_rule_candidates
+
+    db = _session()
+    try:
+        tenant, company, batch = _tenant_company_batch(db)
+        row = InvoiceRow(
+            batch_id=batch.id,
+            tenant_id=tenant.id,
+            company_id=company.id,
+            source_filename="phase7.pdf",
+            page_no=1,
+            supplier_name="Wrong Supplier",
+            invoice_number="INV-BASELINE",
+            description="Goods",
+            net_amount=10.0,
+            vat_amount=1.8,
+            total_amount=11.8,
+            confidence_score=0.95,
+            review_required=False,
+        )
+        db.add(row)
+        db.add(CorrectionRule(
+            tenant_id=tenant.id,
+            company_id=company.id,
+            rule_type="supplier_alias",
+            field_name="supplier_name",
+            source_pattern="wrong supplier",
+            target_value="Correct Supplier Ltd",
+            active=True,
+        ))
+        db.commit()
+
+        payload = {
+            "_field_candidates": [],
+            "supplier_name": "Wrong Supplier",
+            "invoice_number": "INV-BASELINE",
+            "description": "Goods",
+            "net_amount": 10.0,
+            "vat_amount": 1.8,
+            "total_amount": 11.8,
+            "confidence_score": 0.95,
+        }
+        baseline_before_rules = {
+            "supplier_name": row.supplier_name,
+            "supplier_posting_account": row.supplier_posting_account,
+            "nominal_account_code": row.nominal_account_code,
+            "invoice_number": row.invoice_number,
+            "invoice_date": row.invoice_date,
+            "description": row.description,
+            "net_amount": row.net_amount,
+            "vat_amount": row.vat_amount,
+            "total_amount": row.total_amount,
+        }
+
+        candidate_start = len(payload["_field_candidates"])
+        apply_saved_rule_candidates(db, batch, row, candidate_payload=payload)
+        assert _has_new_provider_baseline_rule_candidate(payload, candidate_start) is True
+
+        result = resolve_invoice_row(db, batch, row, payload)
+        baseline_changed = [
+            field for field, before_value in baseline_before_rules.items()
+            if str(getattr(row, field, None) or "").strip() != str(before_value or "").strip()
+        ]
+        for field in baseline_changed:
+            payload[field] = getattr(row, field, None)
+
+        assert result.decisions["supplier_name"].applied is True
+        assert row.supplier_name == "Correct Supplier Ltd"
+        assert payload["supplier_name"] == "Correct Supplier Ltd"
+        assert payload["_candidates_arbitrated"] is True
+        assert "rule_candidate:supplier_alias" in (row.method_used or "")
+        assert "arbitrated:rule_supplier_alias:supplier_name" in (row.method_used or "")
+    finally:
+        db.close()
+
+
 def test_provider_gateway_delegates_to_extractor(monkeypatch):
     from app.services import provider_gateway
 

@@ -62,6 +62,11 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expi
 _ACTIVE_BATCHES: set[str] = set()
 _ACTIVE_BATCHES_LOCK = Lock()
 _READ_SNAPSHOT_SCHEMA_CACHE: dict[str, set[str]] = {}
+_PROVIDER_BASELINE_RULE_RESOLUTION_SOURCES = {
+    "correction_rule",
+    "rule_supplier_alias",
+    "rule_text_correction",
+}
 
 
 def _batch_folder(batch_id: UUID) -> Path:
@@ -123,6 +128,19 @@ def _append_method_tag(row: InvoiceRow, tag: str) -> None:
     if tag not in parts:
         parts.append(tag)
     row.method_used = "+".join(parts)
+
+
+def _has_new_provider_baseline_rule_candidate(payload: dict, start_index: int) -> bool:
+    candidates = payload.get("_field_candidates") or []
+    if start_index < 0:
+        start_index = 0
+    for candidate in candidates[start_index:]:
+        if not isinstance(candidate, dict):
+            continue
+        source_type = str(candidate.get("source_type") or "").strip()
+        if source_type in _PROVIDER_BASELINE_RULE_RESOLUTION_SOURCES:
+            return True
+    return False
 
 
 def _json_safe(value: object) -> object:
@@ -4688,8 +4706,18 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                     "vat_amount": row.vat_amount,
                                     "total_amount": row.total_amount,
                                 }
+                                baseline_rule_candidate_start = len(r.get("_field_candidates") or [])
                                 with perf_ctx.timed("rule_application"):
                                     apply_saved_rule_candidates(db, batch, row, candidate_payload=r)
+                                if _has_new_provider_baseline_rule_candidate(r, baseline_rule_candidate_start):
+                                    with perf_ctx.timed("arbitration"):
+                                        resolve_invoice_row(
+                                            db,
+                                            batch,
+                                            row,
+                                            r,
+                                            context={"scan_mode": batch.scan_mode or "summary", "perf_ctx": perf_ctx},
+                                        )
                                 baseline_changed = [
                                     field for field, before_value in baseline_before_rules.items()
                                     if str(getattr(row, field, None) or "").strip() != str(before_value or "").strip()
