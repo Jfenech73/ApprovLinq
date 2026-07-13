@@ -679,6 +679,61 @@ create index if not exists ix_learning_promotions_proposal on learning_promotion
 create index if not exists ix_learning_promotions_entity   on learning_promotions(promoted_entity_type, promoted_entity_id);
 
 
+-- ---------------------------------------------------------------------------
+-- APPROVED INVOICE FACTS  (approved/exported corrected snapshots for insights)
+-- ---------------------------------------------------------------------------
+create table if not exists approved_invoice_facts (
+    id                       bigserial   primary key,
+    tenant_id                uuid        not null references tenants(id) on delete cascade,
+    company_id               uuid        references companies(id) on delete set null,
+    batch_id                 uuid        not null references invoice_batches(id) on delete cascade,
+    scan_run_id              uuid        references scan_runs(id) on delete set null,
+    source_row_id            bigint      not null references invoice_rows(id) on delete cascade,
+    export_event_id          bigint      references batch_export_events(id) on delete set null,
+    export_version           integer     not null,
+    fact_version             integer     not null,
+    fact_fingerprint         varchar(80) not null,
+    evidence_ref_type        varchar(80) not null,
+    evidence_ref_id          text        not null,
+    canonical_supplier_name  text,
+    supplier_posting_account varchar(100),
+    supplier_vat             varchar(100),
+    document_type            varchar(80),
+    invoice_number           text,
+    invoice_date             date,
+    description              text,
+    nominal_account_code     varchar(100),
+    nominal_account_name     varchar(255),
+    category                 varchar(255),
+    currency                 varchar(20),
+    reporting_currency       varchar(20),
+    tax_code                 varchar(50),
+    net_amount               numeric(14,2),
+    vat_amount               numeric(14,2),
+    total_amount             numeric(14,2),
+    reporting_net_amount     numeric(14,2),
+    reporting_vat_amount     numeric(14,2),
+    reporting_total_amount   numeric(14,2),
+    bcrs_amount              numeric(14,2),
+    deposit_amount           numeric(14,2),
+    source_row_status        varchar(40),
+    source_validation_status varchar(100),
+    source_review_required   boolean     not null default false,
+    confidence_score         numeric(5,2),
+    duplicate_exposure_count integer     not null default 0,
+    duplicate_exposure_status varchar(40),
+    created_at               timestamptz not null default now(),
+    constraint uq_approved_fact_batch_row_version unique (batch_id, source_row_id, fact_version)
+);
+
+create index if not exists ix_approved_facts_tenant_company_date on approved_invoice_facts(tenant_id, company_id, invoice_date);
+create index if not exists ix_approved_facts_supplier            on approved_invoice_facts(tenant_id, company_id, canonical_supplier_name);
+create index if not exists ix_approved_facts_nominal             on approved_invoice_facts(tenant_id, company_id, nominal_account_code);
+create index if not exists ix_approved_facts_batch_version       on approved_invoice_facts(batch_id, fact_version);
+create index if not exists ix_approved_facts_source_row          on approved_invoice_facts(source_row_id);
+create index if not exists ix_approved_facts_export_event        on approved_invoice_facts(export_event_id);
+
+
 -- =============================================================================
 -- End of schema
 -- =============================================================================

@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
-from app.db.models import Company, InvoiceBatch, InvoiceRow, User
+from app.db.models import Company, User
 from app.db.session import get_db
 from app.routers.auth import current_tenant_id, current_user
+from app.services import expense_insights
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -29,51 +28,7 @@ def get_summary(
     _user: User = Depends(current_user),
 ):
     _check_company(db, tenant_id, company_id)
-
-    base = db.query(InvoiceRow).filter(
-        InvoiceRow.tenant_id == tenant_id,
-        InvoiceRow.company_id == company_id,
-        InvoiceRow.scan_run_id == InvoiceBatch.current_scan_run_id,
-    )
-    base = base.join(InvoiceBatch, InvoiceRow.batch_id == InvoiceBatch.id)
-
-    total_rows = base.count()
-    needs_review = base.filter(InvoiceRow.review_required.is_(True)).count()
-
-    agg = (
-        db.query(
-            func.coalesce(func.sum(InvoiceRow.total_amount), 0).label("total_spend"),
-            func.coalesce(func.avg(InvoiceRow.confidence_score), 0).label("avg_confidence"),
-        )
-        .filter(
-            InvoiceRow.tenant_id == tenant_id,
-            InvoiceRow.company_id == company_id,
-            InvoiceRow.scan_run_id == InvoiceBatch.current_scan_run_id,
-        )
-        .join(InvoiceBatch, InvoiceRow.batch_id == InvoiceBatch.id)
-        .first()
-    )
-
-    distinct_suppliers = (
-        db.query(func.count(func.distinct(InvoiceRow.supplier_name)))
-        .filter(
-            InvoiceRow.tenant_id == tenant_id,
-            InvoiceRow.company_id == company_id,
-            InvoiceRow.scan_run_id == InvoiceBatch.current_scan_run_id,
-            InvoiceRow.supplier_name.isnot(None),
-        )
-        .join(InvoiceBatch, InvoiceRow.batch_id == InvoiceBatch.id)
-        .scalar()
-        or 0
-    )
-
-    return {
-        "total_rows": total_rows,
-        "needs_review": needs_review,
-        "total_spend": float(agg.total_spend) if agg else 0.0,
-        "avg_confidence": float(agg.avg_confidence) if agg else 0.0,
-        "distinct_suppliers": distinct_suppliers,
-    }
+    return expense_insights.approved_summary(db, tenant_id=tenant_id, company_id=company_id)
 
 
 @router.get("/monthly")
@@ -85,45 +40,7 @@ def get_monthly(
     _user: User = Depends(current_user),
 ):
     _check_company(db, tenant_id, company_id)
-    cutoff = date.today().replace(day=1) - timedelta(days=months * 31)
-
-    # Use date_trunc to group by month — stored in a single Python variable so
-    # SQLAlchemy emits the same SQL expression in SELECT and GROUP BY, avoiding
-    # the "must appear in GROUP BY" error that arises from repeated to_char calls
-    # with separate parameter placeholders.
-    month_expr = func.date_trunc("month", InvoiceRow.invoice_date)
-
-    rows = (
-        db.query(
-            month_expr.label("month"),
-            func.coalesce(func.sum(InvoiceRow.net_amount), 0).label("net"),
-            func.coalesce(func.sum(InvoiceRow.vat_amount), 0).label("vat"),
-            func.coalesce(func.sum(InvoiceRow.total_amount), 0).label("total"),
-            func.count(InvoiceRow.id).label("count"),
-        )
-        .filter(
-            InvoiceRow.tenant_id == tenant_id,
-            InvoiceRow.company_id == company_id,
-            InvoiceRow.scan_run_id == InvoiceBatch.current_scan_run_id,
-            InvoiceRow.invoice_date.isnot(None),
-            InvoiceRow.invoice_date >= cutoff,
-        )
-        .join(InvoiceBatch, InvoiceRow.batch_id == InvoiceBatch.id)
-        .group_by(text("1"))
-        .order_by(text("1"))
-        .all()
-    )
-
-    return [
-        {
-            "month": r.month.strftime("%Y-%m") if r.month else None,
-            "net": float(r.net),
-            "vat": float(r.vat),
-            "total": float(r.total),
-            "count": r.count,
-        }
-        for r in rows
-    ]
+    return expense_insights.approved_monthly(db, tenant_id=tenant_id, company_id=company_id, months=months)
 
 
 @router.get("/top-suppliers")
@@ -135,31 +52,60 @@ def get_top_suppliers(
     _user: User = Depends(current_user),
 ):
     _check_company(db, tenant_id, company_id)
+    return expense_insights.top_suppliers(db, tenant_id=tenant_id, company_id=company_id, limit=limit)
 
-    rows = (
-        db.query(
-            InvoiceRow.supplier_name,
-            func.coalesce(func.sum(InvoiceRow.total_amount), 0).label("total"),
-            func.count(InvoiceRow.id).label("count"),
-        )
-        .filter(
-            InvoiceRow.tenant_id == tenant_id,
-            InvoiceRow.company_id == company_id,
-            InvoiceRow.scan_run_id == InvoiceBatch.current_scan_run_id,
-            InvoiceRow.supplier_name.isnot(None),
-        )
-        .join(InvoiceBatch, InvoiceRow.batch_id == InvoiceBatch.id)
-        .group_by(InvoiceRow.supplier_name)
-        .order_by(func.coalesce(func.sum(InvoiceRow.total_amount), 0).desc())
-        .limit(limit)
-        .all()
-    )
 
-    return [
-        {
-            "supplier_name": r.supplier_name,
-            "total": float(r.total),
-            "count": r.count,
-        }
-        for r in rows
-    ]
+@router.get("/category-spend")
+def get_category_spend(
+    company_id: UUID = Query(...),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    tenant_id=Depends(current_tenant_id),
+    _user: User = Depends(current_user),
+):
+    _check_company(db, tenant_id, company_id)
+    return expense_insights.category_spend(db, tenant_id=tenant_id, company_id=company_id, limit=limit)
+
+
+@router.get("/duplicate-exposure")
+def get_duplicate_exposure(
+    company_id: UUID = Query(...),
+    db: Session = Depends(get_db),
+    tenant_id=Depends(current_tenant_id),
+    _user: User = Depends(current_user),
+):
+    _check_company(db, tenant_id, company_id)
+    return expense_insights.duplicate_exposure(db, tenant_id=tenant_id, company_id=company_id)
+
+
+@router.get("/vat-exceptions")
+def get_vat_exceptions(
+    company_id: UUID = Query(...),
+    db: Session = Depends(get_db),
+    tenant_id=Depends(current_tenant_id),
+    _user: User = Depends(current_user),
+):
+    _check_company(db, tenant_id, company_id)
+    return expense_insights.vat_exceptions(db, tenant_id=tenant_id, company_id=company_id)
+
+
+@router.get("/credit-note-impact")
+def get_credit_note_impact(
+    company_id: UUID = Query(...),
+    db: Session = Depends(get_db),
+    tenant_id=Depends(current_tenant_id),
+    _user: User = Depends(current_user),
+):
+    _check_company(db, tenant_id, company_id)
+    return expense_insights.credit_note_impact(db, tenant_id=tenant_id, company_id=company_id)
+
+
+@router.get("/variance")
+def get_variance(
+    company_id: UUID = Query(...),
+    db: Session = Depends(get_db),
+    tenant_id=Depends(current_tenant_id),
+    _user: User = Depends(current_user),
+):
+    _check_company(db, tenant_id, company_id)
+    return expense_insights.variance(db, tenant_id=tenant_id, company_id=company_id)

@@ -103,7 +103,7 @@ def test_phase9_alembic_migration_declares_current_head_and_learning_tables():
     src = (ROOT / "alembic/versions/2026_07_13_0012_learning_recommendation_agent.py").read_text(
         encoding="utf-8"
     )
-    assert f'revision = "{CURRENT_ALEMBIC_REVISION}"' in src
+    assert 'revision = "20260713_0012"' in src
     assert 'down_revision = "20260712_0011"' in src
     for token in [
         "learning_recommendation_runs",
@@ -112,6 +112,22 @@ def test_phase9_alembic_migration_declares_current_head_and_learning_tables():
         "learning_recommendation_replay_results",
         "learning_reviewer_decisions",
         "learning_promotions",
+    ]:
+        assert token in src
+
+
+def test_phase10_alembic_migration_declares_current_head_and_approved_facts():
+    src = (ROOT / "alembic/versions/2026_07_13_0013_approved_invoice_facts.py").read_text(
+        encoding="utf-8"
+    )
+    assert f'revision = "{CURRENT_ALEMBIC_REVISION}"' in src
+    assert 'down_revision = "20260713_0012"' in src
+    for token in [
+        "approved_invoice_facts",
+        "canonical_supplier_name",
+        "reporting_total_amount",
+        "duplicate_exposure_count",
+        "uq_approved_fact_batch_row_version",
     ]:
         assert token in src
 

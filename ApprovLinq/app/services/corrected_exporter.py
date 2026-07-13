@@ -176,6 +176,10 @@ def export_batch_corrected(
         file_path=str(export_path), file_bytes=export_bytes, storage_backend="database+local", row_count=len(rows),
     )
     db.add(ev)
+    db.flush()
+    from app.services.approved_invoice_facts import materialise_approved_invoice_facts_for_export
+    fact_count = materialise_approved_invoice_facts_for_export(db, batch=batch, export_event=ev)
+    logger.info("approved invoice facts materialised batch=%s version=%d facts=%d", batch.id, next_version, fact_count)
     batch.current_export_version = next_version
     batch.exported_at = datetime.utcnow()
     batch.exported_by = user.id
