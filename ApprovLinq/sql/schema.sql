@@ -554,6 +554,131 @@ create index if not exists ix_duplicate_candidates_status         on invoice_dup
 create unique index if not exists uq_duplicate_candidates_pair_type on invoice_duplicate_candidates(row_id, candidate_row_id, match_type);
 
 
+-- ---------------------------------------------------------------------------
+-- CONTROLLED LEARNING RECOMMENDATIONS
+-- ---------------------------------------------------------------------------
+create table if not exists learning_recommendation_runs (
+    id                  bigserial   primary key,
+    tenant_id           uuid        not null references tenants(id) on delete cascade,
+    company_id          uuid        references companies(id) on delete set null,
+    status              varchar(40) not null default 'running',
+    requested_by        uuid        references users(id) on delete set null,
+    settings_json       json,
+    summary_json        json,
+    proposals_created   integer     not null default 0,
+    evidence_count      integer     not null default 0,
+    replay_count        integer     not null default 0,
+    last_error          text,
+    created_at          timestamptz not null default now(),
+    started_at          timestamptz not null default now(),
+    completed_at        timestamptz
+);
+
+create index if not exists ix_learning_runs_tenant_company on learning_recommendation_runs(tenant_id, company_id);
+create index if not exists ix_learning_runs_status         on learning_recommendation_runs(status);
+create index if not exists ix_learning_runs_created_at     on learning_recommendation_runs(created_at);
+
+create table if not exists learning_recommendation_proposals (
+    id                    bigserial   primary key,
+    run_id                bigint      not null references learning_recommendation_runs(id) on delete cascade,
+    tenant_id             uuid        not null references tenants(id) on delete cascade,
+    company_id            uuid        references companies(id) on delete set null,
+    proposal_type         varchar(80) not null,
+    target_entity_type    varchar(80) not null,
+    status                varchar(40) not null default 'proposed',
+    title                 text        not null,
+    summary               text,
+    proposed_payload_json json        not null,
+    canary_scope_json     json,
+    evidence_summary_json json,
+    confidence            numeric(6,4),
+    quality_score         numeric(6,4),
+    latency_score         numeric(6,4),
+    cost_score            numeric(6,4),
+    risk_level            varchar(40) not null default 'medium',
+    fingerprint           varchar(80) not null,
+    decided_by            uuid        references users(id) on delete set null,
+    decided_at            timestamptz,
+    decision_note         text,
+    created_at            timestamptz not null default now(),
+    updated_at            timestamptz not null default now()
+);
+
+create index if not exists ix_learning_proposals_run            on learning_recommendation_proposals(run_id);
+create index if not exists ix_learning_proposals_tenant_company on learning_recommendation_proposals(tenant_id, company_id);
+create index if not exists ix_learning_proposals_status         on learning_recommendation_proposals(status);
+create index if not exists ix_learning_proposals_type           on learning_recommendation_proposals(proposal_type);
+create index if not exists ix_learning_proposals_fingerprint    on learning_recommendation_proposals(fingerprint);
+
+create table if not exists learning_recommendation_evidence (
+    id              bigserial   primary key,
+    proposal_id     bigint      not null references learning_recommendation_proposals(id) on delete cascade,
+    evidence_type   varchar(80) not null,
+    source_table    varchar(120),
+    source_id       text,
+    batch_id        uuid        references invoice_batches(id) on delete set null,
+    scan_run_id     uuid        references scan_runs(id) on delete set null,
+    row_id          bigint,
+    field_name      varchar(80),
+    observed_value  text,
+    expected_value  text,
+    evidence_json   json,
+    created_at      timestamptz not null default now()
+);
+
+create index if not exists ix_learning_evidence_proposal  on learning_recommendation_evidence(proposal_id);
+create index if not exists ix_learning_evidence_batch_row on learning_recommendation_evidence(batch_id, row_id);
+
+create table if not exists learning_recommendation_replay_results (
+    id                  bigserial   primary key,
+    proposal_id         bigint      not null references learning_recommendation_proposals(id) on delete cascade,
+    batch_id            uuid        references invoice_batches(id) on delete set null,
+    scan_run_id         uuid        references scan_runs(id) on delete set null,
+    row_id              bigint,
+    replay_status       varchar(40) not null,
+    changed_fields_json json,
+    before_json         json,
+    after_json          json,
+    quality_score       numeric(6,4),
+    latency_ms          integer,
+    cost_estimate       numeric(10,4),
+    evidence_json       json,
+    created_at          timestamptz not null default now()
+);
+
+create index if not exists ix_learning_replay_proposal  on learning_recommendation_replay_results(proposal_id);
+create index if not exists ix_learning_replay_batch_row on learning_recommendation_replay_results(batch_id, row_id);
+
+create table if not exists learning_reviewer_decisions (
+    id           bigserial   primary key,
+    proposal_id  bigint      not null references learning_recommendation_proposals(id) on delete cascade,
+    decision     varchar(40) not null,
+    reviewer_id  uuid        references users(id) on delete set null,
+    note         text,
+    created_at   timestamptz not null default now()
+);
+
+create index if not exists ix_learning_decisions_proposal on learning_reviewer_decisions(proposal_id);
+
+create table if not exists learning_promotions (
+    id                    bigserial   primary key,
+    proposal_id           bigint      not null references learning_recommendation_proposals(id) on delete cascade,
+    promoted_entity_type  varchar(80) not null,
+    promoted_entity_id    text        not null,
+    previous_state_json   json,
+    promoted_state_json   json,
+    rollback_state_json   json,
+    promoted_by           uuid        references users(id) on delete set null,
+    promoted_at           timestamptz not null default now(),
+    rollback_status       varchar(40),
+    rolled_back_by        uuid        references users(id) on delete set null,
+    rolled_back_at        timestamptz
+);
+
+create index if not exists ix_learning_promotions_proposal on learning_promotions(proposal_id);
+create index if not exists ix_learning_promotions_entity   on learning_promotions(promoted_entity_type, promoted_entity_id);
+
+
 -- =============================================================================
 -- End of schema
 -- =============================================================================

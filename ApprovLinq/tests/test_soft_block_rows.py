@@ -235,6 +235,6 @@ def test_soft_block_schema_tokens_are_declared():
         "ix_invoice_rows_export_status",
     ]:
         assert token in model_src or token == "ix_invoice_rows_export_status"
-        assert token in main_src
         assert token in migration_src
         assert token in schema_src
+    assert "Base.metadata.create_all" not in main_src

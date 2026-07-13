@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.db.schema_version import CURRENT_ALEMBIC_REVISION, SchemaVersionError, assert_database_schema_current
 from app.db.session import engine
-from app.routers import analytics, auth, admin, admin_export_templates, batches, health, tenant
+from app.routers import analytics, auth, admin, admin_export_templates, batches, health, learning, tenant
 
 logger = logging.getLogger(__name__)
 SCHEMA_VERSION_STATUS = None
@@ -157,3 +157,4 @@ app.include_router(admin.router)
 app.include_router(admin_export_templates.router)
 app.include_router(tenant.router)
 app.include_router(analytics.router)
+app.include_router(learning.router)

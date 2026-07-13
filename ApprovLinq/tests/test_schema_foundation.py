@@ -49,7 +49,9 @@ def test_production_startup_schema_mutation_has_been_removed():
 
 def test_docker_runs_alembic_before_uvicorn():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert "alembic upgrade head && uvicorn app.main:app" in dockerfile
+    assert "alembic upgrade head &&" in dockerfile
+    assert "uvicorn app.main:app" in dockerfile
+    assert dockerfile.find("alembic upgrade head") < dockerfile.find("uvicorn app.main:app")
 
 
 def test_invoice_read_detail_provider_fields_are_prefixed_not_case_colliding():
@@ -91,9 +93,26 @@ def test_phase8_alembic_migration_declares_current_head_and_durable_jobs():
     src = (ROOT / "alembic/versions/2026_07_12_0011_durable_scan_jobs.py").read_text(
         encoding="utf-8"
     )
-    assert f'revision = "{CURRENT_ALEMBIC_REVISION}"' in src
+    assert 'revision = "20260712_0011"' in src
     assert 'down_revision = "20260710_0010"' in src
     for token in ["scan_jobs", "scan_job_pages", "lease_until", "heartbeat_at", "uq_scan_job_pages_run_file_page"]:
+        assert token in src
+
+
+def test_phase9_alembic_migration_declares_current_head_and_learning_tables():
+    src = (ROOT / "alembic/versions/2026_07_13_0012_learning_recommendation_agent.py").read_text(
+        encoding="utf-8"
+    )
+    assert f'revision = "{CURRENT_ALEMBIC_REVISION}"' in src
+    assert 'down_revision = "20260712_0011"' in src
+    for token in [
+        "learning_recommendation_runs",
+        "learning_recommendation_proposals",
+        "learning_recommendation_evidence",
+        "learning_recommendation_replay_results",
+        "learning_reviewer_decisions",
+        "learning_promotions",
+    ]:
         assert token in src
 
 

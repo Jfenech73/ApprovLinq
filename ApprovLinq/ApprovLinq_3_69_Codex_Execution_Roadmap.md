@@ -330,7 +330,7 @@ Read attached :
 
 ApprovLinq_3_69_Codex_Execution_Roadmap.md and build zip
 
-Focus only on Phase 8 — Durable scan processing.
+Focus only on Phase 9 — Controlled learning recommendation agent.
 
 Inspect the current implementation and prepare a detailed implementation plan.
 
@@ -359,7 +359,7 @@ Read attached :
 
 ApprovLinq_3_69_Codex_Execution_Roadmap.md and build zip
 
-Implement only Phase 8 — Durable scan processing, following the approved plan.
+Implement only Phase 9 — Controlled learning recommendation agent, following the approved plan.
 
 Requirements:
 
