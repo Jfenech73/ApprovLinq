@@ -518,38 +518,37 @@ def test_provider_gateway_delegates_to_extractor(monkeypatch):
     assert calls == [("invoice.pdf", 2, "summary", "key", "Company")]
 
 
-def test_process_endpoint_queues_scan_orchestrator(monkeypatch):
+def test_process_endpoint_enqueues_durable_scan_job(monkeypatch):
     from app.routers import batches
 
     batch = type("Batch", (), {"id": uuid.uuid4(), "status": "created", "notes": ""})()
+    job = type("Job", (), {"id": 7, "scan_run_id": uuid.uuid4()})()
+
+    class FakeQuery:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return None
 
     class FakeDb:
         committed = False
 
+        def query(self, *_args):
+            return FakeQuery()
+
         def commit(self):
             self.committed = True
 
-    class FakeBackgroundTasks:
-        def __init__(self):
-            self.tasks = []
-
-        def add_task(self, fn, *args):
-            self.tasks.append((fn, args))
-
     monkeypatch.setattr(batches, "_get_batch_for_tenant", lambda db, batch_id, tenant_id: batch)
-    monkeypatch.setattr(batches, "_set_active", lambda batch_id: True)
+    monkeypatch.setattr("app.services.scan_jobs.enqueue_scan_job", lambda db, batch_arg: job)
 
-    background_tasks = FakeBackgroundTasks()
     db = FakeDb()
-    result = batches.process_batch(batch.id, background_tasks, db=db, tenant_id=uuid.uuid4(), _user=object())
+    result = batches.process_batch(batch.id, db=db, tenant_id=uuid.uuid4(), _user=object())
 
-    assert result == {"ok": True, "status": "processing"}
+    assert result == {"ok": True, "status": "processing", "job_id": 7, "scan_run_id": str(job.scan_run_id)}
     assert batch.status == "processing"
     assert db.committed is True
-    queued_fn, queued_args = background_tasks.tasks[0]
-    assert queued_fn.__module__ == "app.services.scan_orchestrator"
-    assert queued_fn.__name__ == "process_batch_job"
-    assert queued_args[0] == batch.id
 
 
 def test_duplicate_resolver_delegates_without_changing_contract(monkeypatch):

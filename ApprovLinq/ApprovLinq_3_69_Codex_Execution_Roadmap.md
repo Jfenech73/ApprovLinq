@@ -330,7 +330,7 @@ Read attached :
 
 ApprovLinq_3_69_Codex_Execution_Roadmap.md and build zip
 
-Focus only on Phase 6 — Candidate-only saved regions and rules.
+Focus only on Phase 8 — Durable scan processing.
 
 Inspect the current implementation and prepare a detailed implementation plan.
 
@@ -359,7 +359,7 @@ Read attached :
 
 ApprovLinq_3_69_Codex_Execution_Roadmap.md and build zip
 
-Implement only Phase 6 — Candidate-only saved regions and rules, following the approved plan.
+Implement only Phase 8 — Durable scan processing, following the approved plan.
 
 Requirements:
 
@@ -383,4 +383,5 @@ At completion provide:
 7. Rollback steps.
 8. Known limitations.
 9. Stop. Do not begin the next phase.
+10. Provide a zipped build of the phase package.
 ```

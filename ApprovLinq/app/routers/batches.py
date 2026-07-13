@@ -9,13 +9,13 @@ from pathlib import Path
 from threading import Lock
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import inspect, or_
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
-from app.db.models import INVOICE_ROW_STATUS_ACTIVE, Company, InvoiceBatch, InvoiceFile, InvoiceReadDetail, InvoiceReadHeader, InvoiceRow, IssueLog, TenantNominalAccount, TenantSupplier, User
+from app.db.models import INVOICE_ROW_STATUS_ACTIVE, Company, InvoiceBatch, InvoiceFile, InvoiceReadDetail, InvoiceReadHeader, InvoiceRow, IssueLog, ScanJob, ScanJobPage, ScanRun, TenantNominalAccount, TenantSupplier, User
 
 try:
     from app.services.classify_lines import classify_line as _classify_line
@@ -4400,7 +4400,7 @@ def _exportable_rows_query(db: Session, batch: InvoiceBatch):
     return _current_rows_query(db, batch).filter(InvoiceRow.row_status == INVOICE_ROW_STATUS_ACTIVE)
 
 
-def _process_batch_job(batch_id: UUID, tenant_id) -> None:
+def _process_batch_job(batch_id: UUID, tenant_id, *, scan_run_id=None, scan_job_id: int | None = None, worker_id: str | None = None) -> None:
     db = SessionLocal()
     try:
         batch = db.get(InvoiceBatch, batch_id)
@@ -4413,8 +4413,11 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
 
         logger.info("_process_batch_job: batch %s started tenant=%s", batch_id, _batch_tenant_id)
 
-        scan_run = create_scan_run(db, batch)
+        scan_run = db.get(ScanRun, scan_run_id) if scan_run_id is not None else None
+        if scan_run is None:
+            scan_run = create_scan_run(db, batch)
         scan_run_id = scan_run.id
+        batch.current_scan_run_id = scan_run_id
         db.commit()
 
         files = db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch_id).order_by(InvoiceFile.uploaded_at.asc(), InvoiceFile.id.asc()).all()
@@ -4462,6 +4465,12 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 page_count = 0
             invoice_file.page_count = page_count
             total_target_pages += page_count
+        if scan_job_id is not None:
+            from app.services.scan_jobs import initialise_job_pages
+
+            scan_job = db.get(ScanJob, scan_job_id)
+            if scan_job is not None:
+                initialise_job_pages(db, scan_job, files)
         db.commit()
 
         batch.status = "processing"
@@ -4525,6 +4534,13 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
         extraction_method_counts: dict[str, int] = {}
         provider_baseline_mode = bool(getattr(settings, "scan_provider_baseline_mode", False))
         perf_ctx = ScanPerformanceContext(batch_id=batch_id)
+        durable_page_tracking = scan_job_id is not None
+        if durable_page_tracking:
+            from app.services.scan_jobs import (
+                get_job_page,
+                mark_page_completed,
+                mark_page_running,
+            )
         _batch_perf_start = __import__("time").perf_counter()
         for file_index, invoice_file in enumerate(files, start=1):
             inserted_rows = 0
@@ -4536,8 +4552,25 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                 page_count = invoice_file.page_count or 0
                 consecutive_page_timeouts = 0
                 for page_index in range(page_count):
+                    job_page = None
+                    if durable_page_tracking:
+                        job_page = get_job_page(db, job_id=scan_job_id, source_file_id=invoice_file.id, page_no=page_index + 1)
+                        if job_page is not None and job_page.status == "completed":
+                            existing_rows = db.query(InvoiceRow).filter(
+                                InvoiceRow.scan_run_id == scan_run_id,
+                                InvoiceRow.source_file_id == invoice_file.id,
+                                InvoiceRow.page_no == page_index + 1,
+                            ).count()
+                            processed_pages += 1
+                            inserted_rows += max(existing_rows, 1)
+                            total_rows += existing_rows
+                            continue
+                        if job_page is not None:
+                            mark_page_running(db, job_page, worker_id=worker_id)
+                            db.commit()
                     try:
                         _page_perf_start = __import__("time").perf_counter()
+                        page_row_count_before = total_rows
                         pdf_path = str(materialize_invoice_file(invoice_file))
                         with perf_ctx.timed("extraction_provider"):
                             row_payloads = _process_page_rows_with_timeout(
@@ -4791,6 +4824,8 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                                         if bcrs_reason and bcrs_reason not in reasons:
                                             reasons.append(bcrs_reason)
                                         _r.review_reasons = "|".join(reasons)
+                        if durable_page_tracking and job_page is not None:
+                            mark_page_completed(db, job_page, row_count=max(0, total_rows - page_row_count_before))
                         processed_pages += 1
                         # Per-page progress: direct UPDATE with stale-overwrite guard.
                         # WHERE page_count < processed_pages ensures a lower counter
@@ -4849,6 +4884,8 @@ def _process_batch_job(batch_id: UUID, tenant_id) -> None:
                             page_text_raw=f"PAGE_ERROR={str(page_error)}",
                         )
                         db.add(fallback_row)
+                        if durable_page_tracking and job_page is not None:
+                            mark_page_completed(db, job_page, row_count=1)
                         _pct_err = int(min(100, round((processed_pages / total_target_pages) * 100))) if total_target_pages > 0 else 0
                         _note_err = (
                             f"Processing file {file_index}/{len(files)}: "
@@ -5081,24 +5118,54 @@ def upload_files(batch_id: UUID, files: list[UploadFile] = File(...), db: Sessio
 
 
 @router.post("/{batch_id}/process")
-def process_batch(batch_id: UUID, background_tasks: BackgroundTasks, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
+def process_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)
-    if not _set_active(batch.id):
-        raise HTTPException(status_code=409, detail="Batch is already processing")
-    from app.services.scan_orchestrator import process_batch_job
+    from app.services.scan_jobs import enqueue_scan_job
 
-    background_tasks.add_task(process_batch_job, batch.id, tenant_id)
+    active_job = db.query(ScanJob).filter(
+        ScanJob.batch_id == batch.id,
+        ScanJob.status.in_(("queued", "claimed", "running")),
+    ).first()
+    if active_job is not None:
+        raise HTTPException(status_code=409, detail="Batch is already processing")
+
+    job = enqueue_scan_job(db, batch)
     batch.status = "processing"
-    batch.notes = "Processing started"
+    batch.notes = f"Processing queued as durable job {job.id}"
     db.commit()
-    return {"ok": True, "status": batch.status}
+    return {"ok": True, "status": batch.status, "job_id": job.id, "scan_run_id": str(job.scan_run_id) if job.scan_run_id else None}
+
+
+@router.post("/{batch_id}/cancel")
+def cancel_batch_processing(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
+    batch = _get_batch_for_tenant(db, batch_id, tenant_id)
+    active_job = db.query(ScanJob).filter(
+        ScanJob.batch_id == batch.id,
+        ScanJob.status.in_(("queued", "claimed", "running")),
+    ).order_by(ScanJob.created_at.desc(), ScanJob.id.desc()).first()
+    if active_job is None:
+        raise HTTPException(status_code=404, detail="No active scan job found for batch")
+    from app.services.scan_jobs import request_cancel_job
+
+    cancelled = request_cancel_job(db, active_job.id)
+    if not cancelled:
+        raise HTTPException(status_code=409, detail="Scan job could not be cancelled")
+    batch.notes = "Cancellation requested for durable scan job"
+    if active_job.status == "queued":
+        batch.status = "created"
+    db.commit()
+    return {"ok": True, "job_id": active_job.id, "status": batch.status}
 
 
 @router.delete("/{batch_id}")
 def delete_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)
+    active_job = db.query(ScanJob).filter(
+        ScanJob.batch_id == batch.id,
+        ScanJob.status.in_(("queued", "claimed", "running")),
+    ).first()
     with _ACTIVE_BATCHES_LOCK:
-        if str(batch.id) in _ACTIVE_BATCHES or batch.status == "processing":
+        if str(batch.id) in _ACTIVE_BATCHES or active_job is not None or batch.status == "processing":
             raise HTTPException(status_code=409, detail="Cannot delete a batch while it is processing")
 
     upload_folder = batch_upload_folder(batch.id)
@@ -5217,6 +5284,13 @@ def get_batch_progress(batch_id: UUID, db: Session = Depends(get_db), tenant_id=
     total_pages = sum((f.page_count or 0) for f in files)
     processed_pages = batch.page_count or 0
     percent = int(min(100, round((processed_pages / total_pages) * 100))) if total_pages > 0 else 0
+    active_job = db.query(ScanJob).filter(
+        ScanJob.batch_id == batch_id,
+        ScanJob.status.in_(("queued", "claimed", "running")),
+    ).order_by(ScanJob.created_at.desc(), ScanJob.id.desc()).first()
+    job_pages = []
+    if active_job is not None:
+        job_pages = db.query(ScanJobPage).filter(ScanJobPage.job_id == active_job.id).all()
 
     # ── Per-file review state (review-as-you-go) ─────────────────────────────
     # A file "needs review" when any of its rows has confidence below the
@@ -5281,6 +5355,13 @@ def get_batch_progress(batch_id: UUID, db: Session = Depends(get_db), tenant_id=
         "total_files": total_files,
         "percent": percent,
         "files": file_states,
+        "job_id": active_job.id if active_job else None,
+        "job_status": active_job.status if active_job else None,
+        "scan_run_id": str(batch.current_scan_run_id) if getattr(batch, "current_scan_run_id", None) else None,
+        "queued_pages": sum(1 for p in job_pages if p.status == "queued"),
+        "running_pages": sum(1 for p in job_pages if p.status in {"claimed", "running"}),
+        "completed_pages": sum(1 for p in job_pages if p.status == "completed"),
+        "failed_pages": sum(1 for p in job_pages if p.status == "failed"),
     }
 
 

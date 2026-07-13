@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -46,19 +45,14 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 @app.on_event("startup")
 async def recover_stuck_batches() -> None:
     from app.db.session import SessionLocal
-    from app.db.models import InvoiceBatch
+    from app.services.scan_jobs import release_stale_jobs
     db = SessionLocal()
     try:
-        stuck = db.query(InvoiceBatch).filter(InvoiceBatch.status == "processing").all()
-        for batch in stuck:
-            batch.status = "partial"
-            batch.notes = "Processing was interrupted by a server restart. Re-process to complete."
-            batch.processed_at = datetime.now(timezone.utc)
-        if stuck:
-            db.commit()
-            logger.info("Recovered %d stuck batch(es) from 'processing' status on startup", len(stuck))
+        released = release_stale_jobs(db)
+        if released:
+            logger.info("Released %d stale durable scan job lease(s) on startup", released)
     except Exception as exc:
-        logger.warning("Failed to recover stuck batches on startup: %s", exc)
+        logger.warning("Failed to recover durable scan jobs on startup: %s", exc)
         try:
             db.rollback()
         except Exception:

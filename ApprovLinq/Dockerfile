@@ -31,4 +31,4 @@ COPY ApprovLinq /app
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "alembic upgrade head && if [ \"${APPROVLINQ_START_SCAN_WORKER:-1}\" != \"0\" ]; then python scripts/scan_worker.py & fi && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

@@ -59,6 +59,7 @@ REQUIRED_ENV_KEYS = {
     "EXTRACTION_CONSECUTIVE_TIMEOUT_LIMIT",
     "NORMALIZE_PAGE_ORIENTATION",
     "SCAN_PROVIDER_BASELINE_MODE",
+    "APPROVLINQ_START_SCAN_WORKER",
 }
 SECRET_VALUE_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{10,}"),
@@ -189,5 +190,7 @@ def test_ignore_files_and_docker_context_exclude_secrets():
 
     assert "COPY ApprovLinq/requirements.txt /app/requirements.txt" in dockerfile
     assert "COPY ApprovLinq /app" in dockerfile
+    assert "APPROVLINQ_START_SCAN_WORKER" in dockerfile
+    assert "python scripts/scan_worker.py" in dockerfile
     assert "COPY requirements.txt /app/requirements.txt" not in dockerfile
     assert "COPY . /app" not in dockerfile

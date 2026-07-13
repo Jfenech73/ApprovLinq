@@ -14,6 +14,7 @@ from sqlalchemy import (
     UniqueConstraint,
     LargeBinary,
     BigInteger,
+    Index,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -29,6 +30,25 @@ INVOICE_ROW_BLOCKED_STATUSES = frozenset({
     "superseded",
 })
 INVOICE_ROW_STATUSES = frozenset({INVOICE_ROW_STATUS_ACTIVE, *INVOICE_ROW_BLOCKED_STATUSES})
+
+SCAN_JOB_STATUS_QUEUED = "queued"
+SCAN_JOB_STATUS_CLAIMED = "claimed"
+SCAN_JOB_STATUS_RUNNING = "running"
+SCAN_JOB_STATUS_COMPLETED = "completed"
+SCAN_JOB_STATUS_FAILED = "failed"
+SCAN_JOB_STATUS_CANCELLED = "cancelled"
+SCAN_JOB_ACTIVE_STATUSES = frozenset({
+    SCAN_JOB_STATUS_QUEUED,
+    SCAN_JOB_STATUS_CLAIMED,
+    SCAN_JOB_STATUS_RUNNING,
+})
+
+SCAN_JOB_PAGE_STATUS_QUEUED = "queued"
+SCAN_JOB_PAGE_STATUS_CLAIMED = "claimed"
+SCAN_JOB_PAGE_STATUS_RUNNING = "running"
+SCAN_JOB_PAGE_STATUS_COMPLETED = "completed"
+SCAN_JOB_PAGE_STATUS_FAILED = "failed"
+SCAN_JOB_PAGE_STATUS_SKIPPED = "skipped"
 
 
 def invoice_row_export_active(row: object) -> bool:
@@ -179,6 +199,69 @@ class ScanRun(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class ScanJob(Base):
+    __tablename__ = "scan_jobs"
+    __table_args__ = (
+        Index("ix_scan_jobs_status", "status"),
+        Index("ix_scan_jobs_lease_until", "lease_until"),
+        Index("ix_scan_jobs_batch", "batch_id"),
+        Index("ix_scan_jobs_scan_run", "scan_run_id"),
+        Index("ix_scan_jobs_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True)
+    company_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
+    scan_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(40), default=SCAN_JOB_STATUS_QUEUED, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
+class ScanJobPage(Base):
+    __tablename__ = "scan_job_pages"
+    __table_args__ = (
+        UniqueConstraint("scan_run_id", "source_file_id", "page_no", name="uq_scan_job_pages_run_file_page"),
+        Index("ix_scan_job_pages_job", "job_id"),
+        Index("ix_scan_job_pages_status", "status"),
+        Index("ix_scan_job_pages_lease_until", "lease_until"),
+        Index("ix_scan_job_pages_batch", "batch_id"),
+        Index("ix_scan_job_pages_scan_run", "scan_run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("scan_jobs.id", ondelete="CASCADE"), nullable=False)
+    batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
+    scan_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("scan_runs.id", ondelete="CASCADE"), nullable=False)
+    source_file_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("invoice_files.id", ondelete="CASCADE"), nullable=False)
+    page_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default=SCAN_JOB_PAGE_STATUS_QUEUED, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
 
 
 class InvoiceBatch(Base):

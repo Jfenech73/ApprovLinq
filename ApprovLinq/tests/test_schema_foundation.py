@@ -81,9 +81,19 @@ def test_phase6_alembic_migration_declares_current_head_and_candidate_envelope()
     src = (ROOT / "alembic/versions/2026_07_10_0010_candidate_envelope_saved_regions_rules.py").read_text(
         encoding="utf-8"
     )
-    assert f'revision = "{CURRENT_ALEMBIC_REVISION}"' in src
+    assert 'revision = "20260710_0010"' in src
     assert 'down_revision = "20260710_0009"' in src
     for token in ["candidate_status", "validation_status", "region_id", "identity_score"]:
+        assert token in src
+
+
+def test_phase8_alembic_migration_declares_current_head_and_durable_jobs():
+    src = (ROOT / "alembic/versions/2026_07_12_0011_durable_scan_jobs.py").read_text(
+        encoding="utf-8"
+    )
+    assert f'revision = "{CURRENT_ALEMBIC_REVISION}"' in src
+    assert 'down_revision = "20260710_0010"' in src
+    for token in ["scan_jobs", "scan_job_pages", "lease_until", "heartbeat_at", "uq_scan_job_pages_run_file_page"]:
         assert token in src
 
 
