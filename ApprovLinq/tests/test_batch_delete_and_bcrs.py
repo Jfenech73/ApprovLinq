@@ -163,8 +163,10 @@ class TestBatchDeleteDB:
         """If batch is in _ACTIVE_BATCHES, delete must return 409."""
         import app.routers.batches as batches_module
         fake_id = uuid.uuid4()
+        tenant_id = uuid.uuid4()
         fake_batch = MagicMock()
         fake_batch.id = fake_id
+        fake_batch.tenant_id = tenant_id
         fake_db = MagicMock()
         fake_db.get.return_value = fake_batch
         # Temporarily add to active set
@@ -176,7 +178,7 @@ class TestBatchDeleteDB:
                 batches_module.delete_batch(
                     batch_id=fake_id,
                     db=fake_db,
-                    tenant_id=uuid.uuid4(),
+                    tenant_id=tenant_id,
                     _user=MagicMock(),
                 )
             assert exc_info.value.status_code == 409

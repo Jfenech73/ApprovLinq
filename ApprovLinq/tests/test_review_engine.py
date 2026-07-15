@@ -114,10 +114,18 @@ class TestAutoApproval:
     def test_only_low_reasons_auto_approved(self):
         rd = compute_review_decision(
             _CLEAN,
-            supplier_reasons=["deposit_component_detected:1.00", "page_quality_low"],
+            supplier_reasons=["page_quality_low"],
             confidence=0.9,
         )
         assert rd.auto_approved is True
+
+    def test_deposit_component_not_auto_approved(self):
+        rd = compute_review_decision(
+            _CLEAN,
+            supplier_reasons=["deposit_component_detected:1.00", "page_quality_low"],
+            confidence=0.9,
+        )
+        assert rd.auto_approved is False
 
     def test_medium_reason_not_auto_approved(self):
         rd = compute_review_decision(

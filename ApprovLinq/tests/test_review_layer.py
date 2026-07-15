@@ -133,7 +133,7 @@ def test_nominal_outside_master_raises_without_force_add(db, fixtures):
     f = fixtures
     with pytest.raises(ValueError, match="nominal_account_code not in master list"):
         cs.apply_field_changes(db, batch=f["batch"], row=f["row"],
-                               changes={"nominal_account_code": "9999"}, user=f["user"])
+                               changes={"nominal_account_code": "9998"}, user=f["user"])
 
 
 def test_nominal_force_add_raises_because_required_fields_missing(db, fixtures):
@@ -142,11 +142,11 @@ def test_nominal_force_add_raises_because_required_fields_missing(db, fixtures):
     with pytest.raises(ValueError, match="Cannot force-add nominal account"):
         cs.apply_field_changes(
             db, batch=f["batch"], row=f["row"],
-            changes={"nominal_account_code": "9999"},
+            changes={"nominal_account_code": "9998"},
             user=f["user"], force_add=True, note="new account",
         )
     rows = db.execute(
-        select(TenantNominalAccount).where(TenantNominalAccount.account_code == "9999")
+        select(TenantNominalAccount).where(TenantNominalAccount.account_code == "9998")
     ).scalars().all()
     assert len(rows) == 0
 

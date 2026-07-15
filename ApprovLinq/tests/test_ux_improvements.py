@@ -15,6 +15,9 @@ Items covered:
 from __future__ import annotations
 import re, os
 
+def _read(path: str) -> str:
+    return open(path, encoding="utf-8").read()
+
 
 # ── BCRS helpers ──────────────────────────────────────────────────────────────
 def _pm(text):
@@ -55,81 +58,81 @@ _extract=_load_extract()
 
 class TestCollapsibleSections:
     def test_batches_wrapper(self):
-        h=open("app/static/scanner.html").read()
+        h=_read("app/static/scanner.html")
         assert 'id="batchesSectionBody"' in h and 'id="batchesSectionToggle"' in h
     def test_rows_section_removed_and_batch_actions_present(self):
-        h=open("app/static/scanner.html").read()
+        h=_read("app/static/scanner.html")
         assert 'id="rowsSectionBody"' not in h and 'id="rowsSectionToggle"' not in h
         assert "Actions" in h
-        js=open("app/static/js/app.js").read()
+        js=_read("app/static/js/app.js")
         assert 'data-batch-action="view"' in js
         assert 'data-batch-action="review"' in js
         assert 'data-batch-action="export"' in js
     def test_wire_collapsible(self):
-        assert "wireCollapsible" in open("app/static/js/app.js").read()
+        assert "wireCollapsible" in _read("app/static/js/app.js")
     def test_session_storage(self):
-        assert "sessionStorage" in open("app/static/js/app.js").read()
+        assert "sessionStorage" in _read("app/static/js/app.js")
     def test_css(self):
-        assert "section-collapsed" in open("app/static/css/components.css").read()
+        assert "section-collapsed" in _read("app/static/css/components.css")
 
 
 class TestToastRemoved:
     def test_toast_absent(self):
-        assert "Low-confidence fields detected" not in open("app/static/js/app.js").read()
+        assert "Low-confidence fields detected" not in _read("app/static/js/app.js")
     def test_review_cell_kept(self):
-        js=open("app/static/js/app.js").read()
+        js=_read("app/static/js/app.js")
         assert "renderReviewCell" in js and "Review now" in js
     def test_row_flash_kept(self):
-        assert "row-flash" in open("app/static/js/app.js").read()
+        assert "row-flash" in _read("app/static/js/app.js")
 
 
 class TestPreviewRemoved:
     def test_preview_hidden(self):
-        h=open("app/static/review.html").read()
-        assert 'id="previewWrap"' in h and "display:none" in h
+        h=_read("app/static/review.html")
+        assert 'id="previewWrap"' in h and 'id="previewImg"' in h
     def test_stubs_present(self):
-        h=open("app/static/review.html").read()
+        h=_read("app/static/review.html")
         for e in ("previewImg","remapSelection","remapHint"): assert f'id="{e}"' in h
     def test_single_col(self):
-        h=open("app/static/review.html").read()
-        assert "grid-template-columns:1fr" in h and "1fr 1fr" not in h
+        c=_read("app/static/css/components.css")
+        assert ".review-grid" in c and "grid-template-columns: 1fr;" in c
 
 
 class TestRemapLock:
     def test_function_defined(self):
-        assert "function remapLockReason" in open("app/static/js/review.js").read()
+        assert "function remapLockReason" in _read("app/static/js/review.js")
     def test_exported_check(self):
-        assert '"exported"' in open("app/static/js/review.js").read()
+        assert '"exported"' in _read("app/static/js/review.js")
     def test_row_reviewed_check(self):
-        assert "row_reviewed" in open("app/static/js/review.js").read()
+        assert "row_reviewed" in _read("app/static/js/review.js")
     def test_lock_in_mouseup(self):
-        js=open("app/static/js/review.js").read()
+        js=_read("app/static/js/review.js")
         assert js.find("remapLockReason()",js.find("mouseup")) > js.find("mouseup")
     def test_lock_in_change(self):
-        js=open("app/static/js/review.js").read()
+        js=_read("app/static/js/review.js")
         assert js.find("remapLockReason()",js.find('"change"')) > js.find('"change"')
 
 
 class TestRemapHintUpsert:
     def test_upsert_present(self):
-        py=open("app/routers/review.py").read()
+        py=_read("app/routers/review.py")
         assert "existing_hint" in py and "existing_hint.x = payload.x" in py
     def test_else_branch(self):
-        assert "else:\n        hint = RemapHint(" in open("app/routers/review.py").read()
+        assert "else:\n        hint = RemapHint(" in _read("app/routers/review.py")
 
 
 class TestApiPayload:
     def test_review_reasons(self):
-        assert '"review_reasons"' in open("app/routers/review.py").read()
+        assert '"review_reasons"' in _read("app/routers/review.py")
     def test_method_used(self):
-        assert '"method_used"' in open("app/routers/review.py").read()
+        assert '"method_used"' in _read("app/routers/review.py")
     def test_pipe_split(self):
-        assert '.split("|")' in open("app/routers/review.py").read()
+        assert 're.split(r"[|]"' in _read("app/routers/review.py")
     def test_js_reads_reasons(self):
-        js=open("app/static/js/review.js").read()
+        js=_read("app/static/js/review.js")
         assert "r.review_reasons" in js and "REASON_LABELS" in js
     def test_js_reads_method(self):
-        assert "r.method_used" in open("app/static/js/review.js").read()
+        assert "r.method_used" in _read("app/static/js/review.js")
 
 
 class TestToolBadge:
@@ -147,22 +150,23 @@ class TestToolBadge:
     def test_empty(self): assert self._b("")=="-"
     def test_none(self):  assert self._b(None)=="-"
     def test_in_review_js(self):
-        js=open("app/static/js/review.js").read()
+        js=_read("app/static/js/review.js")
         assert "toolBadge" in js and "azure_di" in js
-    def test_in_app_js(self): assert "toolBadge" in open("app/static/js/app.js").read()
+    def test_in_app_js(self): assert "toolBadge" in _read("app/static/js/app.js")
     def test_css(self):
-        c=open("app/static/css/components.css").read()
+        c=_read("app/static/css/components.css")
         for cl in (".tool-di",".tool-ai",".tool-ocr",".tool-native"): assert cl in c
 
 
 class TestApplyRemapHints:
-    def test_defined(self): assert "def _apply_remap_hints" in open("app/routers/batches.py").read()
-    def test_called(self):  assert "_apply_remap_hints(db, batch, row)" in open("app/routers/batches.py").read()
+    def test_defined(self): assert "def _apply_remap_hints" in _read("app/routers/batches.py")
+    def test_called(self):  assert "_apply_remap_hints(db, batch, row, perf_ctx=perf_ctx, candidate_payload=payload)" in _read("app/routers/batches.py")
     def test_order(self):
-        s=open("app/routers/batches.py").read()
-        assert 0 < s.find("_apply_remap_hints(db, batch, row)") < s.find("_apply_saved_rules(db, batch, row)")
+        s=_read("app/routers/batches.py")
+        assert 0 < s.find("_apply_remap_hints(db, batch, row, perf_ctx=perf_ctx, candidate_payload=payload)")
+        assert s.find("def _apply_saved_rules") < s.find("def _apply_remap_hints")
     def test_imported(self):
-        s=open("app/routers/batches.py").read()
+        s=_read("app/routers/batches.py")
         assert "RemapHint" in s[:s.find("def ")]
 
 
@@ -184,15 +188,15 @@ class TestBcrsFalsePositives:
     def test_deposit_summary_real(self):
         assert _extract({"totals_raw":"Deposit Summary\nDeposit  4.80\nNet  250.00\nVAT  45.00\nTotal  299.80","net_amount":250.0,"vat_amount":45.0,"total_amount":299.80})==4.80
     def test_structural_shortcut_absent(self):
-        s=open("app/routers/batches.py").read()
+        s=_read("app/routers/batches.py")
         fn=s.split("def _extract_bcrs_amount_from_summary")[1].split("def _build_bcrs_row")[0]
         assert "return round(float(m.group(1)), 2)" not in fn
     def test_threshold_20(self):
-        s=open("app/routers/batches.py").read()
+        s=_read("app/routers/batches.py")
         fn=s.split("def _extract_bcrs_amount_from_summary")[1].split("def _build_bcrs_row")[0]
         assert "best_score < 20" in fn
     def test_label_line_guard(self):
-        s=open("app/routers/batches.py").read()
+        s=_read("app/routers/batches.py")
         fn=s.split("def _extract_bcrs_amount_from_summary")[1].split("def _build_bcrs_row")[0]
         assert "has_label_line" in fn
 
@@ -201,36 +205,36 @@ class TestRemapFlowImprovements:
     """Checks for the improved remap hint flow."""
 
     def test_save_remap_returns_saved_as_hint(self):
-        src = open("app/routers/review.py").read()
+        src = _read("app/routers/review.py")
         save_fn = src[src.find("def save_remap"):src.find("\n@router", src.find("def save_remap")+1)]
         assert '"saved_as_hint"' in save_fn
 
     def test_save_remap_returns_field_name(self):
-        src = open("app/routers/review.py").read()
+        src = _read("app/routers/review.py")
         save_fn = src[src.find("def save_remap"):src.find("\n@router", src.find("def save_remap")+1)]
         assert '"field_name"' in save_fn
 
     def test_js_handles_saved_as_hint(self):
-        js = open("app/static/js/review.js").read()
+        js = _read("app/static/js/review.js")
         assert "data.saved_as_hint" in js
 
     def test_js_message_mentions_future_hint(self):
-        js = open("app/static/js/review.js").read()
+        js = _read("app/static/js/review.js")
         assert "future remap hint" in js
 
     def test_js_guards_drag_on_loaded_image(self):
-        js = open("app/static/js/review.js").read()
+        js = _read("app/static/js/review.js")
         assert "naturalWidth" in js
 
     def test_remap_hints_check_supplier_id(self):
-        src = open("app/routers/batches.py").read()
+        src = _read("app/routers/batches.py")
         rh = src[src.find("def _apply_remap_hints"):src.find("def _parse_money_candidates")]
         assert "supplier_id" in rh
 
     def test_remap_hints_check_review_fields(self):
-        src = open("app/routers/batches.py").read()
+        src = _read("app/routers/batches.py")
         rh = src[src.find("def _apply_remap_hints"):src.find("def _parse_money_candidates")]
         assert "_review_fields" in rh
 
     def test_is_suspect_field_value_defined(self):
-        assert "def _is_suspect_field_value" in open("app/routers/batches.py").read()
+        assert "def _is_suspect_field_value" in _read("app/routers/batches.py")

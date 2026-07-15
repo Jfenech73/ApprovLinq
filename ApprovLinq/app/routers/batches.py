@@ -1124,6 +1124,10 @@ def _normalise_saved_region_value(field_name: str, value: object) -> str:
         if money is None:
             return ""
         return f"{money:.2f}"
+    if field_name == "supplier_name":
+        text = re.sub(r"^\s*\d{1,3}\s+(?=[A-Za-z])", "", text)
+        text = re.sub(r"\b(?:years?|anniversary|operat(?:ed|ing))\b", " ", text, flags=re.I)
+        return re.sub(r"\s+", " ", text).strip()
     return text
 
 
@@ -2238,7 +2242,7 @@ def _apply_remap_hints(
         return
 
     def _hint_priority(h: RemapHint) -> tuple:
-        same_company = 0 if (batch.company_id and h.company_id == batch.company_id) else 1
+        same_company = 0 if (batch.company_id and getattr(h, "company_id", None) == batch.company_id) else 1
         supplier_exact = 0 if (supplier_id and getattr(h, "supplier_id", None) == supplier_id) else 1
         snap_exact = 0 if ((getattr(h, "supplier_name_snapshot", None) or "") and row_norm and _normalize_rule_value(h.supplier_name_snapshot) == row_norm) else 1
         # Lower tuple sorts first.  Primary regions win, then supplier/company
@@ -2262,7 +2266,13 @@ def _apply_remap_hints(
     try:
         pdf_path = str(materialize_invoice_file(file_obj))
     except Exception:
-        return
+        raw_path = getattr(file_obj, "file_path", None)
+        if not raw_path:
+            return
+        try:
+            pdf_path = str(resolve_upload_path(raw_path))
+        except Exception:
+            return
 
     for hint in matched:
         if hint.field_name not in target_fields:
@@ -2686,7 +2696,11 @@ def _extract_bcrs_amount_from_summary(payload: dict) -> float | None:
         except Exception:
             diff = 0.0
         explicit_bcrs_label = _has_bcrs_component_label(summary_text)
-        if explicit_bcrs_label and not _has_zero_bcrs_mention and diff > 0.02:
+        explicit_component_line = any(
+            _has_bcrs_component_label(line) and not _is_total_incl_line(line)
+            for line in lines
+        )
+        if explicit_bcrs_label and explicit_component_line and not _has_zero_bcrs_mention and diff > 0.02:
             # Do not promote ordinary VAT or invoice total values.  A valid BCRS
             # component should be positive, smaller than the invoice total, and
             # not effectively equal to VAT.
@@ -3034,6 +3048,12 @@ def _decide_bcrs_split(db: Session, batch: InvoiceBatch, row: InvoiceRow, payloa
     score += _get_supplier_bcrs_precedent_score(db, batch, row)
     if existing_line:
         return ("no_split", None, None)
+    label_has_amount = any(
+        _has_bcrs_component_label(line) and bool(_parse_money_candidates(line))
+        for line in str(totals_text or "").splitlines()
+    )
+    if amount and not label_has_amount and payload_candidate in (None, ""):
+        return ("review_suggest_split", None, "Possible deposit/BCRS adjustment not safely resolved")
     if amount and score >= 22:
         return ("auto_split", amount, None)
     mismatch = False

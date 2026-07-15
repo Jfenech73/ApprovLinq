@@ -41,6 +41,8 @@ def _parse_first_money(value) -> float | None:
 
 
 def _is_summary_context(line: str) -> bool:
+    from app.routers.batches import _is_summary_context as live
+    return live(line)
     low = (line or "").lower()
     return bool(re.search(
         r"\b(total|subtotal|gross|net|vat|tax|summary|amount due|total due|"
@@ -51,6 +53,8 @@ def _is_summary_context(line: str) -> bool:
 
 
 def _is_body_or_item_context(line: str) -> bool:
+    from app.routers.batches import _is_body_or_item_context as live
+    return live(line)
     low = (line or "").lower()
     return bool(re.search(
         r"\b(qty|quantity|unit|uom|barcode|item|description|pcs|price|"
@@ -82,6 +86,9 @@ def _collect_summary_region_lines(payload: dict) -> list[str]:
 
 
 def _extract_bcrs_amount_from_summary_local(payload: dict) -> float | None:
+    from app.routers.batches import _extract_bcrs_amount_from_summary
+    return _extract_bcrs_amount_from_summary(payload)
+
     """Inline copy of the fixed _extract_bcrs_amount_from_summary for testing."""
     reasons = str(payload.get("review_reasons") or "")
     m = re.search(r"deposit_component_detected:(\d+(?:\.\d{2})?)", reasons)

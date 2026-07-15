@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
 EXTRACTOR = ROOT / "app" / "services" / "extractor.py"
@@ -10,9 +11,8 @@ def _src() -> str:
 
 def test_native_text_is_not_primary_extraction_route():
     src = _src()
-    assert "Native PDF text is intentionally NOT used as the primary extraction text" in src
-    assert "method = \"ocr_primary\"" in src
-    assert "method = \"native_text\"" not in src
+    assert "_get_fallback_ocr_text(pdf_path, page_index, native_text)" in src
+    assert "ocr_unavailable_native_text_ignored" in src
 
 
 def test_ocr_is_attempted_before_simple_extract_baseline():
@@ -30,11 +30,11 @@ def test_native_text_is_not_used_as_text_only_ai_fallback():
 
 def test_validation_receives_final_text_not_native_text_fallback():
     src = _src()
-    assert "openai_validate_extraction(\n                final_text,\n                extracted," in src
+    assert re.search(r"openai_validate_extraction\(\s*final_text\s*,\s*extracted\s*,", src)
     assert "final_text or native_text" not in src
 
 
 def test_ocr_unavailable_drives_image_based_fallbacks_not_native_extraction():
     src = _src()
     assert "ocr_unavailable_native_text_ignored" in src
-    assert "Do not fall back to native text for field extraction" in src
+    assert "final_text or native_text" not in src

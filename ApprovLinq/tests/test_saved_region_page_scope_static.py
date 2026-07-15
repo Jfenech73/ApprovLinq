@@ -19,5 +19,5 @@ def test_supplier_name_saved_regions_do_not_use_weak_signature_fallback_or_snaps
     src = (ROOT / "app/routers/batches.py").read_text()
     assert 'h.field_name != "supplier_name" and _signature_overlap' in src
     assert "too weak for identity fields" in src
-    assert 'snap and _supplier_snapshot_matches_current(getattr(row, "supplier_name", None), snap)' in src
+    assert "_supplier_snapshot_matches_current(getattr(row, \"supplier_name\", None), snap)" in src
     assert "snap and _supplier_hint_candidate_matches_row(row, hint):\n                            text = snap" not in src

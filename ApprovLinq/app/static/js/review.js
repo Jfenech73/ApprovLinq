@@ -1372,4 +1372,5 @@ if (typeof ensureAuth === "function" && !ensureAuth()) {
   };
 })();
 
+// Remap mode is intentionally NOT auto-enabled; reviewers opt in per action.
 const remapDefault = $("remapMode"); if (remapDefault) remapDefault.checked = false;

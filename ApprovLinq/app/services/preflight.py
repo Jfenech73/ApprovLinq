@@ -56,6 +56,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+from urllib.parse import urlparse
 
 from app.config import settings
 
@@ -109,9 +110,14 @@ def _check_endpoint_format(endpoint: str | None) -> bool:
     if not endpoint or not endpoint.strip():
         return False
     ep = endpoint.strip()
-    if not ep.lower().startswith("https://"):
+    parsed = urlparse(ep)
+    if parsed.scheme.lower() != "https":
         return False
-    return bool(_ENDPOINT_RE.match(ep))
+    if not parsed.netloc or "." not in parsed.netloc:
+        return False
+    if parsed.params or parsed.query or parsed.fragment:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------

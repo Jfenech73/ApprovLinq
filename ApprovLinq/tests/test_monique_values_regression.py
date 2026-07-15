@@ -40,6 +40,12 @@ def test_due_label_can_supply_total_when_total_line_is_fragmented():
 
 
 def test_surcharge_alone_is_not_bcrs_split_evidence():
-    text = (ROOT / "app/routers/batches.py").read_text()
-    assert "surcharge\\b[^\\d\\n" not in text
-    assert 'r"\\b(bcrs|refundable\\s+deposit|deposit\\s+summary|returnables?|deposits?)\\b", totals_text' in text
+    from app.routers.batches import _extract_bcrs_amount_from_summary
+
+    assert _extract_bcrs_amount_from_summary({
+        "totals_raw": "Net 100.00\nVAT 18.00\nSurcharge 2.00\nTotal 120.00",
+        "page_text_raw": "Surcharge 2.00",
+        "net_amount": 100.0,
+        "vat_amount": 18.0,
+        "total_amount": 120.0,
+    }) is None

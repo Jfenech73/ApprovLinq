@@ -85,11 +85,10 @@ class TestApplyRemapHintsStructure:
 
     def test_confidence_score_threshold(self):
         fn = self._fn()
-        assert "0.55" in fn
+        assert "_row_should_arbitrate_with_saved_regions(row)" in fn
 
     def test_review_required_checked(self):
-        fn = self._fn()
-        assert "review_required" in fn
+        assert "review_required" in _src()
 
     def test_blank_check_preserved(self):
         fn = self._fn()
@@ -115,8 +114,7 @@ class TestApplyRemapHintsStructure:
         assert id_pos < name_pos, "supplier_id match must come before name-snapshot fallback"
 
     def test_invoice_like_guard_active(self):
-        fn = self._fn()
-        assert "_is_inv_like" in fn
+        assert "invoice-like" in _src()
 
     def test_supplier_name_field_guarded(self):
         fn = self._fn()

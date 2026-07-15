@@ -1,5 +1,14 @@
 # ApprovLinq Changelog
 
+## v3.69.11 - 2026-07-15
+
+### Release stabilisation and regression closure
+- Closed the Phase 11 regression suite: zero collection errors and zero unexplained test failures in the local full test run.
+- Replaced brittle source-slicing and exact-string tests with functional or architecture checks for saved regions, DI/provider evidence, native-text fallback, resolver ordering, and UX contracts.
+- Added deterministic release ZIP packaging with an `ApprovLinq/` top-level folder to match the Docker build context.
+- Added a PostgreSQL stable-upgrade integration gate alongside the clean-database migration gate.
+- Preserved extraction, arbitration, saved regions, totals, BCRS, review, and export behavior while tightening release hygiene.
+
 ## v3.61.0 — 2026-03-17
 
 ### Supplier name & code improvements

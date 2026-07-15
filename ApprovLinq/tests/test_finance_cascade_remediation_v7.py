@@ -1,5 +1,7 @@
 import io
+import shutil
 
+import pytest
 from PIL import Image, ImageDraw
 
 from app.services.extractor import (
@@ -49,6 +51,8 @@ def test_supplier_candidates_keep_contact_block_legal_name_before_tagline():
 
 
 def test_region_ocr_bytes_returns_visible_text():
+    if not shutil.which("tesseract"):
+        pytest.skip("local Tesseract binary not available")
     img = Image.new("RGB", (420, 90), "white")
     draw = ImageDraw.Draw(img)
     draw.text((12, 24), "Mafimex Ltd.", fill="black")

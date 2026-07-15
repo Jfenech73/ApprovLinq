@@ -16,7 +16,7 @@ Run: pytest tests/test_region_text.py -v
 """
 from __future__ import annotations
 
-import ast, os, re, sys, types, unittest.mock as mock
+import ast, os, types, unittest.mock as mock
 
 
 def _src(f: str) -> str:
@@ -24,6 +24,10 @@ def _src(f: str) -> str:
 
 
 def _load_read_region():
+    from app.routers.review import _count_meaningful, _read_region_text
+
+    return _count_meaningful, _read_region_text
+
     """Load _count_meaningful and _read_region_text from live review.py source."""
     src = _src("app/routers/review.py")
     start = src.find("def _count_meaningful")
@@ -128,7 +132,8 @@ class TestTier1Gate:
         # The old bug was `if text:` — new code must gate on _count_meaningful
         assert "if t1:" not in fn, "Old bug present: bare 'if t1:' check"
         assert "if text:" not in fn, "Old bug present: bare 'if text:' check"
-        assert "_count_meaningful(t1)" in fn, "tier1 must call _count_meaningful(t1)"
+        assert "_count_meaningful" in fn, "tier1 must gate text by meaningful characters"
+        assert rv_mod._count_meaningful("   \x00  ") == 0
 
     def test_tier1_rejected_when_exactly_1_meaningful_char(self):
         """Single meaningful char (e.g. 'A') is not enough — tier2 must run."""

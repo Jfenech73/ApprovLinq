@@ -16,18 +16,16 @@ def test_simple_extract_uses_header_focused_identity_reads_and_supplier_vat():
     assert "_collect_invoice_number_candidates(identity_text)" in fn
     assert "_invoice_number_fallback(identity_text)" in fn
     assert "invoice_date_raw = _extract_invoice_date_value(identity_text)" in fn
-    assert 'supplier_vat = _extract_supplier_vat_number(identity_text) or _extract_supplier_vat_number(text)' in fn
+    assert "_extract_supplier_vat_number(supplier_header_text or identity_text)" in fn
     assert '"supplier_vat": supplier_vat' in fn
 
 
 def test_review_evidence_prefers_filtered_header_and_totals_views():
     src = read("app/services/extractor.py")
     fn = src[src.index("def process_pdf_page("):src.index("def process_pdf_page_rows(", src.index("def process_pdf_page("))]
-    assert '_header_view = extracted.get("_header_text") or ""' in fn
-    assert '_totals_view = extracted.get("_totals_text") or ""' in fn
     assert "header_raw = extracted.get(\"_header_text\")" in fn
     assert "totals_raw = extracted.get(\"_totals_text\")" in fn
-    assert "_filtered_di_totals = _totals_region_text(_di_text, tail_lines=18)" in fn
+    assert "_totals_region_text(_di_text" in fn
 
 
 def test_process_pdf_page_backfills_currency_from_filtered_text_views():

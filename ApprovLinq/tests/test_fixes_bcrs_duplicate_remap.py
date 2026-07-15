@@ -151,10 +151,16 @@ class TestAdvisoryMismatchReviewFlag:
     def test_advisory_reason_emitted_with_deposit_component(self):
         """Both deposit_component_detected AND totals_mismatch_advisory must be
         emitted together so the review engine can flag the row."""
-        src = open("app/services/validate_invoice.py").read()
-        block = src[src.find("if _is_deposit_amount"):src.find("else:\n                result.other_charges_amount")]
-        assert "deposit_component_detected" in block
-        assert "totals_mismatch_advisory" in block
+        from app.services.validate_invoice import validate_invoice
+
+        result = validate_invoice({
+            "net_amount": 100.0,
+            "vat_amount": 18.0,
+            "total_amount": 120.4,
+            "line_items": [{"amount": 90.0}],
+        })
+        assert "deposit_component_detected:2.40" in result.review_reasons
+        assert "totals_mismatch_advisory" in result.review_reasons
 
     def test_review_engine_scores_advisory_as_medium(self):
         src = open("app/services/review_engine.py").read()

@@ -191,7 +191,7 @@ class CorrectionRule(Base):
 
 class RemapHint(Base):
     __tablename__ = "remap_hints"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_BIGINT_PK, primary_key=True, autoincrement=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     company_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=True)
     supplier_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("tenant_suppliers.id", ondelete="CASCADE"), nullable=True)
@@ -237,7 +237,7 @@ class RemapHint(Base):
 
 class BatchExportEvent(Base):
     __tablename__ = "batch_export_events"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_BIGINT_PK, primary_key=True, autoincrement=True)
     batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoice_batches.id", ondelete="CASCADE"), nullable=False)
     scan_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True)
     export_version: Mapped[int] = mapped_column(Integer, nullable=False)

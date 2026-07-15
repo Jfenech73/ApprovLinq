@@ -162,3 +162,30 @@ def test_postgres_clean_database_migrates_to_current_head():
         assert {"Description", "Quantity", "UnitPrice"}.isdisjoint(columns)
     finally:
         engine.dispose()
+
+
+@pytest.mark.integration
+def test_postgres_stable_database_upgrades_to_current_head():
+    url = os.getenv("APPROVLINQ_POSTGRES_STABLE_TEST_URL") or os.getenv("APPROVLINQ_POSTGRES_TEST_URL")
+    if not url:
+        pytest.skip("APPROVLINQ_POSTGRES_STABLE_TEST_URL or APPROVLINQ_POSTGRES_TEST_URL not configured")
+    if os.getenv("APPROVLINQ_ALLOW_DESTRUCTIVE_TEST_DB") != "1":
+        pytest.skip("APPROVLINQ_ALLOW_DESTRUCTIVE_TEST_DB=1 is required for destructive migration tests")
+
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config(str(ROOT / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", url)
+    stable_revision = "20260710_0009"
+    command.downgrade(cfg, "base")
+    command.upgrade(cfg, stable_revision)
+    command.upgrade(cfg, "head")
+
+    engine = sa.create_engine(url, future=True)
+    try:
+        status = assert_database_schema_current(engine)
+        assert status.checked is True
+        assert status.current_revision == CURRENT_ALEMBIC_REVISION
+    finally:
+        engine.dispose()

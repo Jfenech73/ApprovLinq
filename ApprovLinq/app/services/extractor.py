@@ -805,6 +805,9 @@ def _repair_financial_bundle(values: dict[str, float], text: str | None = None) 
 
         if total_f is not None and deposit_f is not None and deposit_f > 0 and net_f is not None:
             if vat_f is not None:
+                visible_rate = vat_f / net_f if net_f > 0 else 0
+                if abs(round((net_f + vat_f) - total_f, 2)) <= 0.10 and 0.03 <= visible_rate <= 0.30:
+                    return out
                 deposit_diff = abs(round((net_f + vat_f + deposit_f) - total_f, 2))
                 if deposit_diff <= 0.10:
                     return out
@@ -2417,6 +2420,7 @@ def _clean_ocr_supplier_name(name: str | None) -> str | None:
     # If the name starts with "X Y..." where X is a single uppercase char and Y
     # begins with the same letter (OCR duplicated initial), strip the lone prefix char.
     # e.g. "N N Calleja Trading" → "N Calleja Trading"
+    name = re.sub(r"^([A-Z])\s+\1\s+", r"\1 ", name)
     m = re.match(r"^([A-Z])\s+([A-Z]\S.*)$", name)
     if m and m.group(2).upper().startswith(m.group(1)):
         name = m.group(2)
@@ -3625,9 +3629,11 @@ def azure_di_extract_invoice(
         try:
             result = _future.result(timeout=_page_timeout)
         except _cf.TimeoutError:
+                _azure_di_error = f"Azure DI page timeout after {_page_timeout:.0f}s"
+                # return None after cancelling the slow poller.
                 logger.warning(
                     "Azure DI page timeout after %.0fs; "
-                    "using fallback for this page; DI remains enabled for later pages",
+                    "using fallback for this page; circuit breaker opened",
                     _page_timeout,
                 )
                 _future.cancel()
@@ -5064,6 +5070,7 @@ def process_pdf_page(
         "header_raw":                 header_raw,
         "totals_raw":                 totals_raw,
         "page_text_raw":              page_text_raw,
+        "deposit_component":          extracted.get("_deposit_component"),
     })
     # Clean up internal temp keys
     for _k in ("_supplier_name_raw", "_date_parse_strategy", "_date_ambiguity_flag",
@@ -5072,6 +5079,162 @@ def process_pdf_page(
                "_supplier_resolution"):
         extracted.pop(_k, None)
     return extracted
+
+
+def _check_deposit_component(net: float | None, vat: float | None, total: float | None) -> tuple[bool, float | None]:
+    """Compatibility helper for BCRS/deposit component detection."""
+    try:
+        if net is None or vat is None or total is None:
+            return False, None
+        diff = round(float(total) - float(net) - float(vat), 2)
+    except (TypeError, ValueError):
+        return False, None
+    if 0.01 <= diff <= 25.00 and (round((diff * 100) % 5, 6) == 0):
+        return True, diff
+    return False, None
+
+
+def _page_summary_zone(lines: list[str]) -> list[str]:
+    if not lines:
+        return []
+    cleaned = [str(line or "").strip() for line in lines if str(line or "").strip()]
+    if not cleaned:
+        return []
+    start = max(0, int(len(cleaned) * 0.6))
+    zone = cleaned[start:]
+    keyword_re = re.compile(
+        r"\b(?:sub\s*total|subtotal|net|vat|tax|bcrs|deposit|total|amount due|balance due)\b",
+        re.I,
+    )
+    for line in cleaned[:start]:
+        if keyword_re.search(line):
+            zone.append(line)
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in zone:
+        if line not in seen:
+            seen.add(line)
+            out.append(line)
+    return out
+
+
+def _bcrs_router_helper(name: str):
+    from app.routers import batches as _batches
+    return getattr(_batches, name)
+
+
+def _score_bcrs_candidate(
+    *,
+    label_text: str,
+    amount: float,
+    source_line: str,
+    in_summary_zone: bool,
+    same_line: bool,
+    net: float | None = None,
+    vat: float | None = None,
+    total: float | None = None,
+) -> int:
+    if amount is None:
+        return 0
+    try:
+        val = round(float(amount), 2)
+    except (TypeError, ValueError):
+        return 0
+    if val <= 0:
+        return 0
+    if total is not None and float(total) > 0 and val > float(total) * 0.8:
+        return 0
+    line = source_line or label_text or ""
+    low = line.lower()
+    if re.search(r"\b\d+\s*x\s*\d", low) or (re.search(r"\b(item|description|qty|pcs|unit)\b", low) and not in_summary_zone):
+        return 0
+    if re.search(r"\bsurcharge\b", str(label_text or ""), re.I) and not re.search(r"\b(bcrs|deposit|returnable|container)\b", str(label_text or ""), re.I):
+        return 0
+    label = str(label_text or "").lower()
+    strong = bool(re.search(r"\b(bcrs|d\.?r\.?s\.?|refundable|returnable|container)\b", label))
+    weak = bool(re.search(r"\bdeposit|deposits?\b", label))
+    if not strong and not weak:
+        return 0
+    if weak and not strong and not in_summary_zone:
+        return 0
+    score = 90 if strong else 45
+    if "deposit" in label:
+        score += 20
+    if in_summary_zone:
+        score += 15
+    if same_line:
+        score += 10
+    if net is not None and vat is not None and total is not None:
+        try:
+            if abs((float(net) + float(vat) + val) - float(total)) <= 0.06:
+                score += 35
+        except (TypeError, ValueError):
+            pass
+    return score
+
+
+def _detect_bcrs_from_text(
+    text: str,
+    *,
+    net: float | None = None,
+    vat: float | None = None,
+    total: float | None = None,
+) -> float | None:
+    try:
+        if net is not None and vat is not None and total is not None:
+            if abs((float(net) + float(vat)) - float(total)) <= 0.06:
+                return None
+    except (TypeError, ValueError):
+        pass
+    helper = _bcrs_router_helper("_extract_bcrs_amount_from_summary")
+    return helper({
+        "page_text_raw": text or "",
+        "totals_raw": "\n".join(_page_summary_zone((text or "").splitlines())),
+        "net_amount": net,
+        "vat_amount": vat,
+        "total_amount": total,
+    })
+
+
+def _detect_bcrs_from_fitz(
+    pdf_path: str | Path,
+    page_index: int,
+    *,
+    net: float | None = None,
+    vat: float | None = None,
+    total: float | None = None,
+) -> float | None:
+    try:
+        with fitz.open(pdf_path) as doc:
+            page = doc[page_index]
+            words = page.get_text("words")
+            grouped: dict[int, list[tuple[float, str]]] = {}
+            for word in words:
+                line_no = int(word[6]) if len(word) > 6 else 0
+                grouped.setdefault(line_no, []).append((float(word[0]), str(word[4])))
+            lines = [
+                " ".join(token for _x, token in sorted(items))
+                for _line, items in sorted(grouped.items())
+            ]
+        return _detect_bcrs_from_text("\n".join(lines), net=net, vat=vat, total=total)
+    except Exception:
+        return None
+
+
+def _detect_bcrs_label_value(
+    *,
+    pdf_path: str | Path | None,
+    page_index: int,
+    page_text: str | None,
+    net: float | None = None,
+    vat: float | None = None,
+    total: float | None = None,
+) -> float | None:
+    if pdf_path is not None:
+        detected = _detect_bcrs_from_fitz(pdf_path, page_index, net=net, vat=vat, total=total)
+        if detected is not None:
+            return detected
+    return _detect_bcrs_from_text(page_text or "", net=net, vat=vat, total=total)
 
 
 
@@ -5490,6 +5653,9 @@ def process_pdf_page_rows(
                 page_result["confidence_score"] = min(float(page_result["confidence_score"]), 0.75)
         except Exception:
             page_result["confidence_score"] = 0.75
+
+    if "deposit_component" not in page_result:
+        page_result["deposit_component"] = page_result.get("_deposit_component")
 
     if (scan_mode or "summary").lower() == "lines":
         # ── Line-item extraction priority (tallest accuracy first) ─────────
