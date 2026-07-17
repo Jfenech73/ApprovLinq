@@ -300,6 +300,43 @@ function render() {
 
   renderEditor();
   updateRemapUI();
+  scheduleReviewColumnHeightSync();
+}
+
+
+let _columnHeightSyncTimer = null;
+function scheduleReviewColumnHeightSync() {
+  clearTimeout(_columnHeightSyncTimer);
+  _columnHeightSyncTimer = setTimeout(syncReviewColumnHeights, 40);
+}
+
+function _columnNaturalHeight(selector) {
+  const col = document.querySelector(selector);
+  if (!col) return 0;
+  const head = col.querySelector(".review-col-head");
+  const panel = col.querySelector(".bcrs-split-panel:not([hidden])");
+  const body = col.querySelector(".review-col-body");
+  const headH = head ? head.offsetHeight : 0;
+  const panelH = panel ? panel.offsetHeight : 0;
+  const bodyH = body ? Math.max(body.scrollHeight, body.offsetHeight) : 0;
+  return headH + panelH + bodyH;
+}
+
+function syncReviewColumnHeights() {
+  const grid = document.querySelector(".review-3col");
+  if (!grid) return;
+  if (window.matchMedia && window.matchMedia("(max-width: 900px)").matches) {
+    grid.style.removeProperty("--review-column-height");
+    return;
+  }
+  grid.style.setProperty("--review-column-height", "auto");
+  requestAnimationFrame(() => {
+    const viewportFloor = Math.max(560, (window.innerHeight || 720) - 150);
+    const editHeight = _columnNaturalHeight(".review-col-edit");
+    const remapHeight = _columnNaturalHeight(".review-col-remap");
+    const target = Math.ceil(Math.max(viewportFloor, editHeight, remapHeight));
+    grid.style.setProperty("--review-column-height", `${target}px`);
+  });
 }
 
 
@@ -308,13 +345,15 @@ function ensureExplainabilityStyles() {
   const st = document.createElement("style");
   st.id = "reviewExplainabilityStyles";
   st.textContent = `
-    .review-page-body{display:grid;grid-template-rows:auto auto minmax(0,1fr);height:calc(100vh - 57px);max-height:calc(100vh - 57px);min-height:0;overflow:hidden}
-    @supports (height:100dvh){.review-page-body{height:calc(100dvh - 57px);max-height:calc(100dvh - 57px)}}
-    .review-3col{height:auto;max-height:none;min-height:0;overflow:hidden}
-    .review-3col>.review-col{height:100%;max-height:100%;min-height:0}
+    .review-page-body{display:grid;grid-template-rows:auto auto minmax(0,1fr);min-height:calc(100vh - 57px);height:auto;max-height:none;overflow:visible}
+    @supports (height:100dvh){.review-page-body{min-height:calc(100dvh - 57px)}}
+    .review-3col{height:var(--review-column-height,auto);min-height:var(--review-column-height,calc(100vh - 160px));max-height:none;overflow:visible;align-items:stretch}
+    .review-3col>.review-col{height:var(--review-column-height,auto);max-height:100%;min-height:0}
     .review-col-body{min-height:0}
     .review-rows-body{display:flex;flex-direction:column;gap:8px;padding:8px;height:100%;min-height:0;overflow:hidden}
     .row-list-scroll{min-height:0;height:100%;max-height:100%;overflow-y:auto;overflow-x:hidden;flex:1 1 auto;border-bottom:0;padding-bottom:0;overscroll-behavior:contain}
+    .review-col-edit .review-col-body,.review-col-remap .review-col-body{overflow-y:visible}
+    .review-col-remap .preview-wrap{flex:0 0 auto!important;min-height:0!important}
     .selected-explain-panel{flex:0 0 auto;max-height:140px;overflow:auto;border-top:1px solid var(--ap-border,#d7e0ea);padding-top:8px}
     .selected-explain-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
     .selected-explain-head h3{margin:0;font-size:13px;font-weight:700;color:var(--ap-text-muted,#536476)}
@@ -436,6 +475,7 @@ function renderEditor() {
   ed.innerHTML = header + html;
   $("saveBtn").onclick = saveRow;
   ed.querySelectorAll("[data-revert]").forEach(b => b.onclick = () => revertField(b.dataset.revert));
+  scheduleReviewColumnHeightSync();
 }
 
 async function saveRow() {
@@ -485,6 +525,7 @@ async function loadAudit(rowId) {
       </div>`;
     }).join("") || '<div class="muted">No history yet.</div>';
   } catch (e) { /* ignore */ }
+  scheduleReviewColumnHeightSync();
 }
 
 async function loadCandidateEvidence(rowId) {
@@ -535,12 +576,14 @@ function _showPreviewUnavailable(message) {
     if (msgEl && message) msgEl.textContent = message;
     ph.hidden = false;
   }
+  scheduleReviewColumnHeightSync();
 }
 function _showPreviewImage(blobUrl) {
   const img = $("previewImg");
   const ph  = $("previewUnavailable");
   if (ph) ph.hidden = true;
   img.hidden = false;
+  img.onload = scheduleReviewColumnHeightSync;
   img.src = blobUrl;
 }
 async function refreshPreview() {
@@ -604,6 +647,8 @@ $("nextPageBtn").onclick = async () => {
 document.querySelectorAll(".filter-chips .btn").forEach(b => {
   b.onclick = () => { state.filter = b.dataset.filter; render(); };
 });
+
+window.addEventListener("resize", scheduleReviewColumnHeightSync);
 
 $("approveBtn").onclick = async () => {
   const r = await fetch(`/review/batches/${batchId}/transition`, {
@@ -698,6 +743,7 @@ $("bcrsSplitBtn").onclick = () => {
     bcrsSplitMsg.textContent = "";
     bcrsSplitAmount.focus();
   }
+  scheduleReviewColumnHeightSync();
 };
 
 $("bcrsSplitCancelBtn").onclick = _hideBcrsSplitPanel;

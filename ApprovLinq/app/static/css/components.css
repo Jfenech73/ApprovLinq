@@ -893,15 +893,14 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
 .review-page-body {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
-  height: calc(100vh - 57px);     /* shell topbar is above this page body */
-  max-height: calc(100vh - 57px);
-  min-height: 0;
-  overflow: hidden;  /* the columns inside handle their own scroll */
+  min-height: calc(100vh - 57px);     /* shell topbar is above this page body */
+  height: auto;
+  max-height: none;
+  overflow: visible;
 }
 @supports (height: 100dvh) {
   .review-page-body {
-    height: calc(100dvh - 57px);
-    max-height: calc(100dvh - 57px);
+    min-height: calc(100dvh - 57px);
   }
 }
 
@@ -917,10 +916,12 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
      On larger screens the sticky sidebar + topbar give a natural viewport feel.
      overflow must NOT be hidden — that prevents column bodies from scrolling. */
   min-height: 0;
-  height: auto;
+  align-items: stretch;
+  height: var(--review-column-height, auto);
+  min-height: var(--review-column-height, calc(100vh - 160px));
   max-height: none;
   flex: 1 1 auto;
-  overflow: hidden;
+  overflow: visible;
 }
 
 /* Each column scrolls independently */
@@ -928,7 +929,7 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
   display: flex;
   flex-direction: column;
   overflow: hidden;  /* clip horizontally only via child overflow-y:auto */
-  height: 100%;
+  height: var(--review-column-height, auto);
   max-height: 100%;
   min-height: 0;
   border-right: 1px solid var(--ap-border);
@@ -975,6 +976,7 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
 
 /* Col 2 — edit panel: ensure long field values wrap cleanly */
 .review-col-edit .review-col-body {
+  overflow-y: visible;
   overflow-wrap: break-word;
   word-break: break-word;
 }
@@ -999,12 +1001,13 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
   flex-direction: column;
   gap: var(--ap-s-3);
   padding: var(--ap-s-3);
+  overflow-y: visible;
 }
 
 /* Preview inside col 3 grows to fill available space */
 .review-col-remap .preview-wrap {
-  flex: 1;
-  min-height: 200px;
+  flex: 0 0 auto !important;
+  min-height: 0 !important;
   position: relative;
   border: 1px solid var(--ap-border);
   border-radius: var(--ap-r-md);
@@ -1081,9 +1084,11 @@ html[data-theme="dark"] .bcrs-split-panel {
   .review-3col {
     grid-template-columns: 1fr;
     height: auto;
+    min-height: 0;
     overflow: visible;
   }
   .review-3col > .review-col {
+    height: auto;
     border-right: none;
     border-bottom: 1px solid var(--ap-border);
     max-height: 60vh;
