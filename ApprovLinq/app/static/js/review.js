@@ -308,8 +308,11 @@ function ensureExplainabilityStyles() {
   const st = document.createElement("style");
   st.id = "reviewExplainabilityStyles";
   st.textContent = `
-    .review-3col{height:100%;max-height:100%;overflow:hidden}
+    .review-page-body{display:grid;grid-template-rows:auto auto minmax(0,1fr);height:calc(100vh - 57px);max-height:calc(100vh - 57px);min-height:0;overflow:hidden}
+    @supports (height:100dvh){.review-page-body{height:calc(100dvh - 57px);max-height:calc(100dvh - 57px)}}
+    .review-3col{height:auto;max-height:none;min-height:0;overflow:hidden}
     .review-3col>.review-col{height:100%;max-height:100%;min-height:0}
+    .review-col-body{min-height:0}
     .review-rows-body{display:flex;flex-direction:column;gap:8px;padding:8px;height:100%;min-height:0;overflow:hidden}
     .row-list-scroll{min-height:0;height:100%;max-height:100%;overflow-y:auto;overflow-x:hidden;flex:1 1 auto;border-bottom:0;padding-bottom:0;overscroll-behavior:contain}
     .selected-explain-panel{flex:0 0 auto;max-height:140px;overflow:auto;border-top:1px solid var(--ap-border,#d7e0ea);padding-top:8px}

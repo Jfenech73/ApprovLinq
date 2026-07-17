@@ -41,11 +41,17 @@ def test_review_row_selection_preserves_natural_order_and_scroll_position():
 def test_review_rows_column_is_height_capped_and_scrollable():
     css = (ROOT / "app/static/css/components.css").read_text(encoding="utf-8")
     js = (ROOT / "app/static/js/review.js").read_text()
+    html = (ROOT / "app/static/review.html").read_text()
+    assert "components.css?v=20260717b" in html
+    assert "review.js?v=20260717b" in html
+    assert "grid-template-rows: auto auto minmax(0, 1fr)" in css
+    assert "height: calc(100vh - 57px)" in css
+    assert "height:calc(100vh - 57px)" in js
     assert ".review-3col" in css and "overflow: hidden" in css
     assert ".review-col-rows .row-list-scroll" in css
     assert "max-height: 100%" in css
     assert "overscroll-behavior: contain" in css
-    assert ".review-3col{height:100%;max-height:100%;overflow:hidden}" in js
+    assert ".review-3col{height:auto;max-height:none;min-height:0;overflow:hidden}" in js
     assert ".row-list-scroll{min-height:0;height:100%;max-height:100%;overflow-y:auto" in js
 
 

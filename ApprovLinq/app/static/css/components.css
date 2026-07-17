@@ -891,15 +891,18 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
    3-col grid can have internally scrollable columns on desktop.
    This class is only applied to review.html, not to other pages. */
 .review-page-body {
-  display: flex;
-  flex-direction: column;
-  height: 100dvh;    /* fills viewport; fallback below */
-  height: 100vh;     /* fallback for browsers without dvh */
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: calc(100vh - 57px);     /* shell topbar is above this page body */
+  max-height: calc(100vh - 57px);
   min-height: 0;
   overflow: hidden;  /* the columns inside handle their own scroll */
 }
 @supports (height: 100dvh) {
-  .review-page-body { height: 100dvh; }
+  .review-page-body {
+    height: calc(100dvh - 57px);
+    max-height: calc(100dvh - 57px);
+  }
 }
 
 /* Override the inline style on .review-grid */
@@ -914,8 +917,8 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
      On larger screens the sticky sidebar + topbar give a natural viewport feel.
      overflow must NOT be hidden — that prevents column bodies from scrolling. */
   min-height: 0;
-  height: 100%;
-  max-height: 100%;
+  height: auto;
+  max-height: none;
   flex: 1 1 auto;
   overflow: hidden;
 }
@@ -952,6 +955,7 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
 /* Scrollable body inside each column */
 .review-col-body {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding: var(--ap-s-3) var(--ap-s-4);
@@ -961,7 +965,11 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
 .review-col-rows .review-col-body { padding: var(--ap-s-2); }
 
 .review-col-rows .row-list-scroll {
+  min-height: 0;
+  height: 100%;
   max-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
 }
 
