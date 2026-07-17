@@ -914,7 +914,10 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
      On larger screens the sticky sidebar + topbar give a natural viewport feel.
      overflow must NOT be hidden — that prevents column bodies from scrolling. */
   min-height: 0;
-  flex: 1;
+  height: 100%;
+  max-height: 100%;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
 /* Each column scrolls independently */
@@ -922,6 +925,8 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
   display: flex;
   flex-direction: column;
   overflow: hidden;  /* clip horizontally only via child overflow-y:auto */
+  height: 100%;
+  max-height: 100%;
   min-height: 0;
   border-right: 1px solid var(--ap-border);
 }
@@ -954,6 +959,11 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
 
 /* Col 1 — rows list */
 .review-col-rows .review-col-body { padding: var(--ap-s-2); }
+
+.review-col-rows .row-list-scroll {
+  max-height: 100%;
+  overscroll-behavior: contain;
+}
 
 /* Col 2 — edit panel: ensure long field values wrap cleanly */
 .review-col-edit .review-col-body {

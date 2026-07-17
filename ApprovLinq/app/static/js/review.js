@@ -308,8 +308,10 @@ function ensureExplainabilityStyles() {
   const st = document.createElement("style");
   st.id = "reviewExplainabilityStyles";
   st.textContent = `
+    .review-3col{height:100%;max-height:100%;overflow:hidden}
+    .review-3col>.review-col{height:100%;max-height:100%;min-height:0}
     .review-rows-body{display:flex;flex-direction:column;gap:8px;padding:8px;height:100%;min-height:0;overflow:hidden}
-    .row-list-scroll{min-height:0;height:100%;overflow-y:auto;overflow-x:hidden;flex:1 1 auto;border-bottom:0;padding-bottom:0}
+    .row-list-scroll{min-height:0;height:100%;max-height:100%;overflow-y:auto;overflow-x:hidden;flex:1 1 auto;border-bottom:0;padding-bottom:0;overscroll-behavior:contain}
     .selected-explain-panel{flex:0 0 auto;max-height:140px;overflow:auto;border-top:1px solid var(--ap-border,#d7e0ea);padding-top:8px}
     .selected-explain-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
     .selected-explain-head h3{margin:0;font-size:13px;font-weight:700;color:var(--ap-text-muted,#536476)}
