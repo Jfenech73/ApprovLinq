@@ -5279,6 +5279,156 @@ def _line_text_is_summary(text: object) -> bool:
     return bool(re.search(r"\b(?:sub\s*total|subtotal|total\s+(?:net|vat|tax|due|amount)|grand\s+total|invoice\s+total|vat|tax|amount\s+due|balance\s+due)\b", line, re.I))
 
 
+def _di_direct_amount(field: Any) -> float | None:
+    if field is None:
+        return None
+    if isinstance(field, dict):
+        for key in ("value_number", "valueNumber", "value_integer", "valueInteger"):
+            if field.get(key) not in (None, ""):
+                try:
+                    return float(field.get(key))
+                except (TypeError, ValueError):
+                    pass
+        currency = field.get("value_currency") or field.get("valueCurrency")
+        if isinstance(currency, dict):
+            amount = currency.get("amount")
+            if amount not in (None, ""):
+                try:
+                    return float(amount)
+                except (TypeError, ValueError):
+                    pass
+        return parse_amount(field.get("content") or field.get("value_string") or field.get("valueString"))
+    for attr in ("value_number", "value_integer"):
+        try:
+            value = getattr(field, attr, None)
+        except Exception:
+            value = None
+        if value not in (None, ""):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                pass
+    try:
+        currency = getattr(field, "value_currency", None)
+        amount = getattr(currency, "amount", None) if currency is not None else None
+        if amount not in (None, ""):
+            return float(amount)
+    except Exception:
+        pass
+    try:
+        content = getattr(field, "content", None)
+    except Exception:
+        content = None
+    return parse_amount(content)
+
+
+def _first_di_item_amount(item_fields: dict[str, Any], names: tuple[str, ...]) -> float | None:
+    for name in names:
+        amount = _di_direct_amount(item_fields.get(name))
+        if amount is not None:
+            return amount
+    return None
+
+
+def _allocate_discount_across_items(items: list[dict[str, Any]], discount: float | None) -> None:
+    remaining = _money_decimal(discount)
+    if remaining is None or remaining <= 0:
+        return
+    targets = [
+        item
+        for item in items
+        if not _line_text_is_bcrs(item.get("description")) and _money_decimal(item.get("net_amount")) is not None
+    ]
+    base_total = sum((_money_decimal(item.get("net_amount")) or Decimal("0.00") for item in targets), Decimal("0.00"))
+    if not targets or base_total <= 0 or remaining >= base_total:
+        return
+    allocated = Decimal("0.00")
+    for idx, item in enumerate(targets, start=1):
+        current = _money_decimal(item.get("net_amount")) or Decimal("0.00")
+        if idx == len(targets):
+            share = (remaining - allocated).quantize(Decimal("0.01"))
+        else:
+            share = (current / base_total * remaining).quantize(Decimal("0.01"))
+            allocated += share
+        item["discount_amount"] = _money_float(share)
+        item["net_amount"] = _money_float(max(Decimal("0.00"), current - share).quantize(Decimal("0.01")))
+
+
+def _build_direct_di_items(raw_items: list[Any], invoice_net: object, total_discount: object) -> tuple[list[dict[str, Any]], float | None]:
+    items: list[dict[str, Any]] = []
+    bcrs_total = Decimal("0.00")
+    explicit_discount_total = Decimal("0.00")
+    for item in raw_items:
+        item_fields = item.get("value_object") if isinstance(item, dict) else None
+        if not isinstance(item_fields, dict):
+            continue
+        desc = _di_direct_text(item_fields.get("Description"))
+        qty = _first_di_item_amount(item_fields, ("Quantity",))
+        unit_price = _first_di_item_amount(item_fields, ("UnitPrice", "Unit Price"))
+        amount = _first_di_item_amount(item_fields, ("Amount", "TotalPrice", "LineTotal", "NetAmount"))
+        total_amount = _first_di_item_amount(item_fields, ("TotalAmount", "GrossAmount", "LineTotalGross"))
+        tax = _first_di_item_amount(item_fields, ("Tax", "TaxAmount", "VAT", "VATAmount"))
+        discount = _first_di_item_amount(item_fields, ("Discount", "DiscountAmount", "LineDiscount", "TotalDiscount"))
+        if desc and _line_text_is_summary(desc) and not _line_text_is_bcrs(desc):
+            continue
+        if not desc and amount is None and total_amount is None:
+            continue
+        line_amount = amount if amount is not None else total_amount
+        if discount and discount > 0:
+            explicit_discount_total += _money_decimal(discount) or Decimal("0.00")
+            pre_discount = _money_decimal(line_amount)
+            qty_total = None
+            if qty is not None and unit_price is not None:
+                qty_total = Decimal(str(qty * unit_price)).quantize(Decimal("0.01"))
+            if pre_discount is not None:
+                already_discounted = qty_total is not None and abs(pre_discount - (qty_total - (_money_decimal(discount) or Decimal("0.00")))) <= Decimal("0.05")
+                if not already_discounted:
+                    line_amount = _money_float(max(Decimal("0.00"), pre_discount - (_money_decimal(discount) or Decimal("0.00"))).quantize(Decimal("0.01")))
+        payload = {
+            "description": desc,
+            "quantity": qty,
+            "unit_price": unit_price,
+            "net_amount": line_amount,
+            "tax_amount": tax,
+            "total_amount": total_amount,
+            "discount_amount": discount,
+        }
+        if _line_text_is_bcrs(desc):
+            amount_dec = _money_decimal(line_amount) or _money_decimal(total_amount) or Decimal("0.00")
+            bcrs_total += amount_dec
+        else:
+            items.append(payload)
+
+    total_discount_dec = _money_decimal(total_discount)
+    remaining_discount = None
+    if total_discount_dec is not None and total_discount_dec > explicit_discount_total:
+        remaining_discount = _money_float((total_discount_dec - explicit_discount_total).quantize(Decimal("0.01")))
+    if remaining_discount:
+        normal_sum = sum((_money_decimal(item.get("net_amount")) or Decimal("0.00") for item in items), Decimal("0.00"))
+        inv_net = _money_decimal(invoice_net)
+        should_allocate = inv_net is None or abs((normal_sum - (_money_decimal(remaining_discount) or Decimal("0.00"))) - inv_net) <= Decimal("0.10")
+        if not should_allocate and inv_net is not None and abs(normal_sum - inv_net) <= Decimal("0.10"):
+            should_allocate = False
+        if should_allocate:
+            _allocate_discount_across_items(items, remaining_discount)
+
+    return items, _money_float(bcrs_total.quantize(Decimal("0.01"))) if bcrs_total > 0 else None
+
+
+def _append_bcrs_item(items: list[dict[str, Any]], amount: float | None) -> None:
+    amount_dec = _money_decimal(amount)
+    if amount_dec is None or amount_dec <= 0:
+        return
+    items.append({
+        "description": "BCRS refundable deposit",
+        "quantity": None,
+        "unit_price": None,
+        "net_amount": _money_float(amount_dec),
+        "tax_amount": 0.0,
+        "total_amount": _money_float(amount_dec),
+    })
+
+
 def _allocate_line_amounts(
     rows: list[dict[str, Any]],
     *,
@@ -5542,6 +5692,7 @@ def _build_rows_from_ai_items(
 def _build_direct_di_page_rows(
     pdf_path: str | Path,
     page_index: int,
+    scan_mode: str = "summary",
     openai_api_key: str | None = None,
     account_company_name: str | None = None,
 ) -> list[dict[str, Any]] | None:
@@ -5578,6 +5729,10 @@ def _build_direct_di_page_rows(
     if not isinstance(items, list):
         items = []
     descriptions: list[str] = []
+    invoice_net_amount = parse_amount(field("SubTotal"))
+    invoice_vat_amount = parse_amount(field("TotalTax"))
+    total_discount_amount = _di_direct_amount(raw_fields.get("TotalDiscount"))
+    direct_items, bcrs_item_amount = _build_direct_di_items(items, invoice_net_amount, total_discount_amount)
     for item in items:
         item_fields = item.get("value_object") if isinstance(item, dict) else None
         if not isinstance(item_fields, dict):
@@ -5619,10 +5774,10 @@ def _build_direct_di_page_rows(
         "order_number": field("OrderNumber"),
         "purchase_order": field("PurchaseOrder"),
         "description": "; ".join(descriptions),
-        "line_items_structured": [],
+        "line_items_structured": direct_items,
         "line_items_raw": "\n".join(descriptions),
-        "net_amount": parse_amount(field("SubTotal")),
-        "vat_amount": parse_amount(field("TotalTax")),
+        "net_amount": invoice_net_amount,
+        "vat_amount": invoice_vat_amount,
         "total_amount": parse_amount(direct_total),
         "currency": field("CurrencyCode"),
         "tax_code": None,
@@ -5667,6 +5822,7 @@ def _build_direct_di_page_rows(
         "header_raw": page_text,
         "totals_raw": "",
         "page_text_raw": page_text,
+        "total_discount_amount": total_discount_amount,
     }
     _apply_direct_di_content_blank_fallbacks(
         row,
@@ -5720,6 +5876,34 @@ def _build_direct_di_page_rows(
     )
     row["provider_status"] = row.get("_provider_status") or row.get("provider_status")
     row["fallback_used"] = bool(row.get("_fallback_used", row.get("fallback_used")))
+    if (scan_mode or "summary").lower() == "lines":
+        line_items = list(row.get("line_items_structured") or [])
+        summary_bcrs_amount = None
+        if not bcrs_item_amount:
+            summary_bcrs_amount = _detect_bcrs_from_text(
+                row.get("page_text_raw") or row.get("di_page_text") or page_text,
+                net=row.get("net_amount"),
+                vat=row.get("vat_amount"),
+                total=row.get("total_amount"),
+            )
+        _append_bcrs_item(line_items, bcrs_item_amount or summary_bcrs_amount)
+        if line_items:
+            row["line_items_structured"] = line_items
+            line_rows = _build_rows_from_ai_items(row, line_items)
+            for line_row in line_rows:
+                line_row["method_used"] = f"{line_row.get('method_used') or 'DI'}+lines"
+                line_row["extraction_source"] = "azure_di_direct_lines"
+            return line_rows
+        fallback_rows = split_line_item_rows(row)
+        if len(fallback_rows) == 1 and fallback_rows[0] is row:
+            row["review_required"] = True
+            row["auto_approved"] = False
+            row["validation_status"] = row.get("validation_status") or "review_line_items_unavailable"
+            reasons = [x for x in re.split(r"[|]", str(row.get("review_reasons") or "")) if x]
+            if "line_items_unavailable" not in reasons:
+                reasons.append("line_items_unavailable")
+            row["review_reasons"] = "|".join(reasons)
+        return fallback_rows
     return [row]
 
 
@@ -5734,6 +5918,7 @@ def process_pdf_page_rows(
         direct_rows = _build_direct_di_page_rows(
             pdf_path,
             page_index,
+            scan_mode=scan_mode,
             openai_api_key=openai_api_key,
             account_company_name=account_company_name,
         )
