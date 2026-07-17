@@ -5245,9 +5245,136 @@ def _line_amount_from_text(line: str) -> float | None:
     return parse_amount(matches[-1])
 
 
+def _money_decimal(value: object) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, Decimal):
+        return value.quantize(Decimal("0.01"))
+    try:
+        parsed = parse_amount(str(value)) if isinstance(value, str) else float(value)
+    except (TypeError, ValueError, InvalidOperation):
+        return None
+    if parsed is None:
+        return None
+    try:
+        return Decimal(str(parsed)).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _money_float(value: Decimal | None) -> float | None:
+    return float(value) if value is not None else None
+
+
+def _line_text_is_bcrs(text: object) -> bool:
+    return bool(re.search(r"\b(?:bcrs|d\.?r\.?s\.?|deposit|returnable|refundable|container)\b", str(text or ""), re.I))
+
+
+def _line_text_is_summary(text: object) -> bool:
+    line = str(text or "").strip()
+    if not line:
+        return True
+    if _line_text_is_bcrs(line):
+        return False
+    return bool(re.search(r"\b(?:sub\s*total|subtotal|total\s+(?:net|vat|tax|due|amount)|grand\s+total|invoice\s+total|vat|tax|amount\s+due|balance\s+due)\b", line, re.I))
+
+
+def _allocate_line_amounts(
+    rows: list[dict[str, Any]],
+    *,
+    invoice_net: object,
+    invoice_vat: object,
+    invoice_total: object,
+    tolerance: Decimal = Decimal("0.10"),
+) -> None:
+    net = _money_decimal(invoice_net)
+    vat = _money_decimal(invoice_vat) or Decimal("0.00")
+    total = _money_decimal(invoice_total)
+    amount_rows: list[tuple[dict[str, Any], Decimal, bool, bool]] = []
+
+    for row in rows:
+        amount = _money_decimal(row.get("net_amount"))
+        if amount is None:
+            amount = _money_decimal(row.get("total_amount"))
+        if amount is None:
+            continue
+        has_tax = row.get("vat_amount") not in (None, "")
+        tax = _money_decimal(row.get("vat_amount")) if has_tax else None
+        amount_rows.append((row, amount, _line_text_is_bcrs(row.get("line_items_raw") or row.get("description")), has_tax))
+
+    if not amount_rows:
+        return
+
+    taxable = [(row, amount, has_tax) for row, amount, is_bcrs, has_tax in amount_rows if not is_bcrs]
+    non_taxable = [(row, amount) for row, amount, is_bcrs, _has_tax in amount_rows if is_bcrs]
+    taxable_sum = sum((amount for _row, amount, _has_tax in taxable), Decimal("0.00"))
+    non_taxable_sum = sum((amount for _row, amount in non_taxable), Decimal("0.00"))
+
+    if taxable and any(has_tax for _row, _amount, has_tax in taxable):
+        for row, amount, is_bcrs, _has_tax in amount_rows:
+            row_vat = _money_decimal(row.get("vat_amount")) or Decimal("0.00")
+            row["net_amount"] = _money_float(amount)
+            row["vat_amount"] = _money_float(row_vat)
+            row["total_amount"] = _money_float((amount + row_vat).quantize(Decimal("0.01")))
+        return
+
+    gross_basis = False
+    if total is not None:
+        all_sum = taxable_sum + non_taxable_sum
+        gross_basis = abs(all_sum - total) <= tolerance and (net is None or abs(taxable_sum - net) > tolerance)
+
+    if gross_basis and taxable_sum > 0 and vat > 0:
+        running_vat = Decimal("0.00")
+        for idx, (row, amount, _has_tax) in enumerate(taxable, start=1):
+            if idx == len(taxable):
+                row_vat = (vat - running_vat).quantize(Decimal("0.01"))
+            else:
+                row_vat = (amount / taxable_sum * vat).quantize(Decimal("0.01"))
+                running_vat += row_vat
+            row_net = (amount - row_vat).quantize(Decimal("0.01"))
+            row["net_amount"] = _money_float(row_net)
+            row["vat_amount"] = _money_float(row_vat)
+            row["total_amount"] = _money_float(amount)
+        for row, amount in non_taxable:
+            row["net_amount"] = _money_float(amount)
+            row["vat_amount"] = 0.0
+            row["total_amount"] = _money_float(amount)
+        return
+
+    if taxable_sum > 0 and vat > 0:
+        running_vat = Decimal("0.00")
+        for idx, (row, amount, _has_tax) in enumerate(taxable, start=1):
+            if idx == len(taxable):
+                row_vat = (vat - running_vat).quantize(Decimal("0.01"))
+            else:
+                row_vat = (amount / taxable_sum * vat).quantize(Decimal("0.01"))
+                running_vat += row_vat
+            row["net_amount"] = _money_float(amount)
+            row["vat_amount"] = _money_float(row_vat)
+            row["total_amount"] = _money_float((amount + row_vat).quantize(Decimal("0.01")))
+    else:
+        for row, amount, is_bcrs, _has_tax in amount_rows:
+            row["net_amount"] = _money_float(amount)
+            row["vat_amount"] = 0.0
+            row["total_amount"] = _money_float(amount)
+
+    for row, amount in non_taxable:
+        row["net_amount"] = _money_float(amount)
+        row["vat_amount"] = 0.0
+        row["total_amount"] = _money_float(amount)
+
+
+def _line_rows_reconcile(rows: list[dict[str, Any]], invoice_total: object, tolerance: Decimal = Decimal("0.10")) -> bool:
+    total = _money_decimal(invoice_total)
+    if total is None:
+        return True
+    summed = sum((_money_decimal(row.get("total_amount")) or Decimal("0.00") for row in rows), Decimal("0.00"))
+    return abs(total - summed) <= tolerance
+
+
 def split_line_item_rows(page_result: dict[str, Any], tolerance: float = 0.05) -> list[dict[str, Any]]:
     raw = page_result.get("line_items_raw") or ""
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip() and not _line_text_is_summary(ln)]
     if not lines:
         return [page_result]
 
@@ -5256,7 +5383,6 @@ def split_line_item_rows(page_result: dict[str, Any], tolerance: float = 0.05) -
     invoice_total = page_result.get("total_amount")
 
     rows: list[dict[str, Any]] = []
-    summed_total = 0.0
     counted = 0
     for idx, line in enumerate(lines, start=1):
         line_total = _line_amount_from_text(line)
@@ -5270,21 +5396,13 @@ def split_line_item_rows(page_result: dict[str, Any], tolerance: float = 0.05) -
         row["line_items_raw"] = line
         row["line_no"] = idx
         if line_total is not None:
-            line_vat = 0.0
-            if len(lines) == 1 and invoice_vat not in (None, ""):
-                try:
-                    line_vat = float(invoice_vat)
-                except (TypeError, ValueError):
-                    line_vat = 0.0
             row["net_amount"] = line_total
-            row["vat_amount"] = line_vat
-            row["total_amount"] = round(line_total + line_vat, 2)
-            summed_total += row["total_amount"]
+            row["vat_amount"] = None
+            row["total_amount"] = None
         rows.append(row)
 
-    mismatch = False
-    if invoice_total is not None and counted > 0:
-        mismatch = abs(float(invoice_total) - float(summed_total)) > tolerance
+    _allocate_line_amounts(rows, invoice_net=invoice_net, invoice_vat=invoice_vat, invoice_total=invoice_total)
+    mismatch = counted > 0 and not _line_rows_reconcile(rows, invoice_total, Decimal(str(tolerance)))
 
     for row in rows:
         if mismatch:
@@ -5347,16 +5465,9 @@ def _build_rows_from_ai_items(
     Flags for review if the sum of line amounts diverges from the invoice total.
     """
     rows: list[dict[str, Any]] = []
-    summed = 0.0
     invoice_net = page_result.get("net_amount")
     invoice_vat = page_result.get("vat_amount")
     invoice_total = page_result.get("total_amount")
-    single_line_vat_fallback = 0.0
-    if len(ai_items) == 1 and invoice_vat not in (None, ""):
-        try:
-            single_line_vat_fallback = float(invoice_vat)
-        except (TypeError, ValueError):
-            single_line_vat_fallback = 0.0
 
     for idx, item in enumerate(ai_items, start=1):
         row = dict(page_result)
@@ -5365,12 +5476,23 @@ def _build_rows_from_ai_items(
         row["source_invoice_total_amount"] = invoice_total
 
         desc = (item.get("description") or "").strip()
+        raw_amt = (
+            item.get("net_amount")
+            if item.get("net_amount") is not None
+            else item.get("amount")
+            if item.get("amount") is not None
+            else item.get("total_amount")
+        )
+        if desc and _line_text_is_summary(desc) and not _line_text_is_bcrs(desc):
+            continue
+        if not desc and raw_amt is None:
+            continue
+
         row["description"] = limit_to_20_words(desc) or page_result.get("description") or "Invoice line"
 
         # Build a readable line_items_raw from the structured item.
         # Accept both "amount" (openai_extract_line_items) and "net_amount"
         # (Azure DI / OpenAI vision line_items_structured).
-        raw_amt = item.get("amount") if item.get("amount") is not None else item.get("net_amount")
         parts = [row["description"]]
         if item.get("quantity") is not None:
             parts.append(f"Qty: {item['quantity']}")
@@ -5388,8 +5510,6 @@ def _build_rows_from_ai_items(
                 amount = parse_amount(str(raw_amt))
 
         if amount is not None:
-            # Use Azure DI's per-line tax if present; otherwise, for a single-line
-            # invoice reuse the invoice-level VAT so export rows reconcile cleanly.
             line_vat = item.get("tax_amount")
             if line_vat is not None:
                 try:
@@ -5397,11 +5517,10 @@ def _build_rows_from_ai_items(
                 except (TypeError, ValueError):
                     line_vat = 0.0
             else:
-                line_vat = single_line_vat_fallback
+                line_vat = None
             row["net_amount"] = amount
             row["vat_amount"] = line_vat
-            row["total_amount"] = round(amount + line_vat, 2)
-            summed += row["total_amount"]
+            row["total_amount"] = item.get("total_amount") if item.get("total_amount") is not None else None
 
         row["line_no"] = idx
         rows.append(row)
@@ -5409,8 +5528,10 @@ def _build_rows_from_ai_items(
     if not rows:
         return [page_result]
 
+    _allocate_line_amounts(rows, invoice_net=invoice_net, invoice_vat=invoice_vat, invoice_total=invoice_total)
+
     # Cross-check against the invoice-level gross total, not just net line sums.
-    if invoice_total is not None and abs(float(invoice_total) - summed) > 0.10:
+    if not _line_rows_reconcile(rows, invoice_total):
         for row in rows:
             row["review_required"] = True
             row["validation_status"] = "review_amount_mismatch"

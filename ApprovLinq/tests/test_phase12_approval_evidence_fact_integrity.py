@@ -5,6 +5,7 @@ from decimal import Decimal
 import uuid
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
@@ -165,6 +166,99 @@ def test_archiving_batch_preserves_rows_exports_and_approved_facts(db, monkeypat
     assert db.get(InvoiceRow, row.id) is not None
     assert db.get(BatchExportEvent, event.id) is not None
     assert db.query(ApprovedInvoiceFact).filter_by(batch_id=batch.id).count() == 1
+
+
+def test_hard_delete_requires_typed_confirmation(db):
+    tenant, company, user = _tenant_company_user(db)
+    batch = _batch(db, tenant, company, status="processed")
+
+    with pytest.raises(HTTPException) as exc_info:
+        batches_router.hard_delete_batch(
+            batch.id,
+            batches_router.BatchHardDeleteRequest(confirm="yes"),
+            db=db,
+            tenant_id=tenant.id,
+            _user=user,
+        )
+
+    assert exc_info.value.status_code == 422
+    assert db.get(InvoiceBatch, batch.id) is not None
+
+
+def test_hard_delete_blocks_export_or_fact_backed_batches(db):
+    tenant, company, user = _tenant_company_user(db)
+    batch = _batch(db, tenant, company, status="exported")
+    _row(db, tenant, company, batch)
+    _event(db, batch, user)
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        batches_router.hard_delete_batch(
+            batch.id,
+            batches_router.BatchHardDeleteRequest(confirm="delete"),
+            db=db,
+            tenant_id=tenant.id,
+            _user=user,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "Archive it instead" in exc_info.value.detail
+    assert db.get(InvoiceBatch, batch.id) is not None
+
+
+def test_hard_delete_removes_wrong_unexported_batch_and_storage(db, tmp_path, monkeypatch):
+    tenant, company, user = _tenant_company_user(db)
+    batch = _batch(db, tenant, company, status="processed")
+    row = _row(db, tenant, company, batch)
+    db.add(InvoiceFile(
+        batch_id=batch.id,
+        tenant_id=tenant.id,
+        company_id=company.id,
+        original_filename="wrong.pdf",
+        stored_filename="wrong.pdf",
+        file_path="/tmp/wrong.pdf",
+        file_bytes=b"pdf bytes",
+        storage_backend="database+local",
+        status="processed",
+    ))
+    db.flush()
+    db.add(InvoiceFieldCandidate(
+        tenant_id=tenant.id,
+        company_id=company.id,
+        batch_id=batch.id,
+        row_id=row.id,
+        field_name="supplier_name",
+        source_type="azure_di",
+        candidate_value="Wrong Supplier",
+    ))
+    db.commit()
+
+    upload_root = tmp_path / "uploads"
+    export_root = tmp_path / "exports"
+    upload_folder = upload_root / str(batch.id)
+    export_folder = export_root / str(batch.id)
+    upload_folder.mkdir(parents=True)
+    export_folder.mkdir(parents=True)
+    (upload_folder / "wrong.pdf").write_bytes(b"%PDF-1.4")
+    (export_folder / "scratch.xlsx").write_bytes(b"xlsx")
+    monkeypatch.setattr(batches_router.settings, "upload_dir", str(upload_root))
+    monkeypatch.setattr(batches_router.settings, "export_dir", str(export_root))
+
+    result = batches_router.hard_delete_batch(
+        batch.id,
+        batches_router.BatchHardDeleteRequest(confirm="delete"),
+        db=db,
+        tenant_id=tenant.id,
+        _user=user,
+    )
+
+    assert result["deleted"] is True
+    assert db.get(InvoiceBatch, batch.id) is None
+    assert db.query(InvoiceRow).filter_by(batch_id=batch.id).count() == 0
+    assert db.query(InvoiceFile).filter_by(batch_id=batch.id).count() == 0
+    assert db.query(InvoiceFieldCandidate).filter_by(batch_id=batch.id).count() == 0
+    assert not upload_folder.exists()
+    assert not export_folder.exists()
 
 
 def test_unresolved_rows_do_not_become_trusted_learning_labels(db):

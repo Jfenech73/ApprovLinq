@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import urllib.parse
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -11,6 +12,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import inspect, or_
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -70,8 +72,46 @@ _PROVIDER_BASELINE_RULE_RESOLUTION_SOURCES = {
 }
 
 
+class BatchHardDeleteRequest(BaseModel):
+    confirm: str
+
+
 def _batch_folder(batch_id: UUID) -> Path:
     return batch_upload_folder(batch_id)
+
+
+def _batch_storage_folder(root: Path, batch_id: UUID) -> Path:
+    return (root / str(batch_id)).resolve()
+
+
+def _remove_batch_storage_folders(batch_id: UUID) -> None:
+    for root in (settings.upload_path, settings.export_path):
+        root_path = root.resolve()
+        target = _batch_storage_folder(root_path, batch_id)
+        if target == root_path or root_path not in target.parents:
+            raise HTTPException(status_code=500, detail="Unsafe batch storage path")
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+
+
+def _ensure_batch_not_processing(db: Session, batch: InvoiceBatch) -> None:
+    active_job = db.query(ScanJob).filter(
+        ScanJob.batch_id == batch.id,
+        ScanJob.status.in_(("queued", "claimed", "running")),
+    ).first()
+    with _ACTIVE_BATCHES_LOCK:
+        if str(batch.id) in _ACTIVE_BATCHES or active_job is not None or batch.status == "processing":
+            raise HTTPException(status_code=409, detail="Cannot delete a batch while it is processing")
+
+
+def _batch_has_immutable_export_evidence(db: Session, batch_id: UUID) -> bool:
+    if db.query(BatchExportEvent).filter(BatchExportEvent.batch_id == batch_id).first() is not None:
+        return True
+    try:
+        from app.db.insight_models import ApprovedInvoiceFact
+    except Exception:
+        return False
+    return db.query(ApprovedInvoiceFact).filter(ApprovedInvoiceFact.batch_id == batch_id).first() is not None
 
 
 def _set_active(batch_id: UUID) -> bool:
@@ -5181,13 +5221,7 @@ def cancel_batch_processing(batch_id: UUID, db: Session = Depends(get_db), tenan
 @router.delete("/{batch_id}")
 def delete_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depends(current_tenant_id), _user: User = Depends(current_user)):
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)
-    active_job = db.query(ScanJob).filter(
-        ScanJob.batch_id == batch.id,
-        ScanJob.status.in_(("queued", "claimed", "running")),
-    ).first()
-    with _ACTIVE_BATCHES_LOCK:
-        if str(batch.id) in _ACTIVE_BATCHES or active_job is not None or batch.status == "processing":
-            raise HTTPException(status_code=409, detail="Cannot delete a batch while it is processing")
+    _ensure_batch_not_processing(db, batch)
 
     previous_status = batch.status
     batch.status = "archived"
@@ -5207,6 +5241,51 @@ def delete_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
     db.commit()
 
     return {"ok": True, "deleted": False, "archived": True, "batch_id": str(batch_id)}
+
+
+@router.post("/{batch_id}/hard-delete")
+def hard_delete_batch(
+    batch_id: UUID,
+    payload: BatchHardDeleteRequest,
+    db: Session = Depends(get_db),
+    tenant_id=Depends(current_tenant_id),
+    _user: User = Depends(current_user),
+):
+    batch = _get_batch_for_tenant(db, batch_id, tenant_id)
+    _ensure_batch_not_processing(db, batch)
+    if payload.confirm.strip().lower() != "delete":
+        raise HTTPException(status_code=422, detail='Type "delete" to permanently delete this batch')
+    if _batch_has_immutable_export_evidence(db, batch.id):
+        raise HTTPException(
+            status_code=409,
+            detail="This batch has export events or approved facts. Archive it instead to preserve evidence.",
+        )
+
+    header_ids = [
+        row[0]
+        for row in db.query(InvoiceReadHeader.id)
+        .filter(InvoiceReadHeader.batch_id == batch.id)
+        .all()
+    ]
+    if header_ids:
+        db.query(InvoiceReadDetail).filter(InvoiceReadDetail.header_id.in_(header_ids)).delete(synchronize_session=False)
+    db.query(InvoiceReadHeader).filter(InvoiceReadHeader.batch_id == batch.id).delete(synchronize_session=False)
+    db.query(InvoiceFieldCandidate).filter(InvoiceFieldCandidate.batch_id == batch.id).delete(synchronize_session=False)
+    db.query(InvoiceDuplicateCandidate).filter(
+        or_(InvoiceDuplicateCandidate.batch_id == batch.id, InvoiceDuplicateCandidate.candidate_batch_id == batch.id)
+    ).delete(synchronize_session=False)
+    db.query(InvoiceRowCorrection).filter(InvoiceRowCorrection.batch_id == batch.id).delete(synchronize_session=False)
+    db.query(InvoiceRowFieldAudit).filter(InvoiceRowFieldAudit.batch_id == batch.id).delete(synchronize_session=False)
+    db.query(ScanJobPage).filter(ScanJobPage.batch_id == batch.id).delete(synchronize_session=False)
+    db.query(ScanJob).filter(ScanJob.batch_id == batch.id).delete(synchronize_session=False)
+    db.query(ScanRun).filter(ScanRun.batch_id == batch.id).delete(synchronize_session=False)
+    db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch.id).delete(synchronize_session=False)
+    db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch.id).delete(synchronize_session=False)
+    db.delete(batch)
+    db.commit()
+
+    _remove_batch_storage_folders(batch_id)
+    return {"ok": True, "deleted": True, "archived": False, "batch_id": str(batch_id)}
 
 
 @router.get("/{batch_id}/rows", response_model=list[InvoiceRowOut])

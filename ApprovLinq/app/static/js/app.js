@@ -569,9 +569,9 @@ $("deleteBatchBtn").addEventListener("click", async () => {
   }
   const batchId = state.selectedBatchId;
   const batchName = $("selectedBatchName")?.textContent || batchId;
-  const confirmed = window.confirm(`Delete batch "${batchName}" permanently? This removes uploaded files, rows, and batch review/export records.`);
+  const confirmed = window.confirm(`Archive batch "${batchName}"? Rows, files, exports and approved facts will be retained.`);
   if (!confirmed) return;
-  setInlineMessage(message, "Deleting batch...");
+  setInlineMessage(message, "Archiving batch...");
   try {
     await api(`/batches/${batchId}`, { method: "DELETE" });
     state.selectedBatchId = null;
@@ -579,7 +579,40 @@ $("deleteBatchBtn").addEventListener("click", async () => {
     $("selectedBatchEmpty").classList.remove("hidden");
     $("filesTableBody").innerHTML = '<tr><td colspan="6" class="muted">No files uploaded yet.</td></tr>';
     if ($("rowsTableBody")) $("rowsTableBody").innerHTML = '<tr><td colspan="9" class="muted">Select a batch first.</td></tr>';
-    setInlineMessage(message, "Batch deleted.", "success");
+    setInlineMessage(message, "Batch archived.", "success");
+    await loadBatches();
+  } catch (error) {
+    setInlineMessage(message, normalizeUiErrorMessage(error.message), "server-error");
+  }
+});
+
+$("hardDeleteBatchBtn").addEventListener("click", async () => {
+  const message = $("actionMessage");
+  if (!state.selectedBatchId) {
+    setInlineMessage(message, "Select a batch first.");
+    return;
+  }
+  const batchId = state.selectedBatchId;
+  const batchName = $("selectedBatchName")?.textContent || batchId;
+  const typed = window.prompt(`Permanently delete batch "${batchName}"?\n\nThis is only allowed before export/fact creation and removes uploaded files, rows and scan records.\n\nType delete to continue.`);
+  if (typed === null) return;
+  if (typed.trim().toLowerCase() !== "delete") {
+    setInlineMessage(message, 'Permanent delete cancelled. Type "delete" exactly to continue.', "warning");
+    return;
+  }
+  setInlineMessage(message, "Deleting batch permanently...");
+  try {
+    await api(`/batches/${batchId}/hard-delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: typed }),
+    });
+    state.selectedBatchId = null;
+    $("selectedBatchPanel").classList.add("hidden");
+    $("selectedBatchEmpty").classList.remove("hidden");
+    $("filesTableBody").innerHTML = '<tr><td colspan="6" class="muted">No files uploaded yet.</td></tr>';
+    if ($("rowsTableBody")) $("rowsTableBody").innerHTML = '<tr><td colspan="9" class="muted">Select a batch first.</td></tr>';
+    setInlineMessage(message, "Batch permanently deleted.", "success");
     await loadBatches();
   } catch (error) {
     setInlineMessage(message, normalizeUiErrorMessage(error.message), "server-error");

@@ -61,6 +61,81 @@ def test_rule_based_line_split_uses_invoice_vat_for_single_line():
     assert rows[0].get('review_required') is not True
 
 
+def test_ai_line_builder_allocates_invoice_vat_across_multiple_net_lines():
+    page_result = {
+        'description': 'Invoice',
+        'supplier_name': 'Supplier Ltd',
+        'invoice_number': 'INV-LINES',
+        'invoice_date': '2026-07-17',
+        'net_amount': 100.0,
+        'vat_amount': 18.0,
+        'total_amount': 118.0,
+        'currency': 'EUR',
+    }
+    rows = _build_rows_from_ai_items(page_result, [
+        {'description': 'Widget A', 'net_amount': 40.0, 'tax_amount': None},
+        {'description': 'Widget B', 'net_amount': 60.0, 'tax_amount': None},
+    ])
+    assert [row['description'] for row in rows] == ['Widget A', 'Widget B']
+    assert [row['supplier_name'] for row in rows] == ['Supplier Ltd', 'Supplier Ltd']
+    assert [row['invoice_number'] for row in rows] == ['INV-LINES', 'INV-LINES']
+    assert [row['vat_amount'] for row in rows] == [7.2, 10.8]
+    assert round(sum(row['total_amount'] for row in rows), 2) == 118.0
+    assert all(row.get('review_required') is not True for row in rows)
+
+
+def test_ai_line_builder_handles_gross_line_amounts_without_double_vat():
+    page_result = {
+        'description': 'Invoice',
+        'net_amount': 100.0,
+        'vat_amount': 18.0,
+        'total_amount': 118.0,
+    }
+    rows = _build_rows_from_ai_items(page_result, [
+        {'description': 'Gross line A', 'amount': 59.0},
+        {'description': 'Gross line B', 'amount': 59.0},
+    ])
+    assert [row['net_amount'] for row in rows] == [50.0, 50.0]
+    assert [row['vat_amount'] for row in rows] == [9.0, 9.0]
+    assert [row['total_amount'] for row in rows] == [59.0, 59.0]
+    assert all(row.get('review_required') is not True for row in rows)
+
+
+def test_line_builder_preserves_bcrs_as_non_vat_line_and_reconciles():
+    page_result = {
+        'description': 'Invoice',
+        'net_amount': 76.26,
+        'vat_amount': 13.73,
+        'total_amount': 92.39,
+    }
+    rows = _build_rows_from_ai_items(page_result, [
+        {'description': 'Water 24x1L', 'net_amount': 76.26, 'tax_amount': None},
+        {'description': 'BCRS refundable deposit', 'net_amount': 2.40, 'tax_amount': None},
+    ])
+    assert len(rows) == 2
+    assert rows[0]['vat_amount'] == 13.73
+    assert rows[0]['total_amount'] == 89.99
+    assert rows[1]['net_amount'] == 2.4
+    assert rows[1]['vat_amount'] == 0.0
+    assert rows[1]['total_amount'] == 2.4
+    assert round(sum(row['total_amount'] for row in rows), 2) == 92.39
+    assert all(row.get('review_required') is not True for row in rows)
+
+
+def test_rule_based_line_split_filters_summary_rows_and_allocates_vat():
+    page_result = {
+        'description': 'Invoice',
+        'line_items_raw': 'Widget A 40.00\nWidget B 60.00\nVAT 18.00\nInvoice Total 118.00',
+        'net_amount': 100.0,
+        'vat_amount': 18.0,
+        'total_amount': 118.0,
+    }
+    rows = split_line_item_rows(page_result)
+    assert [row['description'] for row in rows] == ['Widget A 40.00', 'Widget B 60.00']
+    assert [row['vat_amount'] for row in rows] == [7.2, 10.8]
+    assert round(sum(row['total_amount'] for row in rows), 2) == 118.0
+
+
 def test_bcrs_detection_uses_source_invoice_totals_for_line_rows():
     payload = {
         'totals_raw': 'Net 76.26\nVAT 13.73\nBCRS Deposit 2.40\nTotal Due 92.39',
