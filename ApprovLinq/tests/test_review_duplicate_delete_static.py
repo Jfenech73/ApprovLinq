@@ -38,25 +38,27 @@ def test_review_row_selection_preserves_natural_order_and_scroll_position():
     assert "a.id === state.selected" not in js
 
 
-def test_review_columns_share_measured_height_and_rows_scroll():
+def test_review_rows_column_is_capped_to_preview_height_and_scrollable():
     css = (ROOT / "app/static/css/components.css").read_text(encoding="utf-8")
     js = (ROOT / "app/static/js/review.js").read_text()
     html = (ROOT / "app/static/review.html").read_text()
-    assert "components.css?v=20260717c" in html
-    assert "review.js?v=20260717c" in html
+    assert "components.css?v=20260717d" in html
+    assert "review.js?v=20260717d" in html
     assert "grid-template-rows: auto auto minmax(0, 1fr)" in css
-    assert "height: var(--review-column-height, auto)" in css
-    assert "min-height: var(--review-column-height, calc(100vh - 160px))" in css
-    assert "syncReviewColumnHeights" in js
-    assert "_columnNaturalHeight(\".review-col-edit\")" in js
-    assert "_columnNaturalHeight(\".review-col-remap\")" in js
-    assert "grid.style.setProperty(\"--review-column-height\"" in js
-    assert ".review-3col" in css and "overflow: visible" in css
-    assert ".review-col-rows .row-list-scroll" in css
+    assert "height: calc(100vh - 57px)" in css
+    assert "max-height: calc(100vh - 57px)" in css
+    assert "height: 100%" in css
     assert "max-height: 100%" in css
+    assert ".review-3col" in css and "overflow: hidden" in css
+    assert ".review-col-rows .row-list-scroll" in css
+    assert "height: auto" in css
+    assert "overflow-y: auto" in css
     assert "overscroll-behavior: contain" in css
-    assert ".review-3col{height:var(--review-column-height,auto)" in js
-    assert ".row-list-scroll{min-height:0;height:100%;max-height:100%;overflow-y:auto" in js
+    assert "syncReviewColumnHeights" not in js
+    assert "_columnNaturalHeight" not in js
+    assert "--review-column-height" not in js
+    assert ".review-3col{height:100%;max-height:100%;min-height:0;overflow:hidden" in js
+    assert ".row-list-scroll{min-height:0;height:auto;max-height:100%;overflow-y:auto" in js
 
 
 def test_apply_saved_regions_has_visible_status_feedback():
