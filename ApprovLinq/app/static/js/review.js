@@ -300,6 +300,48 @@ function render() {
 
   renderEditor();
   updateRemapUI();
+  scheduleRowsHeightSync();
+}
+
+
+let _rowsHeightSyncTimer = null;
+function scheduleRowsHeightSync() {
+  clearTimeout(_rowsHeightSyncTimer);
+  _rowsHeightSyncTimer = setTimeout(syncRowsHeightToPreview, 40);
+}
+
+function syncRowsHeightToPreview() {
+  const rowsCol = document.querySelector(".review-col-rows");
+  const rowsBody = document.querySelector(".review-col-rows .review-col-body");
+  const rowScroll = document.querySelector(".review-col-rows .row-list-scroll");
+  const previewCol = document.querySelector(".review-col-remap");
+  if (!rowsCol || !rowsBody || !rowScroll || !previewCol) return;
+  if (window.matchMedia && window.matchMedia("(max-width: 900px)").matches) {
+    rowsCol.style.removeProperty("--review-rows-column-max-height");
+    rowScroll.style.removeProperty("--review-rows-scroll-max-height");
+    return;
+  }
+
+  rowsCol.style.removeProperty("--review-rows-column-max-height");
+  rowScroll.style.removeProperty("--review-rows-scroll-max-height");
+  requestAnimationFrame(() => {
+    const previewHeight = Math.ceil(previewCol.getBoundingClientRect().height);
+    if (!previewHeight || previewHeight < 240) return;
+    const head = rowsCol.querySelector(".review-col-head");
+    const details = rowsCol.querySelector(".selected-explain-panel:not([hidden])");
+    const bodyStyle = window.getComputedStyle(rowsBody);
+    const bodyPadding =
+      (parseFloat(bodyStyle.paddingTop) || 0) + (parseFloat(bodyStyle.paddingBottom) || 0);
+    const bodyGap = details ? (parseFloat(bodyStyle.gap) || 0) : 0;
+    const usedHeight =
+      (head ? head.getBoundingClientRect().height : 0) +
+      (details ? details.getBoundingClientRect().height : 0) +
+      bodyPadding +
+      bodyGap;
+    const scrollMax = Math.max(240, Math.floor(previewHeight - usedHeight));
+    rowsCol.style.setProperty("--review-rows-column-max-height", `${previewHeight}px`);
+    rowScroll.style.setProperty("--review-rows-scroll-max-height", `${scrollMax}px`);
+  });
 }
 
 
@@ -308,15 +350,16 @@ function ensureExplainabilityStyles() {
   const st = document.createElement("style");
   st.id = "reviewExplainabilityStyles";
   st.textContent = `
-    .review-page-body{display:grid;grid-template-rows:auto auto minmax(0,1fr);height:calc(100vh - 57px);max-height:calc(100vh - 57px);min-height:0;overflow:hidden}
-    @supports (height:100dvh){.review-page-body{height:calc(100dvh - 57px);max-height:calc(100dvh - 57px)}}
-    .review-3col{height:100%;max-height:100%;min-height:0;overflow:hidden;align-items:stretch}
-    .review-3col>.review-col{height:100%;max-height:100%;min-height:0;overflow:hidden}
-    .review-col-body{min-height:0;overflow-y:auto;overflow-x:hidden}
-    .review-rows-body{display:flex;flex-direction:column;gap:8px;padding:8px;height:100%;min-height:0;overflow:hidden}
-    .row-list-scroll{min-height:0;height:auto;max-height:100%;overflow-y:auto;overflow-x:hidden;flex:1 1 auto;border-bottom:0;padding-bottom:0;overscroll-behavior:contain}
-    .review-col-edit .review-col-body,.review-col-remap .review-col-body{overflow-y:auto}
-    .review-col-remap .preview-wrap{flex:1 1 auto!important;min-height:300px!important}
+    .review-page-body{display:block;min-height:calc(100vh - 57px);height:auto;max-height:none;overflow:visible}
+    @supports (height:100dvh){.review-page-body{min-height:calc(100dvh - 57px)}}
+    .review-3col{height:auto;max-height:none;min-height:calc(100vh - 160px);overflow:visible;align-items:start}
+    .review-3col>.review-col{height:auto;max-height:none;min-height:0;overflow:visible}
+    .review-col-body{min-height:0;overflow-y:visible;overflow-x:hidden}
+    .review-col-rows{max-height:var(--review-rows-column-max-height,none);overflow:hidden}
+    .review-rows-body{display:flex;flex-direction:column;gap:8px;padding:8px;min-height:0;overflow:hidden}
+    .row-list-scroll{min-height:0;height:auto;max-height:var(--review-rows-scroll-max-height,60vh);overflow-y:auto;overflow-x:hidden;flex:1 1 auto;border-bottom:0;padding-bottom:0;overscroll-behavior:contain}
+    .review-col-edit .review-col-body,.review-col-remap .review-col-body{overflow-y:visible}
+    .review-col-remap .preview-wrap{flex:0 0 auto!important;min-height:300px!important}
     .selected-explain-panel{flex:0 0 auto;max-height:140px;overflow:auto;border-top:1px solid var(--ap-border,#d7e0ea);padding-top:8px}
     .selected-explain-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
     .selected-explain-head h3{margin:0;font-size:13px;font-weight:700;color:var(--ap-text-muted,#536476)}
@@ -438,6 +481,7 @@ function renderEditor() {
   ed.innerHTML = header + html;
   $("saveBtn").onclick = saveRow;
   ed.querySelectorAll("[data-revert]").forEach(b => b.onclick = () => revertField(b.dataset.revert));
+  scheduleRowsHeightSync();
 }
 
 async function saveRow() {
@@ -487,6 +531,7 @@ async function loadAudit(rowId) {
       </div>`;
     }).join("") || '<div class="muted">No history yet.</div>';
   } catch (e) { /* ignore */ }
+  scheduleRowsHeightSync();
 }
 
 async function loadCandidateEvidence(rowId) {
@@ -537,12 +582,14 @@ function _showPreviewUnavailable(message) {
     if (msgEl && message) msgEl.textContent = message;
     ph.hidden = false;
   }
+  scheduleRowsHeightSync();
 }
 function _showPreviewImage(blobUrl) {
   const img = $("previewImg");
   const ph  = $("previewUnavailable");
   if (ph) ph.hidden = true;
   img.hidden = false;
+  img.onload = scheduleRowsHeightSync;
   img.src = blobUrl;
 }
 async function refreshPreview() {
@@ -606,6 +653,8 @@ $("nextPageBtn").onclick = async () => {
 document.querySelectorAll(".filter-chips .btn").forEach(b => {
   b.onclick = () => { state.filter = b.dataset.filter; render(); };
 });
+
+window.addEventListener("resize", scheduleRowsHeightSync);
 
 $("approveBtn").onclick = async () => {
   const r = await fetch(`/review/batches/${batchId}/transition`, {
@@ -700,6 +749,7 @@ $("bcrsSplitBtn").onclick = () => {
     bcrsSplitMsg.textContent = "";
     bcrsSplitAmount.focus();
   }
+  scheduleRowsHeightSync();
 };
 
 $("bcrsSplitCancelBtn").onclick = _hideBcrsSplitPanel;

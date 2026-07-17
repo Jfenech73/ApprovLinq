@@ -584,15 +584,16 @@ html[data-theme="dark"] .ap-app .stat-value { color: var(--ap-text) !important; 
 .ap-app .review-col-rows .review-rows-body {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  height: auto;
   min-height: 0;
   overflow: hidden;
 }
 
 .ap-app .review-col-rows .row-list-scroll {
   flex: 1 1 auto;
-  height: 100%;
+  height: auto;
   min-height: 0;
+  max-height: var(--review-rows-scroll-max-height, 60vh);
   overflow-y: auto;
   overflow-x: hidden;
   border-bottom: 0;
@@ -891,17 +892,15 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
    3-col grid can have internally scrollable columns on desktop.
    This class is only applied to review.html, not to other pages. */
 .review-page-body {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  height: calc(100vh - 57px);     /* shell topbar is above this page body */
-  max-height: calc(100vh - 57px);
-  min-height: 0;
-  overflow: hidden;
+  display: block;
+  min-height: calc(100vh - 57px);     /* shell topbar is above this page body */
+  height: auto;
+  max-height: none;
+  overflow: visible;
 }
 @supports (height: 100dvh) {
   .review-page-body {
-    height: calc(100dvh - 57px);
-    max-height: calc(100dvh - 57px);
+    min-height: calc(100dvh - 57px);
   }
 }
 
@@ -916,21 +915,21 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
   /* Use min-height so columns can grow beyond viewport, but don't trap scroll.
      On larger screens the sticky sidebar + topbar give a natural viewport feel.
      overflow must NOT be hidden — that prevents column bodies from scrolling. */
-  min-height: 0;
-  align-items: stretch;
-  height: 100%;
-  max-height: 100%;
+  min-height: calc(100vh - 160px);
+  align-items: start;
+  height: auto;
+  max-height: none;
   flex: 1 1 auto;
-  overflow: hidden;
+  overflow: visible;
 }
 
 /* Each column scrolls independently */
 .review-3col > .review-col {
   display: flex;
   flex-direction: column;
-  overflow: hidden;  /* clip horizontally only via child overflow-y:auto */
-  height: 100%;
-  max-height: 100%;
+  overflow: visible;
+  height: auto;
+  max-height: none;
   min-height: 0;
   border-right: 1px solid var(--ap-border);
 }
@@ -955,21 +954,32 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
 
 /* Scrollable body inside each column */
 .review-col-body {
-  flex: 1;
+  flex: 0 0 auto;
   min-height: 0;
-  overflow-y: auto;
+  overflow-y: visible;
   overflow-x: hidden;
   padding: var(--ap-s-3) var(--ap-s-4);
 }
 
 /* Col 1 — rows list */
-.review-col-rows .review-col-body { padding: var(--ap-s-2); }
+.review-col-rows {
+  max-height: var(--review-rows-column-max-height, none);
+  overflow: hidden;
+}
+
+.review-col-rows .review-col-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ap-s-2);
+  padding: var(--ap-s-2);
+  overflow: hidden;
+}
 
 .review-col-rows .row-list-scroll {
   flex: 1 1 auto;
   min-height: 0;
   height: auto;
-  max-height: 100%;
+  max-height: var(--review-rows-scroll-max-height, 60vh);
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -977,7 +987,7 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
 
 /* Col 2 — edit panel: ensure long field values wrap cleanly */
 .review-col-edit .review-col-body {
-  overflow-y: auto;
+  overflow-y: visible;
   overflow-wrap: break-word;
   word-break: break-word;
 }
@@ -1007,7 +1017,7 @@ html[data-theme="dark"] .ap-app .field-reason { color: #fde68a; }
 
 /* Preview inside col 3 grows to fill available space */
 .review-col-remap .preview-wrap {
-  flex: 1 1 auto !important;
+  flex: 0 0 auto !important;
   min-height: 300px !important;
   position: relative;
   border: 1px solid var(--ap-border);
