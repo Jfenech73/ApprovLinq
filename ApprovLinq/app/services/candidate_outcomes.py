@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.db import models as M
 from app.db.review_models import CORRECTABLE_FIELDS, InvoiceFieldCandidate, InvoiceRowCorrection
 from app.services import correction_service as cs
+from app.services.export_eligibility import DEFAULT_EXPORT_ELIGIBILITY_POLICY
 
 
 _AMOUNT_FIELDS = {"net_amount", "vat_amount", "total_amount"}
@@ -77,6 +78,8 @@ def label_row_candidates(
     Non-selected candidates keep rejected status; they receive final_value for
     later model training but are not marked accepted/corrected.
     """
+    if not DEFAULT_EXPORT_ELIGIBILITY_POLICY.row_is_eligible_for_trusted_learning(db, batch=batch, row=row):
+        return 0
     candidates = db.execute(
         select(InvoiceFieldCandidate).where(
             InvoiceFieldCandidate.batch_id == batch.id,
@@ -127,8 +130,9 @@ def label_batch_candidates(
 ) -> int:
     """Label candidates for all rows in a batch at export/acceptance time."""
     row_query = select(M.InvoiceRow).where(
-        M.InvoiceRow.batch_id == batch.id,
-        M.InvoiceRow.row_status == M.INVOICE_ROW_STATUS_ACTIVE,
+        M.InvoiceRow.id.in_(
+            DEFAULT_EXPORT_ELIGIBILITY_POLICY.exportable_rows_query(db, batch).with_entities(M.InvoiceRow.id)
+        )
     )
     if getattr(batch, "current_scan_run_id", None) is not None:
         row_query = row_query.where(M.InvoiceRow.scan_run_id == batch.current_scan_run_id)

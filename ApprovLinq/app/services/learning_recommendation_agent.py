@@ -31,6 +31,7 @@ from app.db.learning_models import (
 )
 from app.db.review_models import CorrectionRule, InvoiceFieldCandidate, RemapHint
 from app.services.candidate_outcomes import normalise_outcome_value
+from app.services.export_eligibility import DEFAULT_EXPORT_ELIGIBILITY_POLICY
 
 
 RECOMMENDABLE_RULE_FIELDS = frozenset({"supplier_name", "nominal_account_code"})
@@ -106,6 +107,12 @@ def _candidate_groups(db: Session, *, tenant_id: Any, company_id: Any | None) ->
 
     groups: dict[tuple[str, str], list[InvoiceFieldCandidate]] = defaultdict(list)
     for cand in db.execute(q).scalars().all():
+        row = db.get(M.InvoiceRow, cand.row_id)
+        if row is None:
+            continue
+        batch = db.get(M.InvoiceBatch, cand.batch_id)
+        if batch is None or not DEFAULT_EXPORT_ELIGIBILITY_POLICY.row_is_eligible_for_trusted_learning(db, batch=batch, row=row):
+            continue
         source = cand.normalised_value or normalise_outcome_value(cand.field_name, cand.candidate_value)
         target = normalise_outcome_value(cand.field_name, cand.final_value)
         if not source or not target or source == target:

@@ -32,6 +32,7 @@ from app.services.exporter import workbook_from_rows
 from app.services.corrected_exporter import build_corrected_rows, export_batch_corrected
 # <<< REVIEW_PACK corrected_export_import
 from app.services.description_summary import summarise_total_invoice_description
+from app.services.export_eligibility import DEFAULT_EXPORT_ELIGIBILITY_POLICY, ExportEligibilityError
 from app.services.extractor import get_pdf_page_count, process_pdf_page_rows
 from app.services.account_nominal_resolver import apply_master_data_enrichment
 from app.services.amount_resolver import apply_bcrs_split, decide_bcrs_split
@@ -4417,7 +4418,7 @@ def _current_rows_query(db: Session, batch: InvoiceBatch):
 
 
 def _exportable_rows_query(db: Session, batch: InvoiceBatch):
-    return _current_rows_query(db, batch).filter(InvoiceRow.row_status == INVOICE_ROW_STATUS_ACTIVE)
+    return DEFAULT_EXPORT_ELIGIBILITY_POLICY.exportable_rows_query(db, batch)
 
 
 def _process_batch_job(batch_id: UUID, tenant_id, *, scan_run_id=None, scan_job_id: int | None = None, worker_id: str | None = None) -> None:
@@ -5188,30 +5189,24 @@ def delete_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
         if str(batch.id) in _ACTIVE_BATCHES or active_job is not None or batch.status == "processing":
             raise HTTPException(status_code=409, detail="Cannot delete a batch while it is processing")
 
-    upload_folder = batch_upload_folder(batch.id)
-    export_folder = batch_export_folder(batch.id)
-
-    db.query(InvoiceRowFieldAudit).filter(InvoiceRowFieldAudit.batch_id == batch.id).delete(synchronize_session=False)
-    db.query(InvoiceRowCorrection).filter(InvoiceRowCorrection.batch_id == batch.id).delete(synchronize_session=False)
-    db.query(InvoiceDuplicateCandidate).filter(
-        (InvoiceDuplicateCandidate.batch_id == batch.id)
-        | (InvoiceDuplicateCandidate.candidate_batch_id == batch.id)
-    ).delete(synchronize_session=False)
-    db.query(BatchExportEvent).filter(BatchExportEvent.batch_id == batch.id).delete(synchronize_session=False)
-    db.query(InvoiceRow).filter(InvoiceRow.batch_id == batch.id).delete(synchronize_session=False)
-    db.query(InvoiceFile).filter(InvoiceFile.batch_id == batch.id).delete(synchronize_session=False)
-    db.delete(batch)
+    previous_status = batch.status
+    batch.status = "archived"
+    batch.notes = ((batch.notes or "").rstrip() + "\nArchived from batch list; rows, files, exports and facts retained.").strip()
+    db.add(InvoiceRowFieldAudit(
+        batch_id=batch.id,
+        scan_run_id=getattr(batch, "current_scan_run_id", None),
+        row_id=0,
+        field_name="__status__",
+        old_value=previous_status,
+        new_value="archived",
+        action="batch_archive",
+        note="Batch archived instead of physically deleted; evidence retained.",
+        user_id=getattr(_user, "id", None),
+        username=getattr(_user, "email", None) or getattr(_user, "full_name", None),
+    ))
     db.commit()
 
-    for folder in (upload_folder, export_folder):
-        try:
-            if folder.exists():
-                import shutil
-                shutil.rmtree(folder, ignore_errors=True)
-        except Exception:
-            logger.warning("Failed to remove batch folder %s", folder, exc_info=True)
-
-    return {"ok": True, "deleted_batch_id": str(batch_id)}
+    return {"ok": True, "deleted": False, "archived": True, "batch_id": str(batch_id)}
 
 
 @router.get("/{batch_id}/rows", response_model=list[InvoiceRowOut])
@@ -5391,7 +5386,14 @@ def export_batch(batch_id: UUID, db: Session = Depends(get_db), tenant_id=Depend
     from app.db.models import Company, Tenant
 
     batch = _get_batch_for_tenant(db, batch_id, tenant_id)
-    rows = _current_rows_query(db, batch).order_by(InvoiceRow.id.asc()).all()
+    try:
+        DEFAULT_EXPORT_ELIGIBILITY_POLICY.ensure_export_allowed(db, batch)
+    except ExportEligibilityError as exc:
+        raise HTTPException(status_code=409, detail={
+            "message": str(exc),
+            "issues": [issue.__dict__ for issue in exc.result.issues],
+        })
+    rows = _exportable_rows_query(db, batch).order_by(InvoiceRow.id.asc()).all()
     if not rows:
         raise HTTPException(status_code=400, detail="No rows available to export")
 

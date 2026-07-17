@@ -6,7 +6,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_NAME = "ApprovLinq_3_69_phase11_release_stabilisation_regression_closure.zip"
+DEFAULT_NAME = "ApprovLinq_3_69_phase12_approval_evidence_fact_integrity.zip"
 FIXED_TIMESTAMP = (2026, 7, 15, 0, 0, 0)
 
 EXCLUDED_DIRS = {
@@ -65,7 +65,7 @@ def _is_excluded(path: Path) -> bool:
         return True
     if name.endswith(".json") and any(marker in name for marker in ("credential", "credentials", "token", "service-account")):
         return True
-    if name.startswith("phase11_pytest_report") and path.suffix.lower() == ".txt":
+    if (name.startswith("phase11_pytest_report") or name.startswith("phase12_pytest")) and path.suffix.lower() == ".txt":
         return True
     return False
 

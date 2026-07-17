@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.db import models as M
 from app.db.insight_models import ApprovedInvoiceFact
 from app.db.review_models import BatchExportEvent, InvoiceDuplicateCandidate
+from app.services.export_eligibility import DEFAULT_EXPORT_ELIGIBILITY_POLICY, ExportEligibilityError
 
 
 def _money(value: Any) -> Decimal | None:
@@ -118,9 +119,16 @@ def materialise_approved_invoice_facts_for_export(
     """Persist immutable facts from the final corrected export snapshot."""
     from app.services.corrected_exporter import build_corrected_rows
 
+    if export_event.id is None or export_event.batch_id != batch.id:
+        raise ValueError("Approved facts require a persisted export event for the same batch")
+    if not (export_event.file_bytes or export_event.file_path):
+        raise ValueError("Approved facts require durable export-event evidence")
+    eligibility = DEFAULT_EXPORT_ELIGIBILITY_POLICY.ensure_export_allowed(db, batch)
     rows = build_corrected_rows(db, batch)
     if not rows:
         return 0
+    if export_event.row_count is not None and int(export_event.row_count) != eligibility.exportable_row_count:
+        raise ExportEligibilityError(DEFAULT_EXPORT_ELIGIBILITY_POLICY.evaluate(db, batch))
     row_ids = [int(row["id"]) for row in rows if row.get("id") is not None]
     headers = _latest_headers(db, row_ids)
     nominal_names = _nominal_names(db, batch.tenant_id, batch.company_id)
@@ -136,6 +144,7 @@ def materialise_approved_invoice_facts_for_export(
     }
 
     created = 0
+    export_total = Decimal("0.00")
     for row_data in rows:
         row_id = int(row_data["id"])
         if row_id in existing:
@@ -208,7 +217,20 @@ def materialise_approved_invoice_facts_for_export(
             duplicate_exposure_status=dup_status,
         )
         db.add(fact)
+        if total is not None:
+            export_total += total
         created += 1
+    if created:
+        db.flush()
+        fact_total = db.execute(
+            select(func.coalesce(func.sum(ApprovedInvoiceFact.reporting_total_amount), 0)).where(
+                ApprovedInvoiceFact.batch_id == batch.id,
+                ApprovedInvoiceFact.export_event_id == export_event.id,
+                ApprovedInvoiceFact.fact_version == export_event.export_version,
+            )
+        ).scalar() or Decimal("0.00")
+        if Decimal(str(fact_total)).quantize(Decimal("0.01")) != export_total.quantize(Decimal("0.01")):
+            raise ValueError("Approved fact total does not reconcile with corrected export snapshot")
     return created
 
 

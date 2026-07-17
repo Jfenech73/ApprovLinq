@@ -1,5 +1,15 @@
 # ApprovLinq Changelog
 
+## v3.69.12 - 2026-07-17
+
+### Approval, evidence and fact integrity
+- Added central `ExportEligibilityPolicy` for export, approved-fact creation, and trusted-learning gates.
+- Blocked export/fact creation for unapproved batches, unresolved review rows, page errors, failed files, and failed scan pages.
+- Kept approved facts immutable and export-event backed, with reconciliation between corrected export rows and fact totals.
+- Changed batch deletion endpoint to archive batches instead of physically deleting rows, files, export events, and approved facts.
+- Added fact IDs to insight metrics and a fact drill-down endpoint for immutable fact/evidence inspection.
+- Prevented unresolved rows from becoming trusted candidate labels, supplier-pattern evidence, or learning recommendation evidence.
+
 ## v3.69.11 - 2026-07-15
 
 ### Release stabilisation and regression closure

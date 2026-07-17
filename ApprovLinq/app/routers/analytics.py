@@ -109,3 +109,18 @@ def get_variance(
 ):
     _check_company(db, tenant_id, company_id)
     return expense_insights.variance(db, tenant_id=tenant_id, company_id=company_id)
+
+
+@router.get("/facts/{fact_id}")
+def get_fact_drilldown(
+    fact_id: int,
+    company_id: UUID = Query(...),
+    db: Session = Depends(get_db),
+    tenant_id=Depends(current_tenant_id),
+    _user: User = Depends(current_user),
+):
+    _check_company(db, tenant_id, company_id)
+    try:
+        return expense_insights.fact_drilldown(db, tenant_id=tenant_id, company_id=company_id, fact_id=fact_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))

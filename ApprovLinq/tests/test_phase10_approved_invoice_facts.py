@@ -249,7 +249,7 @@ def test_insights_use_only_latest_approved_fact_version_not_mutable_rows(db):
     assert db.query(ApprovedInvoiceFact).filter_by(batch_id=batch.id).count() == 2
     assert summary["total_rows"] == 1
     assert summary["total_spend"] == 200.0
-    assert top == [{"supplier_name": "Final Supplier", "total": 200.0, "count": 1}]
+    assert top == [{"supplier_name": "Final Supplier", "total": 200.0, "count": 1, "fact_ids": [2]}]
     assert monthly[-1]["total"] == 200.0
 
 
@@ -305,7 +305,7 @@ def test_expense_insights_are_computed_from_approved_facts(db):
     vat = expense_insights.vat_exceptions(db, tenant_id=tenant.id, company_id=company.id)
     credits = expense_insights.credit_note_impact(db, tenant_id=tenant.id, company_id=company.id)
 
-    assert categories[0] == {"category": "Utilities", "total": 130.0, "count": 1}
+    assert categories[0] == {"category": "Utilities", "total": 130.0, "count": 1, "fact_ids": [1]}
     assert duplicates["exposed_count"] == 1
     assert duplicates["exposed_total"] == 130.0
     assert vat["exception_count"] == 1

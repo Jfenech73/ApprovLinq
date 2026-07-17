@@ -16,6 +16,7 @@ from app.db.models import (
     invoice_row_export_active,
 )
 from app.db.review_models import InvoiceRowCorrection
+from app.services.export_eligibility import DEFAULT_EXPORT_ELIGIBILITY_POLICY
 
 
 TRUSTED_PATTERN_OUTCOME_SOURCES: frozenset[str] = frozenset({
@@ -204,6 +205,8 @@ def promote_supplier_pattern_from_row(
         return False
     if not invoice_row_export_active(row):
         return False
+    if not DEFAULT_EXPORT_ELIGIBILITY_POLICY.row_is_eligible_for_trusted_learning(db, batch=batch, row=row):
+        return False
     supplier_name = _final_supplier_name(db, row)
     supplier = _supplier_for_row_value(
         db,
@@ -273,8 +276,9 @@ def promote_supplier_patterns_for_batch(
     if outcome_source not in TRUSTED_PATTERN_OUTCOME_SOURCES:
         return 0
     q = db.query(InvoiceRow).filter(
-        InvoiceRow.batch_id == batch.id,
-        InvoiceRow.row_status == INVOICE_ROW_STATUS_ACTIVE,
+        InvoiceRow.id.in_(
+            DEFAULT_EXPORT_ELIGIBILITY_POLICY.exportable_rows_query(db, batch).with_entities(InvoiceRow.id)
+        )
     )
     if getattr(batch, "current_scan_run_id", None) is not None:
         q = q.filter(InvoiceRow.scan_run_id == batch.current_scan_run_id)

@@ -20,6 +20,7 @@ from app.db.review_models import InvoiceRowFieldAudit, BatchExportEvent, Invoice
 from app.services import correction_service as cs
 from app.services.candidate_outcomes import label_batch_candidates
 from app.services.description_summary import summarise_total_invoice_description
+from app.services.export_eligibility import DEFAULT_EXPORT_ELIGIBILITY_POLICY
 from app.services.exporter import workbook_from_rows
 from app.services.supplier_pattern_learning import promote_supplier_patterns_for_batch
 from app.utils.storage import batch_export_folder
@@ -76,8 +77,9 @@ def _build_di_candidate_summary_map(db: Session, batch_id, scan_run_id=None) -> 
 def build_corrected_rows(db: Session, batch: M.InvoiceBatch) -> list[dict]:
     scan_run_id = getattr(batch, "current_scan_run_id", None)
     row_query = select(M.InvoiceRow).where(
-        M.InvoiceRow.batch_id == batch.id,
-        M.InvoiceRow.row_status == M.INVOICE_ROW_STATUS_ACTIVE,
+        M.InvoiceRow.id.in_(
+            DEFAULT_EXPORT_ELIGIBILITY_POLICY.exportable_rows_query(db, batch).with_entities(M.InvoiceRow.id)
+        )
     )
     if scan_run_id is not None:
         row_query = row_query.where(M.InvoiceRow.scan_run_id == scan_run_id)
@@ -116,6 +118,7 @@ def export_batch_corrected(
     batch_metadata: dict | None = None,
 ) -> BytesIO:
     """Render the workbook with corrected values, append audit sheet, log event."""
+    eligibility = DEFAULT_EXPORT_ELIGIBILITY_POLICY.ensure_export_allowed(db, batch)
     rows = build_corrected_rows(db, batch)
     base_buf: BytesIO = workbook_from_rows(
         rows,
@@ -173,7 +176,7 @@ def export_batch_corrected(
     ev = BatchExportEvent(
         batch_id=batch.id, scan_run_id=getattr(batch, "current_scan_run_id", None), export_version=next_version,
         exported_by=user.id, exported_at=datetime.utcnow(),
-        file_path=str(export_path), file_bytes=export_bytes, storage_backend="database+local", row_count=len(rows),
+        file_path=str(export_path), file_bytes=export_bytes, storage_backend="database+local", row_count=eligibility.exportable_row_count,
     )
     db.add(ev)
     db.flush()

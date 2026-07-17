@@ -6,8 +6,14 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.db import models as M
 from app.db.insight_models import ApprovedInvoiceFact
+from app.db.review_models import BatchExportEvent
 from app.services.approved_invoice_facts import latest_fact_query
+
+
+def _fact_ids_for_query(q) -> list[int]:
+    return [int(row[0]) for row in q.with_entities(ApprovedInvoiceFact.id).order_by(ApprovedInvoiceFact.id).all()]
 
 
 def _month_expr(db: Session):
@@ -30,6 +36,7 @@ def approved_summary(db: Session, *, tenant_id: Any, company_id: Any | None) -> 
         "total_spend": float(agg.total_spend) if agg else 0.0,
         "avg_confidence": float(agg.avg_confidence) if agg else 0.0,
         "distinct_suppliers": int(agg.distinct_suppliers or 0) if agg else 0,
+        "fact_ids": _fact_ids_for_query(q),
     }
 
 
@@ -50,7 +57,22 @@ def approved_monthly(db: Session, *, tenant_id: Any, company_id: Any | None, mon
         .order_by(month)
         .all()
     )
-    return [{"month": r.month, "net": float(r.net), "vat": float(r.vat), "total": float(r.total), "count": r.count} for r in rows]
+    out = []
+    for r in rows:
+        month_q = latest_fact_query(db, tenant_id, company_id).filter(
+            ApprovedInvoiceFact.invoice_date.isnot(None),
+            ApprovedInvoiceFact.invoice_date >= cutoff,
+            month == r.month,
+        )
+        out.append({
+            "month": r.month,
+            "net": float(r.net),
+            "vat": float(r.vat),
+            "total": float(r.total),
+            "count": r.count,
+            "fact_ids": _fact_ids_for_query(month_q),
+        })
+    return out
 
 
 def top_suppliers(db: Session, *, tenant_id: Any, company_id: Any | None, limit: int = 10) -> list[dict[str, Any]]:
@@ -67,7 +89,18 @@ def top_suppliers(db: Session, *, tenant_id: Any, company_id: Any | None, limit:
         .limit(limit)
         .all()
     )
-    return [{"supplier_name": r.supplier_name, "total": float(r.total), "count": r.count} for r in rows]
+    out = []
+    for r in rows:
+        supplier_q = latest_fact_query(db, tenant_id, company_id).filter(
+            ApprovedInvoiceFact.canonical_supplier_name == r.supplier_name
+        )
+        out.append({
+            "supplier_name": r.supplier_name,
+            "total": float(r.total),
+            "count": r.count,
+            "fact_ids": _fact_ids_for_query(supplier_q),
+        })
+    return out
 
 
 def category_spend(db: Session, *, tenant_id: Any, company_id: Any | None, limit: int = 20) -> list[dict[str, Any]]:
@@ -83,7 +116,18 @@ def category_spend(db: Session, *, tenant_id: Any, company_id: Any | None, limit
         .limit(limit)
         .all()
     )
-    return [{"category": r.category, "total": float(r.total), "count": r.count} for r in rows]
+    out = []
+    for r in rows:
+        category_q = latest_fact_query(db, tenant_id, company_id).filter(
+            func.coalesce(ApprovedInvoiceFact.category, "Uncategorised") == r.category
+        )
+        out.append({
+            "category": r.category,
+            "total": float(r.total),
+            "count": r.count,
+            "fact_ids": _fact_ids_for_query(category_q),
+        })
+    return out
 
 
 def duplicate_exposure(db: Session, *, tenant_id: Any, company_id: Any | None) -> dict[str, Any]:
@@ -100,6 +144,8 @@ def duplicate_exposure(db: Session, *, tenant_id: Any, company_id: Any | None) -
                 "total": float(fact.reporting_total_amount or 0),
                 "duplicate_exposure_count": fact.duplicate_exposure_count,
                 "duplicate_exposure_status": fact.duplicate_exposure_status,
+                "evidence_ref_type": fact.evidence_ref_type,
+                "evidence_ref_id": fact.evidence_ref_id,
             }
             for fact in exposed.order_by(ApprovedInvoiceFact.created_at.desc()).limit(50).all()
         ],
@@ -121,6 +167,8 @@ def vat_exceptions(db: Session, *, tenant_id: Any, company_id: Any | None) -> di
                 "vat": vat,
                 "total": total,
                 "difference": round(total - net - vat, 2),
+                "evidence_ref_type": fact.evidence_ref_type,
+                "evidence_ref_id": fact.evidence_ref_id,
             })
     return {"exception_count": len(rows), "rows": rows[:50]}
 
@@ -138,6 +186,8 @@ def credit_note_impact(db: Session, *, tenant_id: Any, company_id: Any | None) -
                 "supplier_name": fact.canonical_supplier_name,
                 "document_type": fact.document_type,
                 "total": total,
+                "evidence_ref_type": fact.evidence_ref_type,
+                "evidence_ref_id": fact.evidence_ref_id,
             })
     return {"credit_note_count": len(rows), "credit_note_total": round(sum(r["total"] for r in rows), 2), "rows": rows[:50]}
 
@@ -152,3 +202,63 @@ def variance(db: Session, *, tenant_id: Any, company_id: Any | None) -> dict[str
         rows.append({**item, "previous_total": prev_total, "change_ratio": change})
         prev_total = total
     return {"rows": rows}
+
+
+def fact_drilldown(db: Session, *, tenant_id: Any, company_id: Any | None, fact_id: int) -> dict[str, Any]:
+    q = latest_fact_query(db, tenant_id, company_id).filter(ApprovedInvoiceFact.id == fact_id)
+    fact = q.first()
+    if fact is None:
+        raise LookupError("Approved invoice fact not found")
+
+    export_event = db.get(BatchExportEvent, fact.export_event_id) if fact.export_event_id else None
+    row = db.get(M.InvoiceRow, fact.source_row_id) if fact.source_row_id else None
+    header = (
+        db.query(M.InvoiceReadHeader)
+        .filter(M.InvoiceReadHeader.row_id == fact.source_row_id)
+        .order_by(M.InvoiceReadHeader.created_at.desc(), M.InvoiceReadHeader.id.desc())
+        .first()
+    )
+    return {
+        "fact": {
+            "id": fact.id,
+            "batch_id": str(fact.batch_id),
+            "source_row_id": fact.source_row_id,
+            "export_event_id": fact.export_event_id,
+            "export_version": fact.export_version,
+            "fact_version": fact.fact_version,
+            "fact_fingerprint": fact.fact_fingerprint,
+            "supplier_name": fact.canonical_supplier_name,
+            "invoice_number": fact.invoice_number,
+            "invoice_date": fact.invoice_date.isoformat() if fact.invoice_date else None,
+            "net": float(fact.reporting_net_amount or 0),
+            "vat": float(fact.reporting_vat_amount or 0),
+            "total": float(fact.reporting_total_amount or 0),
+            "currency": fact.reporting_currency or fact.currency,
+        },
+        "evidence": {
+            "evidence_ref_type": fact.evidence_ref_type,
+            "evidence_ref_id": fact.evidence_ref_id,
+            "export_event": {
+                "id": export_event.id,
+                "export_version": export_event.export_version,
+                "row_count": export_event.row_count,
+                "has_file_bytes": bool(export_event.file_bytes),
+                "file_path": export_event.file_path,
+            } if export_event else None,
+            "source_row": {
+                "id": row.id,
+                "row_status": row.row_status,
+                "validation_status": row.validation_status,
+                "review_required": row.review_required,
+                "source_filename": row.source_filename,
+                "page_no": row.page_no,
+            } if row else None,
+            "read_header": {
+                "id": header.id,
+                "provider_name": header.provider_name,
+                "document_type": header.document_type,
+                "source_filename": header.source_filename,
+                "page_no": header.page_no,
+            } if header else None,
+        },
+    }
