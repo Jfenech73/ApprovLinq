@@ -19,10 +19,12 @@ from app.db.learning_models import (
 from app.db.review_models import CorrectionRule, InvoiceFieldCandidate, RemapHint
 from app.services.learning_recommendation_agent import (
     approve_proposal,
+    mark_canary_passed,
     promote_proposal,
     rollback_promotion,
     run_learning_recommendation_agent,
 )
+from app.services.learning_governance import LearningGovernanceError
 
 
 @pytest.fixture()
@@ -48,6 +50,20 @@ def _tenant_company_user(db, *, code="P9"):
     db.add_all([tenant, company, user])
     db.flush()
     return tenant, company, user
+
+
+def _user(db, *, code: str, name: str) -> User:
+    user = User(
+        id=uuid.uuid4(),
+        email=f"{code.lower()}-{name.lower()}@example.test",
+        full_name=name,
+        password_hash="test",
+        role="tenant_user",
+        is_active=True,
+    )
+    db.add(user)
+    db.flush()
+    return user
 
 
 def _batch_row(db, tenant, company, *, row_id_suffix: str):
@@ -153,6 +169,8 @@ def test_unreviewed_and_cross_tenant_candidates_are_not_used(db):
 
 def test_promotion_requires_approval_and_rollback_disables_created_rule(db):
     tenant, company, user = _tenant_company_user(db)
+    approver = _user(db, code="P9", name="Approver")
+    operator = _user(db, code="P9", name="Operator")
     _corrected_candidate(db, tenant, company, row_id_suffix="1")
     _corrected_candidate(db, tenant, company, row_id_suffix="2")
     run_learning_recommendation_agent(db, tenant_id=tenant.id, company_id=company.id, requested_by=user.id)
@@ -161,7 +179,17 @@ def test_promotion_requires_approval_and_rollback_disables_created_rule(db):
     with pytest.raises(ValueError):
         promote_proposal(db, proposal.id, user=user)
 
-    approve_proposal(db, proposal.id, user=user, note="Looks safe")
+    with pytest.raises(LearningGovernanceError):
+        approve_proposal(db, proposal.id, user=user, note="Requester cannot approve")
+
+    approve_proposal(db, proposal.id, user=approver, note="Looks safe")
+    with pytest.raises(ValueError):
+        promote_proposal(db, proposal.id, user=operator)
+    with pytest.raises(LearningGovernanceError):
+        mark_canary_passed(db, proposal.id, user=approver)
+    mark_canary_passed(db, proposal.id, user=operator, note="Replay clean")
+    with pytest.raises(LearningGovernanceError):
+        promote_proposal(db, proposal.id, user=approver)
     promotion = promote_proposal(db, proposal.id, user=user)
     db.commit()
 
@@ -181,6 +209,8 @@ def test_promotion_requires_approval_and_rollback_disables_created_rule(db):
 
 def test_dead_saved_region_proposal_can_be_promoted_and_rolled_back(db):
     tenant, company, user = _tenant_company_user(db)
+    approver = _user(db, code="P9R", name="Approver")
+    operator = _user(db, code="P9R", name="Operator")
     hint = RemapHint(
         id=1001,
         tenant_id=tenant.id,
@@ -203,7 +233,8 @@ def test_dead_saved_region_proposal_can_be_promoted_and_rolled_back(db):
     assert hint.active is True
     assert hint.archived is False
 
-    approve_proposal(db, proposal.id, user=user)
+    approve_proposal(db, proposal.id, user=approver)
+    mark_canary_passed(db, proposal.id, user=operator)
     promotion = promote_proposal(db, proposal.id, user=user)
     db.commit()
 

@@ -1,5 +1,21 @@
 # ApprovLinq Changelog
 
+## v3.69.14 - 2026-07-18
+
+### Governance and analytics hardening
+- Added learning recommendation RBAC checks and separation-of-duties controls for run, approve, canary, promote, and rollback actions.
+- Enforced canary evidence before learning proposals can be promoted, with promotion snapshots retaining rollback and canary metadata.
+- Added tenant-scoped FX-rate provenance and explicit BCRS/deposit fact component provenance to approved invoice facts.
+- Reworked exception analytics to use SQL filtering/aggregation and exact calendar-month windows.
+- Added a facts-versus-hypotheses narrative contract to insight summary, exception, duplicate exposure, variance, and fact drill-down responses.
+
+## v3.69.13 - 2026-07-18
+
+### Worker concurrency and operational resilience
+- Added worker page lease fencing, heartbeat checks, cancellation checkpoints, and idempotent provider attempt telemetry.
+- Added persisted Azure/provider operation telemetry fields for request IDs, operation IDs, latency, retry count, timeout reason, and raw telemetry payloads.
+- Added a separate scan worker entry point and Docker worker target for operational separation.
+
 ## v3.69.12 - 2026-07-17
 
 ### Approval, evidence and fact integrity

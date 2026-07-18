@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.db import models as M
 from app.db.learning_models import (
+    LEARNING_CANARY_STATUS_PASSED,
     LEARNING_DECISION_APPROVED,
     LEARNING_DECISION_REJECTED,
     LEARNING_PROPOSAL_STATUS_APPROVED,
@@ -32,10 +33,12 @@ from app.db.learning_models import (
 from app.db.review_models import CorrectionRule, InvoiceFieldCandidate, RemapHint
 from app.services.candidate_outcomes import normalise_outcome_value
 from app.services.export_eligibility import DEFAULT_EXPORT_ELIGIBILITY_POLICY
+from app.services.learning_governance import LearningGovernanceError, assert_different_user
 
 
 RECOMMENDABLE_RULE_FIELDS = frozenset({"supplier_name", "nominal_account_code"})
 TRUSTED_OUTCOME_SOURCES = frozenset({"manual_review", "mark_reviewed", "approved", "export"})
+CANARY_PASS_REPLAY_STATUSES = frozenset({"would_apply", "would_archive", "no_change"})
 
 
 def _utcnow() -> datetime:
@@ -379,6 +382,12 @@ def approve_proposal(db: Session, proposal_id: int, *, user: Any, note: str | No
         raise LookupError("Proposal not found")
     if proposal.status != LEARNING_PROPOSAL_STATUS_PROPOSED:
         raise ValueError("Only proposed recommendations can be approved")
+    run = db.get(LearningRecommendationRun, proposal.run_id)
+    assert_different_user(
+        getattr(run, "requested_by", None),
+        getattr(user, "id", None),
+        message="Learning recommendations must be approved by a different user from the requester",
+    )
     proposal.status = LEARNING_PROPOSAL_STATUS_APPROVED
     proposal.decided_by = getattr(user, "id", None)
     proposal.decided_at = _utcnow()
@@ -390,6 +399,40 @@ def approve_proposal(db: Session, proposal_id: int, *, user: Any, note: str | No
         reviewer_id=getattr(user, "id", None),
         note=note,
     ))
+    return proposal
+
+
+def mark_canary_passed(
+    db: Session,
+    proposal_id: int,
+    *,
+    user: Any,
+    note: str | None = None,
+) -> LearningRecommendationProposal:
+    proposal = db.get(LearningRecommendationProposal, proposal_id)
+    if proposal is None:
+        raise LookupError("Proposal not found")
+    if proposal.status != LEARNING_PROPOSAL_STATUS_APPROVED:
+        raise ValueError("Only approved recommendations can pass canary")
+    assert_different_user(
+        proposal.decided_by,
+        getattr(user, "id", None),
+        message="Learning recommendation canary must be signed off by a different user from the approver",
+    )
+    replay_results = db.execute(
+        select(LearningRecommendationReplayResult).where(
+            LearningRecommendationReplayResult.proposal_id == proposal.id
+        )
+    ).scalars().all()
+    if not replay_results:
+        raise ValueError("Canary cannot pass without persisted replay evidence")
+    failing = sorted({r.replay_status for r in replay_results if r.replay_status not in CANARY_PASS_REPLAY_STATUSES})
+    if failing:
+        raise ValueError(f"Canary replay contains non-passing statuses: {', '.join(failing)}")
+    proposal.canary_status = LEARNING_CANARY_STATUS_PASSED
+    proposal.canary_passed_at = _utcnow()
+    proposal.governance_reason = note or "Canary replay evidence reviewed and accepted"
+    proposal.updated_at = _utcnow()
     return proposal
 
 
@@ -458,6 +501,15 @@ def promote_proposal(db: Session, proposal_id: int, *, user: Any) -> LearningPro
         raise LookupError("Proposal not found")
     if proposal.status != LEARNING_PROPOSAL_STATUS_APPROVED:
         raise ValueError("Only approved recommendations can be promoted")
+    if proposal.canary_required and proposal.canary_status != LEARNING_CANARY_STATUS_PASSED:
+        raise ValueError("Approved recommendations must pass canary before promotion")
+    assert_different_user(
+        proposal.decided_by,
+        getattr(user, "id", None),
+        message="Learning recommendations must be promoted by a different user from the approver",
+    )
+    if proposal.rollback_required and not proposal.proposed_payload_json:
+        raise LearningGovernanceError("Learning promotion rollback state cannot be established without a payload")
 
     payload = proposal.proposed_payload_json or {}
     user_id = getattr(user, "id", None)
@@ -502,6 +554,12 @@ def promote_proposal(db: Session, proposal_id: int, *, user: Any) -> LearningPro
             previous_state_json=previous,
             promoted_state_json=promoted,
             rollback_state_json=previous,
+            canary_snapshot_json={
+                "canary_required": proposal.canary_required,
+                "canary_status": proposal.canary_status,
+                "canary_passed_at": proposal.canary_passed_at.isoformat() if proposal.canary_passed_at else None,
+                "canary_scope": proposal.canary_scope_json,
+            },
             promoted_by=user_id,
             promoted_at=now,
         )
@@ -522,6 +580,12 @@ def promote_proposal(db: Session, proposal_id: int, *, user: Any) -> LearningPro
             previous_state_json=previous,
             promoted_state_json=promoted,
             rollback_state_json=previous,
+            canary_snapshot_json={
+                "canary_required": proposal.canary_required,
+                "canary_status": proposal.canary_status,
+                "canary_passed_at": proposal.canary_passed_at.isoformat() if proposal.canary_passed_at else None,
+                "canary_scope": proposal.canary_scope_json,
+            },
             promoted_by=user_id,
             promoted_at=now,
         )
@@ -569,6 +633,7 @@ def rollback_promotion(db: Session, promotion_id: int, *, user: Any) -> Learning
     promotion.rollback_status = "rolled_back"
     promotion.rolled_back_by = getattr(user, "id", None)
     promotion.rolled_back_at = _utcnow()
+    promotion.rollback_verified_at = promotion.rolled_back_at
     proposal = db.get(LearningRecommendationProposal, promotion.proposal_id)
     if proposal is not None:
         proposal.status = LEARNING_PROPOSAL_STATUS_ROLLED_BACK

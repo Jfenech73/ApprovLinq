@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.models import Base
@@ -22,6 +22,10 @@ LEARNING_PROPOSAL_STATUS_ROLLED_BACK = "rolled_back"
 
 LEARNING_DECISION_APPROVED = "approved"
 LEARNING_DECISION_REJECTED = "rejected"
+
+LEARNING_CANARY_STATUS_PENDING = "pending"
+LEARNING_CANARY_STATUS_PASSED = "passed"
+LEARNING_CANARY_STATUS_FAILED = "failed"
 
 
 class LearningRecommendationRun(Base):
@@ -69,6 +73,11 @@ class LearningRecommendationProposal(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     proposed_payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     canary_scope_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    canary_required: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    canary_status: Mapped[str] = mapped_column(String(40), default=LEARNING_CANARY_STATUS_PENDING, nullable=False)
+    canary_passed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rollback_required: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    governance_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     evidence_summary_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     confidence: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True)
     quality_score: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True)
@@ -156,8 +165,10 @@ class LearningPromotion(Base):
     previous_state_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     promoted_state_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     rollback_state_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    canary_snapshot_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     promoted_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     promoted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     rollback_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    rollback_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rolled_back_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

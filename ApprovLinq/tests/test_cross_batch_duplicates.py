@@ -368,6 +368,7 @@ def test_cross_batch_duplicate_schema_tokens_are_declared():
     assert "Duplicate check" in js_src
     assert "Duplicate remark" in js_src
     assert "duplicate of" in js_src
-    assert 'CURRENT_ALEMBIC_REVISION = "20260718_0014"' in schema_version_src
+    assert 'CURRENT_ALEMBIC_REVISION = "20260718_0015"' in schema_version_src
+    assert '"20260718_0014"' in schema_version_src
     assert '"20260710_0009"' in schema_version_src
     assert '"20260710_0008"' in schema_version_src

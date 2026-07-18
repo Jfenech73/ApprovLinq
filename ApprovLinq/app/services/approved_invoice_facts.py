@@ -14,6 +14,7 @@ from app.db import models as M
 from app.db.insight_models import ApprovedInvoiceFact
 from app.db.review_models import BatchExportEvent, InvoiceDuplicateCandidate
 from app.services.export_eligibility import DEFAULT_EXPORT_ELIGIBILITY_POLICY, ExportEligibilityError
+from app.services.fx_rates import DEFAULT_REPORTING_CURRENCY, resolve_fx_rate_snapshot
 
 
 def _money(value: Any) -> Decimal | None:
@@ -110,6 +111,31 @@ def _is_bcrs_fact(row_data: dict[str, Any]) -> bool:
     return bool(re.search(r"\b(bcrs|deposit|returnable|container)\b", joined))
 
 
+def _apply_fx(value: Decimal | None, rate: Decimal) -> Decimal | None:
+    if value is None:
+        return None
+    return (value * rate).quantize(Decimal("0.01"))
+
+
+def _deposit_component(row_data: dict[str, Any], amount: Decimal | None) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    if amount is None:
+        return None, None, None
+    joined = " ".join(
+        str(row_data.get(key) or "")
+        for key in ("description", "method_used", "validation_status", "totals_reconciliation_status")
+    ).lower()
+    component_type = "bcrs" if "bcrs" in joined else "deposit"
+    source = "bcrs_split" if component_type == "bcrs" else "approved_row"
+    return component_type, source, {
+        "component_type": component_type,
+        "source": source,
+        "source_row_id": row_data.get("id"),
+        "method_used": row_data.get("method_used"),
+        "validation_status": row_data.get("validation_status"),
+        "description": row_data.get("description"),
+    }
+
+
 def materialise_approved_invoice_facts_for_export(
     db: Session,
     *,
@@ -155,11 +181,20 @@ def materialise_approved_invoice_facts_for_export(
         code = _text(row_data.get("nominal_account_code"), 100)
         nominal_name = nominal_names.get(code or "")
         currency = _text(row_data.get("currency"), 20)
-        reporting_currency = currency
+        reporting_currency = currency or DEFAULT_REPORTING_CURRENCY
         total = _money(row_data.get("total_amount"))
         net = _money(row_data.get("net_amount"))
         vat = _money(row_data.get("vat_amount"))
         bcrs_amount = total if total is not None and _is_bcrs_fact(row_data) else None
+        deposit_type, deposit_source, deposit_provenance = _deposit_component(row_data, bcrs_amount)
+        invoice_date = _date(row_data.get("invoice_date"))
+        fx = resolve_fx_rate_snapshot(
+            db,
+            tenant_id=batch.tenant_id,
+            currency=currency,
+            invoice_date=invoice_date,
+            reporting_currency=reporting_currency,
+        )
         dup_count, dup_status = duplicate_map.get(row_id, (0, None))
         fingerprint_payload = {
             "tenant_id": str(batch.tenant_id),
@@ -175,6 +210,10 @@ def materialise_approved_invoice_facts_for_export(
             "vat": str(vat) if vat is not None else None,
             "total": str(total) if total is not None else None,
             "currency": currency,
+            "reporting_currency": reporting_currency,
+            "fx_rate": str(fx.rate),
+            "fx_rate_source": fx.source,
+            "deposit_component_type": deposit_type,
         }
         fact = ApprovedInvoiceFact(
             tenant_id=batch.tenant_id,
@@ -193,7 +232,7 @@ def materialise_approved_invoice_facts_for_export(
             supplier_vat=_text(getattr(header, "supplier_vat", None) or getattr(header, "VendorTaxId", None), 100),
             document_type=_text(getattr(header, "document_type", None) or getattr(header, "DocType", None), 80),
             invoice_number=_text(row_data.get("invoice_number")),
-            invoice_date=_date(row_data.get("invoice_date")),
+            invoice_date=invoice_date,
             description=_text(row_data.get("description")),
             nominal_account_code=code,
             nominal_account_name=nominal_name,
@@ -204,11 +243,18 @@ def materialise_approved_invoice_facts_for_export(
             net_amount=net,
             vat_amount=vat,
             total_amount=total,
-            reporting_net_amount=net,
-            reporting_vat_amount=vat,
-            reporting_total_amount=total,
+            reporting_net_amount=_apply_fx(net, fx.rate),
+            reporting_vat_amount=_apply_fx(vat, fx.rate),
+            reporting_total_amount=_apply_fx(total, fx.rate),
             bcrs_amount=bcrs_amount,
             deposit_amount=bcrs_amount,
+            deposit_component_type=deposit_type,
+            deposit_component_source=deposit_source,
+            deposit_component_provenance_json=deposit_provenance,
+            fx_rate=fx.rate,
+            fx_rate_source=fx.source,
+            fx_rate_date=fx.rate_date,
+            fx_rate_provenance_json=fx.provenance,
             source_row_status=row_data.get("row_status") or M.INVOICE_ROW_STATUS_ACTIVE,
             source_validation_status=_text(row_data.get("validation_status"), 100),
             source_review_required=bool(row_data.get("review_required")),

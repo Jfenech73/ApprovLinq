@@ -18,11 +18,13 @@ from app.db.session import get_db
 from app.routers.auth import current_tenant_id, current_user
 from app.services.learning_recommendation_agent import (
     approve_proposal,
+    mark_canary_passed,
     promote_proposal,
     reject_proposal,
     rollback_promotion,
     run_learning_recommendation_agent,
 )
+from app.services.learning_governance import LearningGovernanceError, require_learning_permission
 
 
 router = APIRouter(prefix="/learning", tags=["learning"])
@@ -49,6 +51,11 @@ def _serialise_proposal(p: LearningRecommendationProposal) -> dict[str, Any]:
         "summary": p.summary,
         "proposed_payload": p.proposed_payload_json,
         "canary_scope": p.canary_scope_json,
+        "canary_required": p.canary_required,
+        "canary_status": p.canary_status,
+        "canary_passed_at": p.canary_passed_at.isoformat() if p.canary_passed_at else None,
+        "rollback_required": p.rollback_required,
+        "governance_reason": p.governance_reason,
         "evidence_summary": p.evidence_summary_json,
         "confidence": float(p.confidence) if p.confidence is not None else None,
         "quality_score": float(p.quality_score) if p.quality_score is not None else None,
@@ -72,6 +79,10 @@ def create_learning_run(
     tenant_id=Depends(current_tenant_id),
     user=Depends(current_user),
 ):
+    try:
+        require_learning_permission(db, user=user, tenant_id=tenant_id, action="run")
+    except LearningGovernanceError as exc:
+        raise HTTPException(403, str(exc))
     run = run_learning_recommendation_agent(
         db,
         tenant_id=tenant_id,
@@ -93,8 +104,12 @@ def list_proposals(
     status: str | None = Query(default=None),
     db: Session = Depends(get_db),
     tenant_id=Depends(current_tenant_id),
-    _user=Depends(current_user),
+    user=Depends(current_user),
 ):
+    try:
+        require_learning_permission(db, user=user, tenant_id=tenant_id, action="view")
+    except LearningGovernanceError as exc:
+        raise HTTPException(403, str(exc))
     q = select(LearningRecommendationProposal).where(LearningRecommendationProposal.tenant_id == tenant_id)
     if status:
         q = q.where(LearningRecommendationProposal.status == status)
@@ -107,8 +122,12 @@ def get_proposal(
     proposal_id: int,
     db: Session = Depends(get_db),
     tenant_id=Depends(current_tenant_id),
-    _user=Depends(current_user),
+    user=Depends(current_user),
 ):
+    try:
+        require_learning_permission(db, user=user, tenant_id=tenant_id, action="view")
+    except LearningGovernanceError as exc:
+        raise HTTPException(403, str(exc))
     proposal = _proposal_for_tenant(db, proposal_id, tenant_id)
     evidence = db.execute(
         select(LearningRecommendationEvidence).where(LearningRecommendationEvidence.proposal_id == proposal.id)
@@ -162,7 +181,10 @@ def approve_learning_proposal(
 ):
     _proposal_for_tenant(db, proposal_id, tenant_id)
     try:
+        require_learning_permission(db, user=user, tenant_id=tenant_id, action="approve")
         proposal = approve_proposal(db, proposal_id, user=user, note=payload.note)
+    except LearningGovernanceError as exc:
+        raise HTTPException(403, str(exc))
     except ValueError as exc:
         raise HTTPException(409, str(exc))
     db.commit()
@@ -179,7 +201,30 @@ def reject_learning_proposal(
 ):
     _proposal_for_tenant(db, proposal_id, tenant_id)
     try:
+        require_learning_permission(db, user=user, tenant_id=tenant_id, action="approve")
         proposal = reject_proposal(db, proposal_id, user=user, note=payload.note)
+    except LearningGovernanceError as exc:
+        raise HTTPException(403, str(exc))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    db.commit()
+    return _serialise_proposal(proposal)
+
+
+@router.post("/proposals/{proposal_id}/canary/pass")
+def pass_learning_proposal_canary(
+    proposal_id: int,
+    payload: DecisionIn,
+    db: Session = Depends(get_db),
+    tenant_id=Depends(current_tenant_id),
+    user=Depends(current_user),
+):
+    _proposal_for_tenant(db, proposal_id, tenant_id)
+    try:
+        require_learning_permission(db, user=user, tenant_id=tenant_id, action="promote")
+        proposal = mark_canary_passed(db, proposal_id, user=user, note=payload.note)
+    except LearningGovernanceError as exc:
+        raise HTTPException(403, str(exc))
     except ValueError as exc:
         raise HTTPException(409, str(exc))
     db.commit()
@@ -195,7 +240,10 @@ def promote_learning_proposal(
 ):
     _proposal_for_tenant(db, proposal_id, tenant_id)
     try:
+        require_learning_permission(db, user=user, tenant_id=tenant_id, action="promote")
         promotion = promote_proposal(db, proposal_id, user=user)
+    except LearningGovernanceError as exc:
+        raise HTTPException(403, str(exc))
     except ValueError as exc:
         raise HTTPException(409, str(exc))
     db.commit()
@@ -220,7 +268,10 @@ def rollback_learning_promotion(
     if promotion is None or proposal is None or proposal.tenant_id != tenant_id:
         raise HTTPException(404, "Learning promotion not found")
     try:
+        require_learning_permission(db, user=user, tenant_id=tenant_id, action="rollback")
         promotion = rollback_promotion(db, promotion_id, user=user)
+    except LearningGovernanceError as exc:
+        raise HTTPException(403, str(exc))
     except ValueError as exc:
         raise HTTPException(409, str(exc))
     db.commit()

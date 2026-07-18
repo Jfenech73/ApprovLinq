@@ -136,7 +136,7 @@ def test_phase13_alembic_migration_declares_current_head_and_worker_telemetry():
     src = (ROOT / "alembic/versions/2026_07_18_0014_worker_concurrency_telemetry.py").read_text(
         encoding="utf-8"
     )
-    assert f'revision = "{CURRENT_ALEMBIC_REVISION}"' in src
+    assert 'revision = "20260718_0014"' in src
     assert 'down_revision = "20260713_0013"' in src
     for token in [
         "cancel_requested_at",
@@ -145,6 +145,23 @@ def test_phase13_alembic_migration_declares_current_head_and_worker_telemetry():
         "provider_latency_ms",
         "provider_timeout_reason",
         "provider_telemetry",
+    ]:
+        assert token in src
+
+
+def test_phase14_alembic_migration_declares_current_head_and_governance_analytics():
+    src = (ROOT / "alembic/versions/2026_07_18_0015_governance_analytics_hardening.py").read_text(
+        encoding="utf-8"
+    )
+    assert f'revision = "{CURRENT_ALEMBIC_REVISION}"' in src
+    assert 'down_revision = "20260718_0014"' in src
+    for token in [
+        "canary_required",
+        "canary_status",
+        "rollback_required",
+        "fx_rates",
+        "fx_rate_provenance_json",
+        "deposit_component_provenance_json",
     ]:
         assert token in src
 
