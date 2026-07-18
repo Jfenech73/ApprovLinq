@@ -45,12 +45,17 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 @app.on_event("startup")
 async def recover_stuck_batches() -> None:
     from app.db.session import SessionLocal
-    from app.services.scan_jobs import release_stale_jobs
+    from app.services.scan_jobs import release_stale_jobs, release_stale_pages
     db = SessionLocal()
     try:
         released = release_stale_jobs(db)
-        if released:
-            logger.info("Released %d stale durable scan job lease(s) on startup", released)
+        released_pages = release_stale_pages(db)
+        if released or released_pages:
+            logger.info(
+                "Released %d stale durable scan job lease(s) and %d page lease(s) on startup",
+                released,
+                released_pages,
+            )
     except Exception as exc:
         logger.warning("Failed to recover durable scan jobs on startup: %s", exc)
         try:

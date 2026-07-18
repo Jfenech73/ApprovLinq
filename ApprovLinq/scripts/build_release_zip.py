@@ -6,7 +6,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_NAME = "ApprovLinq_3_69_phase12_approval_evidence_fact_integrity.zip"
+DEFAULT_NAME = "ApprovLinq_3_69_phase13_worker_concurrency_resilience.zip"
 FIXED_TIMESTAMP = (2026, 7, 15, 0, 0, 0)
 
 EXCLUDED_DIRS = {

@@ -48,6 +48,7 @@ SCAN_JOB_PAGE_STATUS_CLAIMED = "claimed"
 SCAN_JOB_PAGE_STATUS_RUNNING = "running"
 SCAN_JOB_PAGE_STATUS_COMPLETED = "completed"
 SCAN_JOB_PAGE_STATUS_FAILED = "failed"
+SCAN_JOB_PAGE_STATUS_CANCELLED = "cancelled"
 SCAN_JOB_PAGE_STATUS_SKIPPED = "skipped"
 
 
@@ -256,8 +257,17 @@ class ScanJobPage(Base):
     lease_token: Mapped[str | None] = mapped_column(String(80), nullable=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provider_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    provider_status: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    provider_operation_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    provider_request_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    provider_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provider_retries: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provider_timeout_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_telemetry: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)

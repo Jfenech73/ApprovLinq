@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     extraction_consecutive_timeout_limit: int = 3
     normalize_page_orientation: bool = True
 
+    # Durable scan worker
+    scan_worker_sleep_seconds: float = 5.0
+    scan_worker_lease_seconds: int = 300
+
     # Temporary extraction-baseline mode:
     # DI first, immediate fallback, and no downstream rule/arbitration mutation.
     scan_provider_baseline_mode: bool = False
@@ -94,6 +98,8 @@ class Settings(BaseSettings):
             "extraction_page_timeout_s": self.extraction_page_timeout_s,
             "extraction_consecutive_timeout_limit": self.extraction_consecutive_timeout_limit,
             "normalize_page_orientation": self.normalize_page_orientation,
+            "scan_worker_sleep_seconds": self.scan_worker_sleep_seconds,
+            "scan_worker_lease_seconds": self.scan_worker_lease_seconds,
             "scan_provider_baseline_mode": self.scan_provider_baseline_mode,
             "upload_dir": self.upload_dir,
             "export_dir": self.export_dir,

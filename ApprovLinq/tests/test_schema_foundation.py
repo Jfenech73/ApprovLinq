@@ -120,7 +120,7 @@ def test_phase10_alembic_migration_declares_current_head_and_approved_facts():
     src = (ROOT / "alembic/versions/2026_07_13_0013_approved_invoice_facts.py").read_text(
         encoding="utf-8"
     )
-    assert f'revision = "{CURRENT_ALEMBIC_REVISION}"' in src
+    assert 'revision = "20260713_0013"' in src
     assert 'down_revision = "20260713_0012"' in src
     for token in [
         "approved_invoice_facts",
@@ -128,6 +128,23 @@ def test_phase10_alembic_migration_declares_current_head_and_approved_facts():
         "reporting_total_amount",
         "duplicate_exposure_count",
         "uq_approved_fact_batch_row_version",
+    ]:
+        assert token in src
+
+
+def test_phase13_alembic_migration_declares_current_head_and_worker_telemetry():
+    src = (ROOT / "alembic/versions/2026_07_18_0014_worker_concurrency_telemetry.py").read_text(
+        encoding="utf-8"
+    )
+    assert f'revision = "{CURRENT_ALEMBIC_REVISION}"' in src
+    assert 'down_revision = "20260713_0013"' in src
+    for token in [
+        "cancel_requested_at",
+        "provider_operation_id",
+        "provider_request_id",
+        "provider_latency_ms",
+        "provider_timeout_reason",
+        "provider_telemetry",
     ]:
         assert token in src
 

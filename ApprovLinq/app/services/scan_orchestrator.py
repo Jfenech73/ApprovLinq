@@ -6,6 +6,7 @@ import socket
 from uuid import UUID
 
 from app.db.session import SessionLocal
+from app.db.models import SCAN_JOB_STATUS_CANCELLED
 from app.services.scan_jobs import (
     claim_next_job,
     complete_job,
@@ -63,7 +64,8 @@ def process_next_scan_job(*, worker_id: str | None = None, lease_seconds: int = 
     try:
         completed_job = db.get(type(job), job_id) if job is not None else None
         if completed_job is not None:
-            complete_job(db, completed_job)
+            if completed_job.status != SCAN_JOB_STATUS_CANCELLED:
+                complete_job(db, completed_job)
             db.commit()
     finally:
         db.close()

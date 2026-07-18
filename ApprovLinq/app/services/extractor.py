@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import re
+import time
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
@@ -3383,6 +3384,59 @@ _azure_di_error: str | None = None
 _ocr_fallback_error: str | None = None
 
 
+def _safe_provider_id(value: Any, *, max_len: int = 160) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return text[:max_len]
+
+
+def _operation_id_from_location(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    tail = re.split(r"[/=]", text.rstrip("/"))[-1]
+    return _safe_provider_id(tail or text)
+
+
+def _azure_poller_telemetry(
+    poller: Any,
+    *,
+    provider_name: str,
+    status: str,
+    started: float,
+    timeout_reason: str | None = None,
+) -> dict[str, Any]:
+    details = getattr(poller, "details", None) or {}
+    telemetry: dict[str, Any] = {
+        "provider_name": provider_name,
+        "provider_status": status,
+        "latency_ms": int((time.perf_counter() - started) * 1000),
+        "retries": 0,
+    }
+    if timeout_reason:
+        telemetry["timeout_reason"] = timeout_reason
+    if isinstance(details, dict):
+        request_id = (
+            details.get("request_id")
+            or details.get("x-ms-request-id")
+            or details.get("apim-request-id")
+        )
+        operation_location = (
+            details.get("operation_location")
+            or details.get("operation-location")
+            or details.get("Operation-Location")
+        )
+        telemetry["request_id"] = _safe_provider_id(request_id)
+        telemetry["operation_id"] = _operation_id_from_location(operation_location)
+    if not telemetry.get("operation_id"):
+        try:
+            telemetry["operation_id"] = _operation_id_from_location(poller.continuation_token())
+        except Exception:
+            telemetry["operation_id"] = None
+    return {k: v for k, v in telemetry.items() if v is not None}
+
+
 def _reset_azure_di_error() -> None:
     """Clear the Azure DI circuit-breaker flag.
 
@@ -3605,6 +3659,7 @@ def azure_di_extract_invoice(
         return getattr(field, "content", None) or (field.get("content") if isinstance(field, dict) else None)
 
     try:
+        _di_started = time.perf_counter()
         client = DocumentIntelligenceClient(
             endpoint=endpoint.rstrip("/"),
             credential=AzureKeyCredential(key),
@@ -3629,16 +3684,16 @@ def azure_di_extract_invoice(
         try:
             result = _future.result(timeout=_page_timeout)
         except _cf.TimeoutError:
-                _azure_di_error = f"Azure DI page timeout after {_page_timeout:.0f}s"
-                # return None after cancelling the slow poller.
-                logger.warning(
-                    "Azure DI page timeout after %.0fs; "
-                    "using fallback for this page; circuit breaker opened",
-                    _page_timeout,
-                )
-                _future.cancel()
-                _pool.shutdown(wait=False, cancel_futures=True)
-                return None
+            _azure_di_error = f"Azure DI page timeout after {_page_timeout:.0f}s"
+            # return None after cancelling the slow poller.
+            logger.warning(
+                "Azure DI page timeout after %.0fs; "
+                "using fallback for this page; circuit breaker opened",
+                _page_timeout,
+            )
+            _future.cancel()
+            _pool.shutdown(wait=False, cancel_futures=True)
+            return None
         finally:
             if _future.done():
                 _pool.shutdown(wait=False, cancel_futures=True)
@@ -3833,6 +3888,12 @@ def azure_di_extract_invoice(
         "Azure DI extracted: supplier=%r inv=%r total=%s conf=s%.2f/c%.2f/t%.2f",
         supplier_name, invoice_number, total_amount, s_conf, c_conf, totals_conf,
     )
+    provider_telemetry = _azure_poller_telemetry(
+        poller,
+        provider_name="azure_di",
+        status="success",
+        started=_di_started,
+    )
     di_raw_payload = _serialise_di_document(result)
     di_raw_fields = (di_raw_payload.get("document") or {}).get("fields") or {}
 
@@ -3884,6 +3945,7 @@ def azure_di_extract_invoice(
         },
         "_di_raw_fields": di_raw_fields,
         "_di_raw_payload": di_raw_payload,
+        "_provider_telemetry": provider_telemetry,
         "raw_di_document_confidence": getattr(document, "confidence", None),
         "ai_confidence": {
             "supplier": round(s_conf, 2),
@@ -3907,6 +3969,7 @@ def azure_di_extract_read_text(
         from azure.core.credentials import AzureKeyCredential
         import concurrent.futures as _cf
 
+        started = time.perf_counter()
         client = DocumentIntelligenceClient(
             endpoint=endpoint.rstrip("/"),
             credential=AzureKeyCredential(key),
@@ -3941,6 +4004,12 @@ def azure_di_extract_read_text(
             "di_page_text": content,
             "_di_raw_fields": {},
             "_di_raw_payload": _serialise_di_document(result),
+            "_provider_telemetry": _azure_poller_telemetry(
+                poller,
+                provider_name="azure_di_read",
+                status="success",
+                started=started,
+            ),
         }
     except Exception as exc:
         logger.warning("Azure DI read fallback failed: %s", exc)
@@ -4339,6 +4408,7 @@ def merge_ai_fields(
         "_di_structured_fields",   # raw structured Azure DI field values before merge
         "_di_raw_fields",          # exact serialised field payload returned by Azure DI
         "_di_raw_payload",         # serialised top-level DI document payload
+        "_provider_telemetry",     # scan provider operation/request/status telemetry
     ):
         if ai.get(field) is not None:
             merged[field] = ai[field]
@@ -4624,6 +4694,7 @@ def process_pdf_page(
                     "di_page_text": di_read_payload.get("di_page_text") or "",
                     "_di_raw_fields": {},
                     "_di_raw_payload": di_read_payload.get("_di_raw_payload"),
+                    "_provider_telemetry": di_read_payload.get("_provider_telemetry"),
                 }
                 return _build_provider_baseline_result(
                     extracted,
@@ -4636,6 +4707,7 @@ def process_pdf_page(
             extracted["di_page_text"] = di_read_payload.get("di_page_text") or ""
             extracted["_di_raw_fields"] = {}
             extracted["_di_raw_payload"] = di_read_payload.get("_di_raw_payload")
+            extracted["_provider_telemetry"] = di_read_payload.get("_provider_telemetry")
             return _build_provider_baseline_result(
                 extracted,
                 method="azure_di_read",
@@ -5801,6 +5873,7 @@ def _build_direct_di_page_rows(
         "_di_structured_fields": {},
         "_di_raw_fields": raw_fields,
         "_di_raw_payload": raw_payload,
+        "_provider_telemetry": payload.get("_provider_telemetry"),
         "_direct_di_field_sources": {
             "supplier_name": "VendorName",
             "invoice_number": "InvoiceId",
@@ -5857,6 +5930,8 @@ def _build_direct_di_page_rows(
             row["header_raw"] = fallback.get("_header_text") or _header_region_text(di_read_text, max_lines=24)
             row["totals_raw"] = fallback.get("_totals_text") or _totals_region_text(di_read_text, tail_lines=24)
             row["_di_read_raw_payload"] = (di_read_payload or {}).get("_di_raw_payload")
+            if (di_read_payload or {}).get("_provider_telemetry"):
+                row["_provider_telemetry"] = (di_read_payload or {}).get("_provider_telemetry")
             if changed:
                 row["method_used"] = "DI+DI_READ_TEXT_FALLBACK"
                 row["extraction_source"] = "azure_di_direct+azure_di_read_text_fallback"
@@ -5942,6 +6017,13 @@ def process_pdf_page_rows(
         and not method_text.startswith("DI")
     )
     if should_mark_di_failed:
+        _telemetry_reason = azure_di_available()[1]
+        page_result["_provider_telemetry"] = {
+            "provider_name": "azure_di",
+            "provider_status": "fallback_used",
+            "retries": 0,
+            "timeout_reason": _telemetry_reason if "timeout" in str(_telemetry_reason or "").lower() else None,
+        }
         page_result["provider_status"] = "di_failed_fallback_used"
         page_result["fallback_used"] = True
         page_result["review_required"] = True

@@ -40,7 +40,7 @@ from app.services.account_nominal_resolver import apply_master_data_enrichment
 from app.services.amount_resolver import apply_bcrs_split, decide_bcrs_split
 from app.services.duplicate_resolver import detect_prior_batch_duplicates, detect_within_batch_duplicates
 from app.services.field_resolver import resolve_invoice_row
-from app.services.provider_gateway import process_page_rows_with_timeout
+from app.services.provider_gateway import PageProviderResult, process_page_rows_with_telemetry, process_page_rows_with_timeout
 from app.services.scan_performance import ScanPerformanceContext
 from app.services.scan_runs import create_scan_run, mark_scan_run_completed
 from app.services.saved_region_service import apply_saved_region_candidates, apply_saved_rule_candidates
@@ -138,6 +138,23 @@ def _process_page_rows_with_timeout(
 ) -> list[dict]:
     """Compatibility wrapper for the Phase 7 provider gateway."""
     return process_page_rows_with_timeout(
+        pdf_path,
+        page_index=page_index,
+        scan_mode=scan_mode,
+        openai_api_key=openai_api_key,
+        account_company_name=account_company_name,
+    )
+
+
+def _process_page_rows_with_provider_result(
+    pdf_path: str,
+    *,
+    page_index: int,
+    scan_mode: str,
+    openai_api_key: str | None,
+    account_company_name: str | None,
+) -> PageProviderResult:
+    return process_page_rows_with_telemetry(
         pdf_path,
         page_index=page_index,
         scan_mode=scan_mode,
@@ -4598,9 +4615,14 @@ def _process_batch_job(batch_id: UUID, tenant_id, *, scan_run_id=None, scan_job_
         durable_page_tracking = scan_job_id is not None
         if durable_page_tracking:
             from app.services.scan_jobs import (
+                PageLeaseLost,
+                ScanJobCancelled,
+                claim_job_page,
+                complete_claimed_page,
+                ensure_page_lease_is_current,
                 get_job_page,
-                mark_page_completed,
-                mark_page_running,
+                mark_job_cancelled,
+                raise_if_job_cancelled,
             )
         _batch_perf_start = __import__("time").perf_counter()
         for file_index, invoice_file in enumerate(files, start=1):
@@ -4614,7 +4636,10 @@ def _process_batch_job(batch_id: UUID, tenant_id, *, scan_run_id=None, scan_job_
                 consecutive_page_timeouts = 0
                 for page_index in range(page_count):
                     job_page = None
+                    job_page_lease_token = None
+                    provider_telemetry: dict | None = None
                     if durable_page_tracking:
+                        raise_if_job_cancelled(db, scan_job_id)
                         job_page = get_job_page(db, job_id=scan_job_id, source_file_id=invoice_file.id, page_no=page_index + 1)
                         if job_page is not None and job_page.status == "completed":
                             existing_rows = db.query(InvoiceRow).filter(
@@ -4627,20 +4652,34 @@ def _process_batch_job(batch_id: UUID, tenant_id, *, scan_run_id=None, scan_job_
                             total_rows += existing_rows
                             continue
                         if job_page is not None:
-                            mark_page_running(db, job_page, worker_id=worker_id)
-                            db.commit()
+                            job_page = claim_job_page(
+                                db,
+                                job_id=scan_job_id,
+                                source_file_id=invoice_file.id,
+                                page_no=page_index + 1,
+                                worker_id=worker_id or "scan-worker",
+                            )
+                            if job_page is None:
+                                continue
+                            job_page_lease_token = job_page.lease_token
                     try:
                         _page_perf_start = __import__("time").perf_counter()
                         page_row_count_before = total_rows
                         pdf_path = str(materialize_invoice_file(invoice_file))
                         with perf_ctx.timed("extraction_provider"):
-                            row_payloads = _process_page_rows_with_timeout(
+                            provider_result = _process_page_rows_with_provider_result(
                                 pdf_path,
                                 page_index=page_index,
                                 scan_mode=batch.scan_mode or "summary",
                                 openai_api_key=settings.openai_api_key if settings.use_openai else None,
                                 account_company_name=account_company_name,
                             )
+                            row_payloads = provider_result.rows
+                            provider_telemetry = provider_result.telemetry
+                        if durable_page_tracking:
+                            raise_if_job_cancelled(db, scan_job_id)
+                            if job_page is not None:
+                                ensure_page_lease_is_current(db, page_id=job_page.id, lease_token=job_page_lease_token)
                         page_methods = sorted({str(_r.get("method_used") or "unknown").split("+")[0] for _r in row_payloads}) or ["no_rows"]
                         for _m in page_methods:
                             extraction_method_counts[_m] = extraction_method_counts.get(_m, 0) + 1
@@ -4886,7 +4925,14 @@ def _process_batch_job(batch_id: UUID, tenant_id, *, scan_run_id=None, scan_job_
                                             reasons.append(bcrs_reason)
                                         _r.review_reasons = "|".join(reasons)
                         if durable_page_tracking and job_page is not None:
-                            mark_page_completed(db, job_page, row_count=max(0, total_rows - page_row_count_before))
+                            if not complete_claimed_page(
+                                db,
+                                page_id=job_page.id,
+                                lease_token=job_page_lease_token,
+                                row_count=max(0, total_rows - page_row_count_before),
+                                provider_telemetry=provider_telemetry,
+                            ):
+                                raise PageLeaseLost("Page lease expired before page commit")
                         processed_pages += 1
                         # Per-page progress: direct UPDATE with stale-overwrite guard.
                         # WHERE page_count < processed_pages ensures a lower counter
@@ -4914,6 +4960,20 @@ def _process_batch_job(batch_id: UUID, tenant_id, *, scan_run_id=None, scan_job_
                         if "_page_perf_start" in locals():
                             perf_ctx.timings["total_page_processing"] = perf_ctx.timings.get("total_page_processing", 0.0) + (__import__("time").perf_counter() - _page_perf_start)
                         db.rollback()
+                        # fallback_row below uses tenant_id=_batch_tenant_id and company_id=_batch_company_id after rollback.
+                        if durable_page_tracking and page_error.__class__.__name__ == "ScanJobCancelled":
+                            scan_job = db.get(ScanJob, scan_job_id)
+                            mark_job_cancelled(db, scan_job)
+                            batch.status = "created"
+                            batch.notes = "Scan job cancelled before page commit"
+                            db.commit()
+                            return
+                        if durable_page_tracking and page_error.__class__.__name__ == "PageLeaseLost":
+                            logger.warning(
+                                "scan page lease lost batch=%s file_index=%d page=%d worker=%s",
+                                batch_id, file_index, page_index + 1, worker_id,
+                            )
+                            raise
                         is_page_timeout = isinstance(page_error, TimeoutError) or "timed out" in str(page_error).lower()
                         if is_page_timeout:
                             consecutive_page_timeouts += 1
@@ -4946,7 +5006,19 @@ def _process_batch_job(batch_id: UUID, tenant_id, *, scan_run_id=None, scan_job_
                         )
                         db.add(fallback_row)
                         if durable_page_tracking and job_page is not None:
-                            mark_page_completed(db, job_page, row_count=1)
+                            provider_telemetry = getattr(page_error, "provider_telemetry", None) or provider_telemetry or {
+                                "provider_name": "extractor",
+                                "provider_status": "timeout" if is_page_timeout else "error",
+                                "timeout_reason": str(page_error)[:255] if is_page_timeout else None,
+                            }
+                            if not complete_claimed_page(
+                                db,
+                                page_id=job_page.id,
+                                lease_token=job_page_lease_token,
+                                row_count=1,
+                                provider_telemetry=provider_telemetry,
+                            ):
+                                raise PageLeaseLost("Page lease expired before fallback commit")
                         _pct_err = int(min(100, round((processed_pages / total_target_pages) * 100))) if total_target_pages > 0 else 0
                         _note_err = (
                             f"Processing file {file_index}/{len(files)}: "
@@ -4989,6 +5061,15 @@ def _process_batch_job(batch_id: UUID, tenant_id, *, scan_run_id=None, scan_job_
                     db.commit()
             except Exception as file_error:
                 db.rollback()
+                if durable_page_tracking and file_error.__class__.__name__ == "ScanJobCancelled":
+                    scan_job = db.get(ScanJob, scan_job_id)
+                    mark_job_cancelled(db, scan_job)
+                    batch.status = "created"
+                    batch.notes = "Scan job cancelled"
+                    db.commit()
+                    return
+                if durable_page_tracking and file_error.__class__.__name__ == "PageLeaseLost":
+                    raise
                 # Direct UPDATE for file-error so a subsequent rollback only undoes
                 # this single statement and cannot roll back per-page progress commits.
                 db.execute(
